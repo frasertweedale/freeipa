@@ -17,9 +17,13 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import base64
 import collections
+import urllib
+import urlparse
 import xml.dom.minidom
 
+import gssapi
 import six
 # pylint: disable=import-error
 from six.moves.urllib.parse import urlencode
@@ -28,6 +32,7 @@ from six.moves.urllib.parse import urlencode
 from ipalib import api, errors
 from ipalib.util import create_https_connection
 from ipalib.errors import NetworkError
+from ipalib.request import context
 from ipalib.text import _
 from ipapython import ipautil
 from ipapython.ipa_log_manager import root_logger
@@ -145,17 +150,45 @@ def https_request(
     Perform a client authenticated HTTPS request
     """
 
+    use_gssapi = False  # FIXME to be based on domain level
+
     def connection_factory(host, port):
+        extra_kwargs = {}
+        if not use_gssapi:
+            extra_kwargs['client_certfile'] = client_certfile
+            extra_kwargs['client_keyfile'] = client_keyfile
         return create_https_connection(
             host, port,
             cafile=cafile,
-            client_certfile=client_certfile,
-            client_keyfile=client_keyfile,
             tls_version_min=api.env.tls_version_min,
-            tls_version_max=api.env.tls_version_max)
+            tls_version_max=api.env.tls_version_max,
+            **extra_kwargs)
 
     if body is None:
         body = urlencode(kw)
+
+    if use_gssapi:
+        authenticated_name = gssapi.Name(
+            getattr(context, 'principal'),
+            gssapi.NameType.kerberos_principal)
+        creds = gssapi.Credentials.acquire(
+            #store={'ccache': os.environ['KRB5CCNAME']}
+        ).creds
+        creds = creds.impersonate(name=authenticated_name)
+        service_name = gssapi.Name(
+            #'dogtag@{}'.format(host), gssapi.NameType.hostbased_service)
+            'HTTP@{}'.format(host), gssapi.NameType.hostbased_service)
+        ctx = gssapi.SecurityContext(name=service_name, creds=creds)
+        authdata = base64.b64encode(ctx.step())
+        headers = dict(headers or {})
+        headers['Authorization'] = 'Negotiate {}'.format(authdata)
+
+        parts = list(urlparse.urlsplit(url))
+        query_dict = urlparse.parse_qs(parts[3], keep_blank_values=True)
+        query_dict['gssapi'] = ''
+        parts[3] = urllib.urlencode(query_dict, doseq=True)
+        url = urlparse.urlunsplit(parts)
+
     return _httplib_request(
         'https', host, port, url, connection_factory, body,
         method=method, headers=headers)
