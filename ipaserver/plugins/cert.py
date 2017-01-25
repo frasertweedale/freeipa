@@ -40,7 +40,7 @@ from ipalib.crud import Create, PKQuery, Retrieve, Search
 from ipalib.frontend import Method, Object
 from ipalib.parameters import Bytes, DateTime, DNParam, DNSNameParam, Principal
 from ipalib.plugable import Registry
-from .virtual import VirtualCommand
+from .virtual import VirtualCommand, check_operation_access
 from .baseldap import pkey_to_value
 from .certprofile import validate_profile_id
 from .caacl import acl_evaluate
@@ -538,11 +538,15 @@ class cert_request(Create, BaseCertMethod, VirtualCommand):
     def execute(self, csr, all=False, raw=False, **kw):
         ca_enabled_check(self.api)
 
-        ldap = self.api.Backend.ldap2
-        realm = unicode(self.api.env.realm)
         add = kw.get('add')
         request_type = kw.get('request_type')
         profile_id = kw.get('profile_id', self.Backend.ra.DEFAULT_PROFILE)
+
+        try:
+            csr_obj = pkcs10.load_certificate_request(csr)
+        except ValueError as e:
+            msg = _("Failure decoding Certificate Signing Request: %s") % e
+            raise errors.CertificateOperationError(error=msg)
 
         # Check that requested authority exists (done before CA ACL
         # enforcement so that user gets better error message if
@@ -552,238 +556,22 @@ class cert_request(Create, BaseCertMethod, VirtualCommand):
         ca_obj = api.Command.ca_show(ca)['result']
         ca_id = ca_obj['ipacaid'][0]
 
-        """
-        Access control is partially handled by the ACI titled
-        'Hosts can modify service userCertificate'. This is for the case
-        where a machine binds using a host/ prinicpal. It can only do the
-        request if the target hostname is in the managedBy attribute which
-        is managed using the add/del member commands.
-
-        Binding with a user principal one needs to be in the request_certs
-        taskgroup (directly or indirectly via role membership).
-        """
-
         principal = kw.get('principal')
-        principal_string = unicode(principal)
-        principal_type = principal_to_principal_type(principal)
-
-        if principal_type == KRBTGT:
-            if profile_id != self.Backend.ra.KDC_PROFILE:
-                raise errors.ACIError(
-                    info=_("krbtgt certs can use only the %s profile") % (
-                           self.Backend.ra.KDC_PROFILE))
-
         bind_principal = kerberos.Principal(getattr(context, 'principal'))
-        bind_principal_string = unicode(bind_principal)
-        bind_principal_type = principal_to_principal_type(bind_principal)
 
-        if (bind_principal_string != principal_string and
-                bind_principal_type != HOST):
-            # Can the bound principal request certs for another principal?
-            self.check_access()
-
-        try:
-            self.check_access("request certificate ignore caacl")
-            bypass_caacl = True
-        except errors.ACIError:
-            bypass_caacl = False
-
-        if not bypass_caacl:
-            if principal_type == KRBTGT:
-                ca_kdc_check(ldap, bind_principal.hostname)
-            else:
-                caacl_check(principal, ca, profile_id)
-
-        try:
-            csr_obj = pkcs10.load_certificate_request(csr)
-        except ValueError as e:
-            raise errors.CertificateOperationError(
-                error=_("Failure decoding Certificate Signing Request: %s") % e)
-
-        try:
-            ext_san = csr_obj.extensions.get_extension_for_oid(
-                cryptography.x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
-        except cryptography.x509.extensions.ExtensionNotFound:
-            ext_san = None
-
-        dn = None
-        principal_obj = None
-        # See if the service exists and punt if it doesn't and we aren't
-        # going to add it
-        try:
-            if principal_type == SERVICE:
-                principal_obj = api.Command['service_show'](principal_string, all=True)
-            elif principal_type == KRBTGT:
-                # Allow only our own realm krbtgt for now, no trusted realm's.
-                if principal != kerberos.Principal((u'krbtgt', realm),
-                                                   realm=realm):
-                    raise errors.NotFound("Not our realm's krbtgt")
-            elif principal_type == HOST:
-                principal_obj = api.Command['host_show'](
-                    principal.hostname, all=True)
-            elif principal_type == USER:
-                principal_obj = api.Command['user_show'](
-                    principal.username, all=True)
-        except errors.NotFound as e:
-            if add:
-                if principal_type == SERVICE:
-                    principal_obj = api.Command['service_add'](
-                        principal_string, force=True)
+        # If subject principal is a service that does not exist,
+        # and if 'add' flag given, add the service.
+        if principal.is_service and not principal.is_host:
+            try:
+                api.Command['service_show'](unicode(principal))
+            except errors.NotFound:
+                if add:
+                    api.Command['service_add'](unicode(principal), force=True)
                 else:
-                    princtype_str = PRINCIPAL_TYPE_STRING_MAP[principal_type]
-                    raise errors.OperationNotSupportedForPrincipalType(
-                        operation=_("'add' option"),
-                        principal_type=princtype_str)
-            else:
-                raise errors.NotFound(
-                    reason=_("The principal for this request doesn't exist."))
-        if principal_obj:
-            principal_obj = principal_obj['result']
-            dn = principal_obj['dn']
+                    raise
 
-        # Ensure that the DN in the CSR matches the principal
-        #
-        # We only look at the "most specific" CN value
-        cns = csr_obj.subject.get_attributes_for_oid(
-                cryptography.x509.oid.NameOID.COMMON_NAME)
-        if len(cns) == 0:
-            raise errors.ValidationError(name='csr',
-                error=_("No Common Name was found in subject of request."))
-        cn = cns[-1].value  # "most specific" is end of list
-
-        if principal_type in (SERVICE, HOST):
-            if not _dns_name_matches_principal(cn, principal, principal_obj):
-                raise errors.ValidationError(
-                    name='csr',
-                    error=_(
-                        "hostname in subject of request '%(cn)s' does not "
-                        "match name or aliases of principal '%(principal)s'"
-                        ) % dict(cn=cn, principal=principal))
-        elif principal_type == KRBTGT and not bypass_caacl:
-            if cn.lower() != bind_principal.hostname.lower():
-                raise errors.ACIError(
-                    info=_("hostname in subject of request '%(cn)s' "
-                           "does not match principal hostname "
-                           "'%(hostname)s'") % dict(
-                                cn=cn, hostname=bind_principal.hostname))
-        elif principal_type == USER:
-            # check user name
-            if cn != principal.username:
-                raise errors.ValidationError(
-                    name='csr',
-                    error=_("DN commonName does not match user's login")
-                )
-
-            # check email address
-            #
-            # fail if any email addr from DN does not appear in ldap entry
-            email_addrs = csr_obj.subject.get_attributes_for_oid(
-                    cryptography.x509.oid.NameOID.EMAIL_ADDRESS)
-            if len(set(email_addrs) - set(principal_obj.get('mail', []))) > 0:
-                raise errors.ValidationError(
-                    name='csr',
-                    error=_(
-                        "DN emailAddress does not match "
-                        "any of user's email addresses")
-                )
-
-        if principal_type != KRBTGT:
-            # We got this far so the principal entry exists, can we write it?
-            if not ldap.can_write(dn, "usercertificate"):
-                raise errors.ACIError(
-                    info=_("Insufficient 'write' privilege to the "
-                           "'userCertificate' attribute of entry '%s'.") % dn)
-
-        # Validate the subject alt name, if any
-        generalnames = []
-        if ext_san is not None:
-            generalnames = x509.process_othernames(ext_san.value)
-        for gn in generalnames:
-            if isinstance(gn, cryptography.x509.general_name.DNSName):
-                if principal.is_user:
-                    raise errors.ValidationError(
-                        name='csr',
-                        error=_(
-                            "subject alt name type %s is forbidden "
-                            "for user principals") % "DNSName"
-                    )
-
-                name = gn.value
-
-                if _dns_name_matches_principal(name, principal, principal_obj):
-                    continue  # nothing more to check for this alt name
-
-                # no match yet; check for an alternative principal with
-                # same realm and service type as subject principal.
-                components = list(principal.components)
-                components[-1] = name
-                alt_principal = kerberos.Principal(components, principal.realm)
-                alt_principal_obj = None
-                try:
-                    if principal_type == HOST:
-                        alt_principal_obj = api.Command['host_show'](
-                            name, all=True)
-                    elif principal_type == KRBTGT:
-                        alt_principal = kerberos.Principal(
-                            (u'host', name), principal.realm)
-                    elif principal_type == SERVICE:
-                        alt_principal_obj = api.Command['service_show'](
-                            alt_principal, all=True)
-                except errors.NotFound:
-                    # We don't want to issue any certificates referencing
-                    # machines we don't know about. Nothing is stored in this
-                    # host record related to this certificate.
-                    raise errors.NotFound(reason=_('The service principal for '
-                        'subject alt name %s in certificate request does not '
-                        'exist') % name)
-
-                if alt_principal_obj is not None:
-                    # we found an alternative principal;
-                    # now check write access and caacl
-                    altdn = alt_principal_obj['result']['dn']
-                    if not ldap.can_write(altdn, "usercertificate"):
-                        raise errors.ACIError(info=_(
-                            "Insufficient privilege to create a certificate "
-                            "with subject alt name '%s'.") % name)
-                if not bypass_caacl:
-                    if principal_type == KRBTGT:
-                        ca_kdc_check(ldap, alt_principal.hostname)
-                    else:
-                        caacl_check(alt_principal, ca, profile_id)
-
-            elif isinstance(gn, (x509.KRB5PrincipalName, x509.UPN)):
-                if principal_type == KRBTGT:
-                        principal_obj = dict()
-                        principal_obj['krbprincipalname'] = [
-                            kerberos.Principal((u'krbtgt', realm), realm)]
-                if not _principal_name_matches_principal(
-                        gn.name, principal_obj):
-                    raise errors.ValidationError(
-                        name='csr',
-                        error=_(
-                            "Principal '%s' in subject alt name does not "
-                            "match requested principal") % gn.name)
-            elif isinstance(gn, cryptography.x509.general_name.RFC822Name):
-                if principal_type == USER:
-                    if principal_obj and gn.value not in principal_obj.get(
-                            'mail', []):
-                        raise errors.ValidationError(
-                            name='csr',
-                            error=_(
-                                "RFC822Name does not match "
-                                "any of user's email addresses")
-                        )
-                else:
-                    raise errors.ValidationError(
-                        name='csr',
-                        error=_(
-                            "subject alt name type %s is forbidden "
-                            "for non-user principals") % "RFC822Name"
-                    )
-            else:
-                raise errors.ACIError(
-                    info=_("Subject alt name type %s is forbidden")
-                    % type(gn).__name__)
+        authorise_and_validate_cert_request(
+            bind_principal, principal, ca, profile_id, csr_obj)
 
         # Request the certificate
         try:
@@ -813,8 +601,9 @@ class cert_request(Create, BaseCertMethod, VirtualCommand):
         if store and 'certificate' in result:
             cert = str(result.get('certificate'))
             kwargs = dict(addattr=u'usercertificate={}'.format(cert))
+            principal_type = principal_to_principal_type(principal)
             if principal_type == SERVICE:
-                api.Command['service_mod'](principal_string, **kwargs)
+                api.Command['service_mod'](unicode(principal), **kwargs)
             elif principal_type == HOST:
                 api.Command['host_mod'](principal.hostname, **kwargs)
             elif principal_type == USER:
@@ -838,6 +627,226 @@ def principal_to_principal_type(principal):
         return KRBTGT
     else:
         return SERVICE
+
+
+def authorise_and_validate_cert_request(
+        bind_principal, principal, ca, profile_id, csr):
+    """
+    :param bind_principal: bind principal as ``Principal``
+    :param principal: subject principal as ``Principal``
+    :param ca: CA common name
+    :param profile_id: profile ID
+    :param csr: python-cryptography CertificateSigningRequest object
+
+    :raises: ``ACIError`` if issuance not authorised
+    :raises: ``NotFound`` if subject principal not found
+
+    Access control is partially handled by the ACI titled 'Hosts can
+    modify service userCertificate'. This is for the case where a
+    machine binds using a host/ prinicpal. It can only do the
+    request if the target hostname is in the managedBy attribute
+    which is managed using the add/del member commands.
+
+    Binding with a user principal one needs to be in the
+    request_certs taskgroup (directly or indirectly via role
+    membership).
+
+    """
+    principal_string = unicode(principal)
+    principal_type = principal_to_principal_type(principal)
+
+    if principal_type == KRBTGT and profile_id != api.Backend.ra.KDC_PROFILE:
+        raise errors.ACIError(
+            info=_("krbtgt certs can use only the %s profile") % (
+                   api.Backend.ra.KDC_PROFILE))
+
+    bind_principal_string = unicode(bind_principal)
+    bind_principal_type = principal_to_principal_type(bind_principal)
+
+    if (bind_principal_string != principal_string and
+            bind_principal_type != HOST):
+        # Can the bound principal request certs for another principal?
+        check_operation_access(api, cert_request.operation)
+
+    try:
+        check_operation_access(api, "request certificate ignore caacl")
+        bypass_caacl = True
+    except errors.ACIError:
+        bypass_caacl = False
+
+    if not bypass_caacl:
+        if principal_type == KRBTGT:
+            ca_kdc_check(api.Backend.ldap2, bind_principal.hostname)
+        else:
+            caacl_check(principal, ca, profile_id)
+
+    try:
+        ext_san = csr.extensions.get_extension_for_oid(
+            cryptography.x509.oid.ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+    except cryptography.x509.extensions.ExtensionNotFound:
+        ext_san = None
+
+    if principal_type == SERVICE:
+        principal_obj = api.Command['service_show'](principal_string, all=True)
+    elif principal_type == KRBTGT:
+        # Allow only our own realm krbtgt for now, no trusted realm's.
+        realm = unicode(api.env.realm)
+        if principal != kerberos.Principal((u'krbtgt', realm), realm=realm):
+            raise errors.NotFound("Not our realm's krbtgt")
+    elif principal_type == HOST:
+        principal_obj = api.Command['host_show'](principal.hostname, all=True)
+    elif principal_type == USER:
+        principal_obj = api.Command['user_show'](principal.username, all=True)
+
+    principal_obj = principal_obj['result']
+    dn = principal_obj['dn']
+
+    # Ensure that the DN in the CSR matches the principal
+    #
+    # We only look at the "most specific" CN value
+    cns = csr.subject.get_attributes_for_oid(
+            cryptography.x509.oid.NameOID.COMMON_NAME)
+    if len(cns) == 0:
+        raise errors.ValidationError(
+            name='csr',
+            error=_("No Common Name was found in subject of request."))
+    cn = cns[-1].value  # "most specific" is end of list
+
+    if principal_type in (SERVICE, HOST):
+        if not _dns_name_matches_principal(cn, principal, principal_obj):
+            raise errors.ValidationError(
+                name='csr',
+                error=_(
+                    "hostname in subject of request '%(cn)s' does not "
+                    "match name or aliases of principal '%(principal)s'"
+                    ) % dict(cn=cn, principal=principal))
+    elif principal_type == KRBTGT and not bypass_caacl:
+        if cn.lower() != bind_principal.hostname.lower():
+            raise errors.ACIError(
+                info=_("hostname in subject of request '%(cn)s' "
+                       "does not match principal hostname "
+                       "'%(hostname)s'") % dict(
+                            cn=cn, hostname=bind_principal.hostname))
+    elif principal_type == USER:
+        # check user name
+        if cn != principal.username:
+            raise errors.ValidationError(
+                name='csr',
+                error=_("DN commonName does not match user's login")
+            )
+
+        # check email address
+        #
+        # fail if any email addr from DN does not appear in ldap entry
+        email_addrs = csr.subject.get_attributes_for_oid(
+                cryptography.x509.oid.NameOID.EMAIL_ADDRESS)
+        if len(set(email_addrs) - set(principal_obj.get('mail', []))) > 0:
+            raise errors.ValidationError(
+                name='csr',
+                error=_(
+                    "DN emailAddress does not match "
+                    "any of user's email addresses")
+            )
+
+    if principal_type != KRBTGT:
+        # We got this far so the principal entry exists, can operator write it?
+        if not api.Backend.ldap2.can_write(dn, "usercertificate"):
+            raise errors.ACIError(
+                info=_("Insufficient 'write' privilege to the "
+                       "'userCertificate' attribute of entry '%s'.") % dn)
+
+    # Validate the subject alt name, if any
+    generalnames = []
+    if ext_san is not None:
+        generalnames = x509.process_othernames(ext_san.value)
+    for gn in generalnames:
+        if isinstance(gn, cryptography.x509.general_name.DNSName):
+            if principal.is_user:
+                raise errors.ValidationError(
+                    name='csr',
+                    error=_(
+                        "subject alt name type %s is forbidden "
+                        "for user principals") % "DNSName"
+                )
+
+            name = gn.value
+
+            if _dns_name_matches_principal(name, principal, principal_obj):
+                continue  # nothing more to check for this alt name
+
+            # no match yet; check for an alternative principal with
+            # same realm and service type as subject principal.
+            components = list(principal.components)
+            components[-1] = name
+            alt_principal = kerberos.Principal(components, principal.realm)
+            alt_principal_obj = None
+            try:
+                if principal_type == HOST:
+                    alt_principal_obj = api.Command['host_show'](
+                        name, all=True)
+                elif principal_type == KRBTGT:
+                    alt_principal = kerberos.Principal(
+                        (u'host', name), principal.realm)
+                elif principal_type == SERVICE:
+                    alt_principal_obj = api.Command['service_show'](
+                        alt_principal, all=True)
+            except errors.NotFound:
+                # We don't want to issue any certificates referencing
+                # machines we don't know about. Nothing is stored in this
+                # host record related to this certificate.
+                msg = _(
+                    'The service principal for subject alt name %s '
+                    'in certificate request does not exist') % name
+                raise errors.NotFound(reason=msg)
+
+            if alt_principal_obj is not None:
+                # we found an alternative principal;
+                # now check write access and caacl
+                if not api.Backend.ldap2.can_write(
+                        alt_principal_obj['result']['dn'],
+                        "usercertificate"):
+                    raise errors.ACIError(info=_(
+                        "Insufficient privilege to create a certificate "
+                        "with subject alt name '%s'.") % name)
+            if not bypass_caacl:
+                if principal_type == KRBTGT:
+                    ca_kdc_check(api.Backend.ldap2, alt_principal.hostname)
+                else:
+                    caacl_check(alt_principal, ca, profile_id)
+
+        elif isinstance(gn, (x509.KRB5PrincipalName, x509.UPN)):
+            if principal_type == KRBTGT:
+                    principal_obj = dict()
+                    principal_obj['krbprincipalname'] = [
+                        kerberos.Principal((u'krbtgt', realm), realm)]
+            if not _principal_name_matches_principal(
+                    gn.name, principal_obj):
+                raise errors.ValidationError(
+                    name='csr',
+                    error=_(
+                        "Principal '%s' in subject alt name does not "
+                        "match requested principal") % gn.name)
+        elif isinstance(gn, cryptography.x509.general_name.RFC822Name):
+            if principal_type == USER:
+                if principal_obj and gn.value not in principal_obj.get(
+                        'mail', []):
+                    raise errors.ValidationError(
+                        name='csr',
+                        error=_(
+                            "RFC822Name does not match "
+                            "any of user's email addresses")
+                    )
+            else:
+                raise errors.ValidationError(
+                    name='csr',
+                    error=_(
+                        "subject alt name type %s is forbidden "
+                        "for non-user principals") % "RFC822Name"
+                )
+        else:
+            raise errors.ACIError(
+                info=_("Subject alt name type %s is forbidden")
+                % type(gn).__name__)
 
 
 def _dns_name_matches_principal(name, principal, principal_obj):
