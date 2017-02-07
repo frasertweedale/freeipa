@@ -1467,8 +1467,9 @@ class ra(rabase.rabase, RestClient):
         return cmd_result
 
     def request_certificate(
-            self, csr, profile_id, ca_id, request_type='pkcs10'):
+            self, subject, csr, profile_id, ca_id, request_type='pkcs10'):
         """
+        :param subject: The subject ``Principal``.
         :param csr: The certificate signing request.
         :param profile_id: The profile to use for the request.
         :param ca_id: The Authority ID to send request to. ``None`` is allowed.
@@ -1511,8 +1512,13 @@ class ra(rabase.rabase, RestClient):
         )
 
         path = 'certrequests'
+        params = {}
         if ca_id:
-            path += '?issuer-id={}'.format(ca_id)
+            params['issuer-id'] = ca_id
+        if subject:
+            params['user-data'] = subject
+        if params:
+            path = '{}?{}'.format(path, urllib.parse.urlencode(params))
 
         _http_status, _http_headers, http_body = self._ssldo(
             'POST', path,

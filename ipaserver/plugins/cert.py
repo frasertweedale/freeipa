@@ -581,7 +581,11 @@ class cert_request(Create, BaseCertMethod, VirtualCommand):
             csr_pem = csr_obj.public_bytes(
                 serialization.Encoding.PEM).decode('utf-8')
             result = self.Backend.ra.request_certificate(
-                csr_pem, profile_id, ca_id, request_type=request_type)
+                principal,
+                csr_pem,
+                profile_id,
+                ca_id,
+                request_type=request_type)
         except errors.HTTPRequestError as e:
             if e.status == 409:  # pylint: disable=no-member
                 raise errors.CertificateOperationError(
