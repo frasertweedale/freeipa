@@ -1,0 +1,79 @@
+#!/usr/bin/python2
+
+from __future__ import print_function
+
+import json
+import os
+import sys
+import traceback
+
+import gssapi
+import six
+
+from ipalib import api, errors, pkcs10
+from ipaplatform.paths import paths
+from ipapython.ipautil import private_ccache
+from ipapython.kerberos import Principal
+
+api.bootstrap(in_server=True, context='dogtag')
+api.finalize()
+
+from ipaserver.plugins.cert import authorise_and_validate_cert_request
+
+
+def main():
+    try:
+        authorise_and_validate()
+    except Exception as e:
+        # print exception to stderr; Dogtag will log it
+        traceback.print_exc()
+
+        if isinstance(e, errors.PublicError):
+            error = e
+        else:
+            error = errors.InternalError()
+    else:
+        error = None
+
+    if error:
+        print(json.dumps(dict(
+            code=error.errno,
+            message=error.strerror,
+            data=error.kw,
+            name=six.text_type(error.__class__.__name__),
+        )))
+        sys.exit(1)
+
+
+def authorise_and_validate():
+    # read info from environment
+    operator_string = six.text_type(os.environ['DOGTAG_USER'])
+    operator_principal = Principal(operator_string)
+
+    subject_principal = Principal(
+        six.text_type(os.environ['DOGTAG_USER_DATA']))
+
+    profile_id = six.text_type(os.environ['DOGTAG_PROFILE_ID'])
+
+    ca_id = six.text_type(os.environ['DOGTAG_AUTHORITY_ID'])
+    cas = api.Command.ca_find(ipacaid=ca_id)['result']
+    if len(cas) == 0:
+        raise errors.NotFound('CA not found')
+    ca_obj = cas[0]
+    ca_cn = ca_obj['cn']
+
+    csr_pem = os.environ['DOGTAG_CERT_REQUEST']
+    csr = pkcs10.load_certificate_request(csr_pem)
+
+    # connect to LDAP
+    name = gssapi.Name(operator_string, gssapi.NameType.kerberos_principal)
+    creds = gssapi.Credentials.acquire().creds
+    creds.impersonate(name=name)
+    api.Backend.ldap2.connect(ccache=os.environ['KRB5CCNAME'])
+
+    authorise_and_validate_cert_request(
+        operator_principal, subject_principal, ca_cn, profile_id, csr)
+
+
+if __name__ == '__main__':
+    main()
