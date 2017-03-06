@@ -239,6 +239,7 @@ digits and nothing else follows.
 
 '''
 
+import collections
 import datetime
 import json
 from lxml import etree
@@ -1547,8 +1548,7 @@ class ra(rabase.rabase, RestClient):
         certinfo = entries[0]
 
         if certinfo['requestStatus'] != 'complete':
-            raise errors.CertificateOperationError(
-                    error=certinfo.get('errorMessage'))
+            handle_failed_issuance(self.__host, certinfo)
 
         if 'certId' in certinfo:
             cmd_result = self.get_certificate(certinfo['certId'])
@@ -1831,6 +1831,44 @@ class ra(rabase.rabase, RestClient):
             results.append(response_request)
 
         return results
+
+
+def handle_failed_issuance(server, result):
+    """
+    Raise appropriate exception when certificate issuance failed.
+
+    If request validation was performed by
+    ipa-pki-validate-cert-request (invoked by Dogtag), the message
+    may be a ``PublicError`` serialised as JSON.  Attempt to decode
+    the message as JSON and instantiate the exception, otherwise
+    raise ``CertificateOperationError``.
+
+    """
+    # decode JSON
+    msg = result.get('errorMessage')
+    try:
+        obj = json.loads(msg)
+    except (TypeError, ValueError):
+        raise errors.CertificateOperationError(error=msg)
+
+    # see if it looks like a serialised PublicError
+    if not (isinstance(obj, collections.Mapping) and
+            all(k in obj for k in {'code', 'data', 'message'})):
+        raise errors.CertificateOperationError(error=msg)
+
+    # instantiate error
+    try:
+        error_class = errors.errors_by_code[obj['code']]
+    except KeyError:
+        raise errors.UnknownError(
+            code=obj.get('code'),
+            error=obj.get('message'),
+            server=server,
+        )
+    else:
+        kw = obj.get('data', {})
+        kw['message'] = obj['message']
+        raise error_class(**kw)
 
 
 # ----------------------------------------------------------------------------
