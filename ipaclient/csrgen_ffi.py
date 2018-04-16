@@ -59,6 +59,7 @@ void EVP_PKEY_free(EVP_PKEY *pkey);
 /* openssl/x509.h */
 typedef ... ASN1_INTEGER;
 typedef ... ASN1_BIT_STRING;
+typedef ... ASN1_OBJECT;
 typedef ... X509;
 typedef ... X509_ALGOR;
 typedef ... X509_CRL;
@@ -86,11 +87,14 @@ X509_REQ *X509_REQ_new(void);
 void X509_REQ_free(X509_REQ *);
 EVP_PKEY *d2i_PUBKEY_bio(BIO *bp, EVP_PKEY **a);
 int X509_REQ_set_pubkey(X509_REQ *x, EVP_PKEY *pkey);
-int X509_NAME_add_entry_by_txt(X509_NAME *name, const char *field, int type,
+int X509_NAME_add_entry_by_OBJ(X509_NAME *name, const ASN1_OBJECT *obj, int type,
                                const unsigned char *bytes, int len, int loc,
                                int set);
 int X509_NAME_entry_count(X509_NAME *name);
-int i2d_X509_REQ_INFO(X509_REQ_INFO *a, unsigned char **out); \
+int i2d_X509_REQ_INFO(X509_REQ_INFO *a, unsigned char **out);
+
+/* openssl/objects.h */
+ASN1_OBJECT *OBJ_txt2obj(const char *s, int no_name);
 
 /* openssl/x509v3.h */
 typedef ... X509V3_CONF_METHOD;
@@ -154,12 +158,15 @@ X509_REQ_free = _libcrypto.X509_REQ_free
 X509_REQ_set_pubkey = _libcrypto.X509_REQ_set_pubkey
 d2i_PUBKEY_bio = _libcrypto.d2i_PUBKEY_bio
 i2d_X509_REQ_INFO = _libcrypto.i2d_X509_REQ_INFO
-X509_NAME_add_entry_by_txt = _libcrypto.X509_NAME_add_entry_by_txt
+X509_NAME_add_entry_by_OBJ = _libcrypto.X509_NAME_add_entry_by_OBJ
 X509_NAME_entry_count = _libcrypto.X509_NAME_entry_count
 
 
 def X509_REQ_get_subject_name(req):
     return req.req_info.subject
+
+# openssl/objects.h
+OBJ_txt2obj = _libcrypto.OBJ_txt2obj
 
 # openssl/evp.h
 EVP_PKEY_free = _libcrypto.EVP_PKEY_free
@@ -209,8 +216,23 @@ def _parse_dn_section(subj, dn_sk):
             mval = -1
         else:
             mval = 0
-        if not X509_NAME_add_entry_by_txt(
-                subj, rdn_type, MBSTRING_UTF8,
+
+        # convert rdn_type to an OID
+        #
+        # OpenSSL is fussy about the case of the string.  For example,
+        # lower-case 'o' (for "organization name") is not recognised.
+        # Therefore, try to convert the given string into an OID.  If
+        # that fails, convert it upper case and try again.
+        #
+        oid = OBJ_txt2obj(rdn_type, 0)
+        if oid == NULL:
+            oid = OBJ_txt2obj(rdn_type.upper(), 0)
+        if oid == NULL:
+            raise errors.CSRTemplateError(
+                reason='unrecognised attribute type: {}'.format(rdn_type))
+
+        if not X509_NAME_add_entry_by_OBJ(
+                subj, oid, MBSTRING_UTF8,
                 _ffi.cast("unsigned char *", v.value), -1, -1, mval):
             _raise_openssl_errors()
 

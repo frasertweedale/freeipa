@@ -2,14 +2,23 @@
 # Copyright (C) 2016  FreeIPA Contributors see COPYING for license
 #
 
+import base64
 import os
 import pytest
 
-from ipaclient import csrgen
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography import x509
+
+from ipaclient import csrgen, csrgen_ffi
 from ipalib import errors
+from ipapython.dn import AVA, DN
 
 BASE_DIR = os.path.dirname(__file__)
 CSR_DATA_DIR = os.path.join(BASE_DIR, 'data', 'test_csrgen')
+
+CN = x509.NameOID.COMMON_NAME
+O = x509.NameOID.ORGANIZATION_NAME
 
 
 @pytest.fixture
@@ -200,6 +209,59 @@ class test_CSRGenerator(object):
                 CSR_DATA_DIR, 'configs', 'caIPAserviceCert.conf')) as f:
             expected_script = f.read()
         assert script == expected_script
+
+    def test_works_with_lowercase_attr_type_shortname(self, generator):
+        principal = {
+            'uid': ['testuser'],
+            'mail': ['testuser@example.com'],
+        }
+        template_env = {
+            'ipacertificatesubjectbase': [
+                'o=DOMAIN.EXAMPLE.COM'  # lower-case attr type shortname
+            ],
+        }
+        config = generator.csr_config(principal, template_env, 'userCert')
+
+        key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend(),
+        )
+        adaptor = csrgen.OpenSSLAdaptor(key=key)
+
+        reqinfo = bytes(csrgen_ffi.build_requestinfo(
+            config.encode('utf-8'), adaptor.get_subject_public_key_info()))
+        csr_der = adaptor.sign_csr(reqinfo)
+        csr = x509.load_der_x509_csr(csr_der, default_backend())
+        assert csr.subject.get_attributes_for_oid(CN) \
+                == [x509.NameAttribute(CN, u'testuser')]
+        assert csr.subject.get_attributes_for_oid(O) \
+                == [x509.NameAttribute(O, u'DOMAIN.EXAMPLE.COM')]
+
+    def test_unrecognised_attr_type_raises(self, generator):
+        principal = {
+            'uid': ['testuser'],
+            'mail': ['testuser@example.com'],
+        }
+        template_env = {
+            'ipacertificatesubjectbase': [
+                'X=DOMAIN.EXAMPLE.COM'  # unrecognised attr type
+            ],
+        }
+        config = generator.csr_config(principal, template_env, 'userCert')
+
+        key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend(),
+        )
+        adaptor = csrgen.OpenSSLAdaptor(key=key)
+
+        with pytest.raises(
+                errors.CSRTemplateError,
+                message='unrecognised attribute type: X'):
+            csrgen_ffi.build_requestinfo(
+                config.encode('utf-8'), adaptor.get_subject_public_key_info())
 
 
 class test_rule_handling(object):
