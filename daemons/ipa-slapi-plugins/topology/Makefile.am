@@ -1,17 +1,16 @@
 NULL =
 
-PLUGIN_COMMON_DIR=../common
+PLUGIN_COMMON_DIR = $(srcdir)/../common
 
 AM_CPPFLAGS =							\
-	-I.							\
 	-I$(srcdir)						\
 	-I$(PLUGIN_COMMON_DIR)					\
-	-I/usr/include/dirsrv					\
 	-DPREFIX=\""$(prefix)"\" 				\
 	-DBINDIR=\""$(bindir)"\"				\
 	-DLIBDIR=\""$(libdir)"\" 				\
 	-DLIBEXECDIR=\""$(libexecdir)"\"			\
 	-DDATADIR=\""$(datadir)"\"				\
+	$(DIRSRV_CFLAGS)					\
 	$(LDAP_CFLAGS)					\
 	$(WARN_CFLAGS)						\
 	$(NULL)
@@ -22,6 +21,7 @@ plugin_LTLIBRARIES = 			\
 	$(NULL)
 
 libtopology_la_SOURCES = 		\
+	topology.h	\
 	topology_agmt.c	\
 	topology_init.c	\
 	topology_cfg.c	\
@@ -42,10 +42,5 @@ app_DATA =			\
 	$(NULL)
 
 EXTRA_DIST =			\
-	README			\
 	$(app_DATA)		\
 	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	Makefile.in

@@ -31,16 +31,17 @@ import base64
 import pytest
 
 from ipapython import ipautil
-from ipalib import api, errors, x509
+from ipalib import api, errors, messages
 from ipapython.dn import DN
 from ipapython.dnsutil import DNSName
+from ipatests.test_util import yield_fixture
 from ipatests.test_xmlrpc.xmlrpc_test import (XMLRPC_test,
     fuzzy_uuid, fuzzy_digits, fuzzy_hash, fuzzy_date, fuzzy_issuer,
     fuzzy_hex, raises_exact)
 from ipatests.test_xmlrpc.test_user_plugin import get_group_dn
 from ipatests.test_xmlrpc import objectclasses
 from ipatests.test_xmlrpc.tracker.host_plugin import HostTracker
-from ipatests.test_xmlrpc.testcert import get_testcert
+from ipatests.test_xmlrpc.testcert import get_testcert, subject_base
 from ipatests.util import assert_deepequal
 from ipaplatform.paths import paths
 
@@ -84,7 +85,7 @@ ipv6_fromip_ptr_dnsname = DNSName(ipv6_fromip_ptr)
 ipv6_fromip_ptr_dn = DN(('idnsname', ipv6_fromip_ptr), revipv6zone_dn)
 
 sshpubkey = u'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDGAX3xAeLeaJggwTqMjxNwa6XHBUAikXPGMzEpVrlLDCZtv00djsFTBi38PkgxBJVkgRWMrcBsr/35lq7P6w8KGIwA8GI48Z0qBS2NBMJ2u9WQ2hjLN6GdMlo77O0uJY3251p12pCVIS/bHRSq8kHO2No8g7KA9fGGcagPfQH+ee3t7HUkpbQkFTmbPPN++r3V8oVUk5LxbryB3UIIVzNmcSIn3JrXynlvui4MixvrtX6zx+O/bBo68o8/eZD26QrahVbA09fivrn/4h3TM019Eu/c2jOdckfU3cHUV/3Tno5d6JicibyaoDDK7S/yjdn5jhaz8MSEayQvFkZkiF0L public key test'
-sshpubkeyfp = u'13:67:6B:BF:4E:A2:05:8E:AE:25:8B:A1:31:DE:6F:1B public key test (ssh-rsa)'
+sshpubkeyfp = u'SHA256:cStA9o5TRSARbeketEOooMUMSWRSsArIAXloBZ4vNsE public key test (ssh-rsa)'
 
 user1 = u'tuser1'
 user2 = u'tuser2'
@@ -96,8 +97,11 @@ hostgroup1 = u'testhostgroup1'
 hostgroup1_dn = DN(('cn',hostgroup1),('cn','hostgroups'),('cn','accounts'),
                     api.env.basedn)
 
-host_cert = get_testcert(DN(('CN', api.env.host), x509.subject_base()),
+host_cert = get_testcert(DN(('CN', api.env.host), subject_base()),
                          'host/%s@%s' % (api.env.host, api.env.realm))
+
+missingrevzone = u'22.30.16.172.in-addr.arpa.'
+ipv4_in_missingrevzone_ip = u'172.16.30.22'
 
 
 @pytest.fixture(scope='class')
@@ -115,6 +119,12 @@ def host2(request):
 @pytest.fixture(scope='class')
 def host3(request):
     tracker = HostTracker(name=u'testhost3')
+    return tracker.make_fixture(request)
+
+
+@pytest.fixture(scope='class')
+def host4(request):
+    tracker = HostTracker(name=u'testhost4')
     return tracker.make_fixture(request)
 
 
@@ -232,11 +242,11 @@ class TestCRUD(XMLRPC_test):
                         description=[u'Updated host 1'],
                         usercertificate=[base64.b64decode(host_cert)],
                         issuer=fuzzy_issuer,
-                        md5_fingerprint=fuzzy_hash,
                         serial_number=fuzzy_digits,
                         serial_number_hex=fuzzy_hex,
                         sha1_fingerprint=fuzzy_hash,
-                        subject=DN(('CN', api.env.host), x509.subject_base()),
+                        sha256_fingerprint=fuzzy_hash,
+                        subject=DN(('CN', api.env.host), subject_base()),
                         valid_not_before=fuzzy_date,
                         valid_not_after=fuzzy_date,
                     ))
@@ -505,7 +515,7 @@ class TestValidation(XMLRPC_test):
         ), result)
 
 
-@pytest.yield_fixture
+@yield_fixture
 def keytabname(request):
     keytabfd, keytabname = tempfile.mkstemp()
     try:
@@ -589,7 +599,99 @@ class TestHostFalsePwdChange(XMLRPC_test):
             command()
 
 
-@pytest.yield_fixture(scope='class')
+@yield_fixture(scope='class')
+def dns_setup_nonameserver(host4):
+    # Make sure that the server does not handle the reverse zone used
+    # for the test
+    try:
+        host4.run_command('dnszone_del', missingrevzone, **{'continue': True})
+    except (errors.NotFound, errors.EmptyModlist):
+        pass
+
+    # Save the current forward policy
+    result = host4.run_command('dnsserver_show', api.env.host)
+    current_fwd_pol = result['result']['idnsforwardpolicy'][0]
+
+    # Configure the forward policy to none to make sure that no DNS
+    # server will answer for the reverse zone either
+    try:
+        host4.run_command('dnsserver_mod', api.env.host,
+                          idnsforwardpolicy=u'none')
+    except errors.EmptyModlist:
+        pass
+
+    try:
+        yield
+    finally:
+        # Restore the previous forward-policy
+        try:
+            host4.run_command('dnsserver_mod', api.env.host,
+                              idnsforwardpolicy=current_fwd_pol)
+        except errors.EmptyModlist:
+            pass
+
+
+@pytest.mark.tier1
+class TestHostNoNameserversForRevZone(XMLRPC_test):
+    def test_create_host_with_ip(self, dns_setup_nonameserver, host4):
+        """
+        Regression test for ticket 7397
+
+        Configure the master with forward-policy = none to make sure
+        that no DNS server will answer for the reverse zone
+        Try to add a new host with an IP address in the missing reverse
+        zone.
+        With issue 7397, a NoNameserver exception generates a Traceback in
+        httpd error_log, and the command returns an InternalError.
+        """
+        try:
+            command = host4.make_create_command()
+            result = command(ip_address=ipv4_in_missingrevzone_ip)
+            msg = result['messages'][0]
+            assert msg['code'] == messages.FailedToAddHostDNSRecords.errno
+            expected = "The host was added but the DNS update failed"
+            # Either one of:
+            # All nameservers failed to answer the query for DNS reverse zone
+            # DNS reverse zone ... is not managed by this server
+            assert expected in msg['message']
+            # Make sure the host is added
+            host4.run_command('host_show', host4.fqdn)
+        finally:
+            # Delete the host entry
+            command = host4.make_delete_command()
+            try:
+                command(updatedns=True)
+            except errors.NotFound:
+                pass
+
+    def test_create_host_with_otp(self, dns_setup_nonameserver, host4):
+        """
+        Create a test host specifying an IP address for which
+        IPA does not handle the reverse zone, and requesting
+        the creation of a random password.
+        Non-reg test for ticket 7374.
+        """
+
+        command = host4.make_create_command()
+        try:
+            result = command(random=True, ip_address=ipv4_in_missingrevzone_ip)
+            # Make sure a random password is returned
+            assert result['result']['randompassword']
+            # Make sure the warning about missing DNS record is added
+            msg = result['messages'][0]
+            assert msg['code'] == messages.FailedToAddHostDNSRecords.errno
+            assert msg['message'].startswith(
+                u'The host was added but the DNS update failed with:')
+        finally:
+            # Cleanup
+            try:
+                command = host4.make_delete_command()
+                command(updatedns=True)
+            except errors.NotFound:
+                pass
+
+
+@yield_fixture(scope='class')
 def dns_setup(host):
     try:
         host.run_command('dnszone_del', dnszone, revzone, revipv6zone,

@@ -20,13 +20,12 @@
 """
 Base classes for all front-end plugins.
 """
-
-from distutils import version
+import logging
 
 import six
 
 from ipapython.version import API_VERSION
-from ipapython.ipa_log_manager import root_logger
+from ipapython.ipautil import APIVersion
 from ipalib.base import NameSpace
 from ipalib.plugable import Plugin, APINameSpace
 from ipalib.parameters import create_param, Param, Str, Flag
@@ -42,6 +41,8 @@ from ipalib.util import classproperty, json_serialize
 
 if six.PY3:
     unicode = str
+
+logger = logging.getLogger(__name__)
 
 RULE_FLAG = 'validation_rule'
 
@@ -461,14 +462,14 @@ class Command(HasParam):
                 self.add_message(
                     messages.VersionMissing(server_version=self.api_version))
         params = self.args_options_2_params(*args, **options)
-        self.debug(
+        logger.debug(
             'raw: %s(%s)', self.name, ', '.join(self._repr_iter(**params))
         )
         if self.api.env.in_server:
             params.update(self.get_default(**params))
         params = self.normalize(**params)
         params = self.convert(**params)
-        self.debug(
+        logger.debug(
             '%s(%s)', self.name, ', '.join(self._repr_iter(**params))
         )
         if self.api.env.in_server:
@@ -770,16 +771,18 @@ class Command(HasParam):
         If the client minor version is less than or equal to the server
         then let the request proceed.
         """
-        server_ver = version.LooseVersion(API_VERSION)
-        ver = version.LooseVersion(client_version)
-        if len(ver.version) < 2:
-            raise VersionError(cver=ver.version, sver=server_ver.version, server= self.env.xmlrpc_uri)
-        client_major = ver.version[0]
+        server_apiver = APIVersion(self.api_version)
+        try:
+            client_apiver = APIVersion(client_version)
+        except ValueError:
+            raise VersionError(cver=client_version,
+                               sver=self.api_version,
+                               server=self.env.xmlrpc_uri)
 
-        server_major = server_ver.version[0]
-
-        if server_major != client_major:
-            raise VersionError(cver=client_version, sver=API_VERSION, server=self.env.xmlrpc_uri)
+        if client_apiver.major != server_apiver.major:
+            raise VersionError(cver=client_version,
+                               sver=self.api_version,
+                               server=self.env.xmlrpc_uri)
 
     def run(self, *args, **options):
         """
@@ -1002,8 +1005,10 @@ class Command(HasParam):
     def get_summary_default(self, output):
         if self.msg_summary:
             return self.msg_summary % output
+        else:
+            return None
 
-    def log_messages(self, output, logger):
+    def log_messages(self, output):
         logger_functions = dict(
             debug=logger.debug,
             info=logger.info,
@@ -1032,13 +1037,21 @@ class Command(HasParam):
         Subclasses can override this method, if custom output is needed.
         """
         if not isinstance(output, dict):
-            return
+            return None
 
         rv = 0
 
-        self.log_messages(output, root_logger)
+        self.log_messages(output)
 
-        order = [p.name for p in self.output_params()]
+        order = []
+        labels = {}
+        flags = {}
+
+        for p in self.output_params():
+            order.append(p.name)
+            labels[p.name] = unicode(p.label)
+            flags[p.name] = p.flags
+
         if options.get('all', False):
             order.insert(0, 'dn')
             print_all = True
@@ -1047,9 +1060,6 @@ class Command(HasParam):
 
         if options.get('raw', False):
             labels = None
-        else:
-            labels = dict((p.name, unicode(p.label)) for p in self.output_params())
-        flags = dict((p.name, p.flags) for p in self.output_params())
 
         for o in self.output:
             outp = self.output[o]
@@ -1463,7 +1473,7 @@ class Updater(Plugin):
         raise NotImplementedError('%s.execute()' % self.name)
 
     def __call__(self, **options):
-        self.debug(
+        logger.debug(
             'raw: %s', self.name
         )
 

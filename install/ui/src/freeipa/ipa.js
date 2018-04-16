@@ -86,7 +86,8 @@ var IPA = function () {
     /**
      * User information
      *
-     * - output of ipa user-find --whoami
+     * - output of ipa whoami in that.whoami.metadata and then object_show method
+     * in that.whoami.data
      */
     that.whoami = {};
 
@@ -190,7 +191,7 @@ var IPA = function () {
             }
         }));
 
-        batch.add_command(that.get_whoami_command(true));
+        batch.add_command(that.get_whoami_command());
 
         batch.add_command(rpc.command({
             method: 'env',
@@ -240,30 +241,55 @@ var IPA = function () {
             }
         }));
 
+        batch.add_command(rpc.command({
+            entity: 'vaultconfig',
+            method: 'show',
+            retry: false,
+            on_success: function(data, text_status, xhr) {
+                that.vault_enabled = true;
+            },
+            on_error: function(xhr, text_status, error_thrown) {
+                that.vault_enabled = false;
+            }
+        }));
+
         batch.execute();
     };
 
     /**
      * Prepares `user-find --whoami` command
      * @protected
-     * @param {boolean} batch - Specifies if it will be used as single command or
-     *                          in a batch.
      */
-    that.get_whoami_command = function(batch) {
+    that.get_whoami_command = function() {
         return rpc.command({
-            entity: 'user',
-            method: 'find',
-            options: {
-                whoami: true,
-                all: true
-            },
+            method: 'whoami',
             on_success: function(data, text_status, xhr) {
-                that.whoami = batch ? data.result[0] : data.result.result[0];
-                var cn = that.whoami.krbcanonicalname;
-                if (cn) that.principal = cn[0];
-                if (!that.principal) {
-                    that.principal = that.whoami.krbprincipalname[0];
-                }
+                that.whoami.metadata = data.result || data;
+                var wa_data = that.whoami.metadata;
+
+                rpc.command({
+                    method: wa_data.details || wa_data.command,
+                    args: wa_data.arguments,
+                    options: function() {
+                        var options = wa_data.options || [];
+                        $.extend(options, {all: true});
+                        return options;
+                    }(),
+                    on_success: function(data, text_status, xhr) {
+                        that.whoami.data = data.result.result;
+                        var entity = that.whoami.metadata.object;
+
+                        if (entity === 'user') {
+                            var cn = that.whoami.data.krbcanonicalname;
+                            if (cn) that.principal = cn[0];
+                            if (!that.principal) {
+                                that.principal = that.whoami.data.krbprincipalname[0];
+                            }
+                        } else if (entity === 'idoverrideuser') {
+                            that.principal = that.whoami.data.ipaoriginaluid[0];
+                        }
+                    }
+                }).execute();
             }
         });
     };
@@ -276,6 +302,9 @@ var IPA = function () {
      * @param {Function} params.on_error
      */
     that.init_metadata = function(params) {
+        var loading = text.get('@i18n:login.loading_md');
+
+        topic.publish('set-activity', loading);
 
         var objects = rpc.command({
             name: 'ipa_init_objects',
@@ -340,29 +369,6 @@ var IPA = function () {
         return reg.entity.get(name);
     };
 
-    /**
-     * Display network activity indicator
-     */
-    that.display_activity_icon = function() {
-        that.network_call_count++;
-        if (that.network_call_count === 1) {
-            topic.publish('network-activity-start');
-        }
-    };
-
-    /**
-     * Hide network activity indicator
-     *
-     * - based on network_call_count
-     */
-    that.hide_activity_icon = function() {
-        that.network_call_count--;
-
-        if (0 === that.network_call_count) {
-            topic.publish('network-activity-end');
-        }
-    };
-
     that.obj_cls = declare([Evented]);
 
     return that;
@@ -391,13 +397,13 @@ IPA.get_credentials = function() {
 
     function error_handler(xhr, text_status, error_thrown) {
         d.resolve(xhr.status);
-        IPA.hide_activity_icon();
+        topic.publish('rpc-end');
     }
 
     function success_handler(data, text_status, xhr) {
         auth.current.set_authenticated(true, 'kerberos');
         d.resolve(xhr.status);
-        IPA.hide_activity_icon();
+        topic.publish('rpc-end');
     }
 
     var request = {
@@ -407,7 +413,9 @@ IPA.get_credentials = function() {
         success: success_handler,
         error: error_handler
     };
-    IPA.display_activity_icon();
+
+    topic.publish('rpc-start');
+
     $.ajax(request);
 
     return d.promise;
@@ -439,7 +447,8 @@ IPA.logout = function() {
     }
 
     function success_handler(data, text_status, xhr) {
-        IPA.hide_activity_icon();
+        topic.publish('rpc-end');
+
         if (data && data.error) {
             show_error(data.error.message);
         } else {
@@ -448,7 +457,8 @@ IPA.logout = function() {
     }
 
     function error_handler(xhr, text_status, error_thrown) {
-        IPA.hide_activity_icon();
+        topic.publish('rpc-end');
+
         if (xhr.status === 401) {
             reload();
         } else {
@@ -467,7 +477,8 @@ IPA.logout = function() {
         success: success_handler,
         error: error_handler
     };
-    IPA.display_activity_icon();
+    topic.publish('rpc-start');
+
     $.ajax(request);
 };
 
@@ -485,7 +496,8 @@ IPA.login_password = function(username, password) {
     var d = new Deferred();
 
     function success_handler(data, text_status, xhr) {
-        IPA.hide_activity_icon();
+        topic.publish('rpc-end');
+
         result = 'success';
         auth.current.set_authenticated(true, 'password');
         d.resolve(result);
@@ -493,7 +505,8 @@ IPA.login_password = function(username, password) {
 
     function error_handler(xhr, text_status, error_thrown) {
 
-        IPA.hide_activity_icon();
+        topic.publish('rpc-end');
+
         if (xhr.status === 401) {
             var reason = xhr.getResponseHeader("X-IPA-Rejection-Reason");
 
@@ -526,7 +539,8 @@ IPA.login_password = function(username, password) {
         error: error_handler
     };
 
-    IPA.display_activity_icon();
+    topic.publish('rpc-start');
+
     $.ajax(request);
 
     return d.promise;
@@ -558,6 +572,8 @@ IPA.reset_password = function(username, old_password, new_password, otp) {
 
     function success_handler(data, text_status, xhr) {
 
+        topic.publish('rpc-end');
+
         result.status = xhr.getResponseHeader("X-IPA-Pwchange-Result") || status;
 
         if (result.status === 'policy-error') {
@@ -571,6 +587,7 @@ IPA.reset_password = function(username, old_password, new_password, otp) {
     }
 
     function error_handler(xhr, text_status, error_thrown) {
+        topic.publish('rpc-end');
         return result;
     }
 
@@ -596,9 +613,8 @@ IPA.reset_password = function(username, old_password, new_password, otp) {
         error: error_handler
     };
 
-    IPA.display_activity_icon();
+    topic.publish('rpc-start');
     $.ajax(request);
-    IPA.hide_activity_icon();
 
     return result;
 };
@@ -614,7 +630,7 @@ IPA.update_password_expiration = function() {
 
     var now, expires, notify_days, diff, message, container, notify;
 
-    expires = rpc.extract_objects(IPA.whoami.krbpasswordexpiration);
+    expires = rpc.extract_objects(IPA.whoami.data.krbpasswordexpiration);
     expires = expires ? datetime.parse(expires[0]) : null;
 
     notify_days = IPA.server_config.ipapwdexpadvnotify;
@@ -648,13 +664,13 @@ IPA.update_password_expiration = function() {
 IPA.password_selfservice = function() {
     var reset_dialog = builder.build('dialog', {
         $type: 'user_password',
-        args: [IPA.whoami.uid[0]]
+        args: [IPA.whoami.data.uid[0]]
     });
     reset_dialog.succeeded.attach(function() {
         var command = IPA.get_whoami_command();
         var orig_on_success = command.on_success;
         command.on_success = function(data, text_status, xhr) {
-            orig_on_success.call(this, data, text_status, xhr);
+            orig_on_success.call(this, data.result, text_status, xhr);
             IPA.update_password_expiration();
         };
         command.execute();

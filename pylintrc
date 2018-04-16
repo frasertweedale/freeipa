@@ -4,10 +4,20 @@ persistent=no
 
 # List of plugins (as comma separated values of python modules names) to load,
 # usually to register additional checkers.
-load-plugins=pylint_plugins
+# FIXME: has to be specified on the command line otherwise pylint fails with
+#        DuplicateSectionError for the IPA section
+#load-plugins=pylint_plugins
 
 # Use multiple processes to speed up Pylint.
 jobs=0
+
+# A list of packages with safe C extensions to load
+extension-pkg-whitelist=
+    _ldap,
+    cryptography,
+    gssapi,
+    netifaces
+
 
 [MESSAGES CONTROL]
 
@@ -74,7 +84,14 @@ disable=
     singleton-comparison,
     misplaced-comparison-constant,
     not-a-mapping,
-    singleton-comparison
+    singleton-comparison,
+    len-as-condition,  # new in pylint 1.7
+    no-else-return,  # new in pylint 1.7
+    literal-comparison,  # new in pylint 1.7
+    single-string-used-for-slots,  # new in pylint 1.7
+    useless-super-delegation,  # new in pylint 1.7
+    redefined-argument-from-local,  # new in pylint 1.7
+    consider-merging-isinstance,  # new in pylint 1.7
 
 
 [REPORTS]
@@ -93,4 +110,15 @@ msg-template='{path}:{line}: [{msg_id}({symbol}), {obj}] {msg})'
 
 
 [VARIABLES]
-dummy-variables-rgx=_.+
+dummy-variables-rgx=(_.+|unused)
+
+
+[IPA]
+forbidden-imports=
+    client/:ipaserver,
+    ipaclient/:ipaclient.install:ipalib.install:ipaserver,
+    ipaclient/install/:ipaserver,
+    ipalib/:ipaclient.install:ipalib.install:ipaserver,
+    ipalib/install/:ipaserver,
+    ipaplatform/:ipaclient:ipalib:ipaserver,
+    ipapython/:ipaclient:ipalib:ipaserver

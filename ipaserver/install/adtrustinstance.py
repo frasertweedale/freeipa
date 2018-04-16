@@ -19,6 +19,7 @@
 
 from __future__ import print_function
 
+import logging
 import os
 import errno
 import ldap
@@ -27,6 +28,7 @@ import uuid
 import string
 import struct
 import re
+import socket
 
 import six
 
@@ -38,18 +40,19 @@ from ipaserver.install.replication import wait_for_task
 from ipalib import errors, api
 from ipalib.util import normalize_zone
 from ipapython.dn import DN
-from ipapython import sysrestore
 from ipapython import ipautil
-from ipapython.ipa_log_manager import root_logger
 import ipapython.errors
 
-import ipaclient.ipachangeconf
+import ipaclient.install.ipachangeconf
 from ipaplatform import services
+from ipaplatform.constants import constants
 from ipaplatform.paths import paths
 from ipaplatform.tasks import tasks
 
 if six.PY3:
     unicode = str
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_NETBIOS_CHARS = string.ascii_uppercase + string.digits + '-'
 
@@ -59,8 +62,6 @@ This means upgrade from IPA 2.x to 3.x did not went well and required S4U2Proxy
 configuration was not set up properly. Please run ipa-ldap-updater manually
 and re-run ipa-adtrust-instal again afterwards.
 """
-
-SELINUX_BOOLEAN_SETTINGS = {'samba_portmapper': 'on'}
 
 
 def check_inst():
@@ -135,15 +136,10 @@ class ADTRUSTInstance(service.Service):
 
         self.fqdn = None
         self.host_netbios_name = None
-        self.realm = None
 
-        service.Service.__init__(self, "smb", service_desc="CIFS",
-                                 dm_password=None, ldapi=True)
-
-        if fstore:
-            self.fstore = fstore
-        else:
-            self.fstore = sysrestore.FileStore(paths.SYSRESTORE)
+        super(ADTRUSTInstance, self).__init__(
+            "smb", service_desc="CIFS", fstore=fstore, service_prefix=u'cifs',
+            keytab=paths.SAMBA_KEYTAB)
 
         self.__setup_default_attributes()
 
@@ -155,7 +151,6 @@ class ADTRUSTInstance(service.Service):
 
         # Constants
         self.smb_conf = paths.SMB_CONF
-        self.samba_keytab = paths.SAMBA_KEYTAB
         self.cifs_hosts = []
 
         # Values obtained from API.env
@@ -163,7 +158,6 @@ class ADTRUSTInstance(service.Service):
         self.host_netbios_name = make_netbios_name(self.fqdn)
         self.realm = self.realm or api.env.realm
 
-        self.cifs_principal = "cifs/" + self.fqdn + "@" + self.realm
         self.suffix = ipautil.realm_to_suffix(self.realm)
         self.ldapi_socket = "%%2fvar%%2frun%%2fslapd-%s.socket" % \
                             installutils.realm_to_serverid(self.realm)
@@ -180,7 +174,7 @@ class ADTRUSTInstance(service.Service):
                              api.env.container_cifsdomains,
                              self.suffix)
 
-        self.cifs_agent = DN(('krbprincipalname', self.cifs_principal.lower()),
+        self.cifs_agent = DN(('krbprincipalname', self.principal.lower()),
                              api.env.container_service,
                              self.suffix)
         self.host_princ = DN(('fqdn', self.fqdn),
@@ -208,7 +202,7 @@ class ADTRUSTInstance(service.Service):
         admin_group_dn = DN(('cn', 'admins'), api.env.container_group,
                             self.suffix)
         try:
-            dom_entry = self.admin_conn.get_entry(self.smb_dom_dn)
+            dom_entry = api.Backend.ldap2.get_entry(self.smb_dom_dn)
         except errors.NotFound:
             self.print_msg("Samba domain object not found")
             return
@@ -219,13 +213,13 @@ class ADTRUSTInstance(service.Service):
             return
 
         try:
-            admin_entry = self.admin_conn.get_entry(admin_dn)
+            admin_entry = api.Backend.ldap2.get_entry(admin_dn)
         except errors.NotFound:
             self.print_msg("IPA admin object not found")
             return
 
         try:
-            admin_group_entry = self.admin_conn.get_entry(admin_group_dn)
+            admin_group_entry = api.Backend.ldap2.get_entry(admin_group_dn)
         except errors.NotFound:
             self.print_msg("IPA admin group object not found")
             return
@@ -234,9 +228,10 @@ class ADTRUSTInstance(service.Service):
             self.print_msg("Admin SID already set, nothing to do")
         else:
             try:
-                self.admin_conn.modify_s(admin_dn, \
-                            [(ldap.MOD_ADD, "objectclass", self.OBJC_USER), \
-                             (ldap.MOD_ADD, self.ATTR_SID, dom_sid + "-500")])
+                api.Backend.ldap2.modify_s(
+                    admin_dn,
+                    [(ldap.MOD_ADD, "objectclass", self.OBJC_USER),
+                     (ldap.MOD_ADD, self.ATTR_SID, dom_sid + "-500")])
             except Exception:
                 self.print_msg("Failed to modify IPA admin object")
 
@@ -244,9 +239,10 @@ class ADTRUSTInstance(service.Service):
             self.print_msg("Admin group SID already set, nothing to do")
         else:
             try:
-                self.admin_conn.modify_s(admin_group_dn, \
-                            [(ldap.MOD_ADD, "objectclass", self.OBJC_GROUP), \
-                             (ldap.MOD_ADD, self.ATTR_SID, dom_sid + "-512")])
+                api.Backend.ldap2.modify_s(
+                    admin_group_dn,
+                    [(ldap.MOD_ADD, "objectclass", self.OBJC_GROUP),
+                     (ldap.MOD_ADD, self.ATTR_SID, dom_sid + "-512")])
             except Exception:
                 self.print_msg("Failed to modify IPA admin group object")
 
@@ -255,7 +251,7 @@ class ADTRUSTInstance(service.Service):
                              api.env.container_views, self.suffix)
 
         try:
-            self.admin_conn.get_entry(default_view_dn)
+            api.Backend.ldap2.get_entry(default_view_dn)
         except errors.NotFound:
             try:
                 self._ldap_mod('default-trust-view.ldif', self.sub_dict)
@@ -268,7 +264,7 @@ class ADTRUSTInstance(service.Service):
         # _ldap_mod does not return useful error codes, so we must check again
         # if the default trust view was created properly.
         try:
-            self.admin_conn.get_entry(default_view_dn)
+            api.Backend.ldap2.get_entry(default_view_dn)
         except errors.NotFound:
             self.print_msg("Failed to add Default Trust View.")
 
@@ -283,11 +279,8 @@ class ADTRUSTInstance(service.Service):
         to enable the sidgen plugin we have to reconnect to the directory
         server.
         """
-
-        self.ldap_connect()
-
         try:
-            dom_entry = self.admin_conn.get_entry(self.smb_dom_dn)
+            dom_entry = api.Backend.ldap2.get_entry(self.smb_dom_dn)
         except errors.NotFound:
             self.print_msg("Samba domain object not found")
             return
@@ -299,7 +292,7 @@ class ADTRUSTInstance(service.Service):
         fb_group_dn = DN(('cn', self.FALLBACK_GROUP_NAME),
                          api.env.container_group, self.suffix)
         try:
-            self.admin_conn.get_entry(fb_group_dn)
+            api.Backend.ldap2.get_entry(fb_group_dn)
         except errors.NotFound:
             try:
                 self._ldap_mod('default-smb-group.ldif', self.sub_dict)
@@ -310,14 +303,14 @@ class ADTRUSTInstance(service.Service):
         # _ldap_mod does not return useful error codes, so we must check again
         # if the fallback group was created properly.
         try:
-            self.admin_conn.get_entry(fb_group_dn)
+            api.Backend.ldap2.get_entry(fb_group_dn)
         except errors.NotFound:
             self.print_msg("Failed to add fallback group.")
             return
 
         try:
             mod = [(ldap.MOD_ADD, self.ATTR_FALLBACK_GROUP, fb_group_dn)]
-            self.admin_conn.modify_s(self.smb_dom_dn, mod)
+            api.Backend.ldap2.modify_s(self.smb_dom_dn, mod)
         except Exception:
             self.print_msg("Failed to add fallback group to domain object")
 
@@ -330,7 +323,7 @@ class ADTRUSTInstance(service.Service):
 
         try:
             # Get the ranges
-            ranges = self.admin_conn.get_entries(
+            ranges = api.Backend.ldap2.get_entries(
                 DN(api.env.container_ranges, self.suffix),
                 ldap.SCOPE_ONELEVEL, "(objectclass=ipaDomainIDRange)")
 
@@ -348,24 +341,29 @@ class ADTRUSTInstance(service.Service):
 
             # Abort if RID base needs to be added to more than one range
             if len(ranges_with_no_rid_base) != 1:
-                root_logger.critical("Found more than one local domain ID "
-                                     "range with no RID base set.")
+                logger.critical("Found more than one local domain ID "
+                                "range with no RID base set.")
                 raise RuntimeError("Too many ID ranges\n")
 
             # Abort if RID bases are too close
             local_range = ranges_with_no_rid_base[0]
-            size = local_range.single_value.get('ipaIDRangeSize')
+            try:
+                size = int(local_range.single_value.get('ipaIDRangeSize'))
+            except ValueError:
+                raise RuntimeError('ipaIDRangeSize is set to a non-integer '
+                                   'value or is not set at all (got {val})'
+                                   .format(val=size))
 
-            if abs(self.rid_base - self.secondary_rid_base) > size:
+            if abs(self.rid_base - self.secondary_rid_base) < size:
                 self.print_msg("Primary and secondary RID base are too close. "
-                      "They have to differ at least by %d." % size)
+                               "They have to differ at least by %d." % size)
                 raise RuntimeError("RID bases too close.\n")
 
             # Modify the range
             # If the RID bases would cause overlap with some other range,
             # this will be detected by ipa-range-check DS plugin
             try:
-                self.admin_conn.modify_s(local_range.dn,
+                api.Backend.ldap2.modify_s(local_range.dn,
                                          [(ldap.MOD_ADD, "ipaBaseRID",
                                                  str(self.rid_base)),
                                          (ldap.MOD_ADD, "ipaSecondaryBaseRID",
@@ -376,8 +374,8 @@ class ADTRUSTInstance(service.Service):
                 raise RuntimeError("Constraint violation.\n")
 
         except errors.NotFound as e:
-            root_logger.critical("ID range of the local domain not found, "
-                                 "define it and run again.")
+            logger.critical("ID range of the local domain not found, "
+                            "define it and run again.")
             raise e
 
     def __reset_netbios_name(self):
@@ -387,7 +385,7 @@ class ADTRUSTInstance(service.Service):
         self.print_msg("Reset NetBIOS domain name")
 
         try:
-            self.admin_conn.modify_s(self.smb_dom_dn,
+            api.Backend.ldap2.modify_s(self.smb_dom_dn,
                                      [(ldap.MOD_REPLACE, self.ATTR_FLAT_NAME,
                                        self.netbios_name)])
         except ldap.LDAPError:
@@ -396,7 +394,7 @@ class ADTRUSTInstance(service.Service):
     def __create_samba_domain_object(self):
 
         try:
-            self.admin_conn.get_entry(self.smb_dom_dn)
+            api.Backend.ldap2.get_entry(self.smb_dom_dn)
             if self.reset_netbios_name:
                 self.__reset_netbios_name()
             else :
@@ -409,7 +407,7 @@ class ADTRUSTInstance(service.Service):
                        DN(('cn', 'ad'), self.trust_dn), \
                        DN(api.env.container_cifsdomains, self.suffix)):
             try:
-                self.admin_conn.get_entry(new_dn)
+                api.Backend.ldap2.get_entry(new_dn)
             except errors.NotFound:
                 try:
                     name = new_dn[1].attr
@@ -417,11 +415,11 @@ class ADTRUSTInstance(service.Service):
                     self.print_msg('Cannot extract RDN attribute value from "%s": %s' % \
                           (new_dn, e))
                     return
-                entry = self.admin_conn.make_entry(
+                entry = api.Backend.ldap2.make_entry(
                     new_dn, objectclass=['nsContainer'], cn=[name])
-                self.admin_conn.add_entry(entry)
+                api.Backend.ldap2.add_entry(entry)
 
-        entry = self.admin_conn.make_entry(
+        entry = api.Backend.ldap2.make_entry(
             self.smb_dom_dn,
             {
                 'objectclass': [self.OBJC_DOMAIN, "nsContainer"],
@@ -432,7 +430,7 @@ class ADTRUSTInstance(service.Service):
             }
         )
         #TODO: which MAY attributes do we want to set ?
-        self.admin_conn.add_entry(entry)
+        api.Backend.ldap2.add_entry(entry)
 
     def __write_smb_conf(self):
         conf_fd = open(self.smb_conf, "w")
@@ -450,7 +448,7 @@ class ADTRUSTInstance(service.Service):
         try:
             plugin_dn = DN(('cn', plugin_cn), ('cn', 'plugins'),
                            ('cn', 'config'))
-            self.admin_conn.get_entry(plugin_dn)
+            api.Backend.ldap2.get_entry(plugin_dn)
             self.print_msg('%s plugin already configured, nothing to do' % name)
         except errors.NotFound:
             try:
@@ -488,11 +486,11 @@ class ADTRUSTInstance(service.Service):
 
             # Wait for the task to complete
             task_dn = DN('cn=sidgen,cn=ipa-sidgen-task,cn=tasks,cn=config')
-            wait_for_task(self.admin_conn, task_dn)
+            wait_for_task(api.Backend.ldap2, task_dn)
 
         except Exception as e:
-            root_logger.warning("Exception occured during SID generation: {0}"
-                                .format(str(e)))
+            logger.warning("Exception occured during SID generation: %s",
+                           str(e))
 
     def __add_s4u2proxy_target(self):
         """
@@ -502,73 +500,61 @@ class ADTRUSTInstance(service.Service):
         targets_dn = DN(('cn', 'ipa-cifs-delegation-targets'), ('cn', 's4u2proxy'),
                         ('cn', 'etc'), self.suffix)
         try:
-            current = self.admin_conn.get_entry(targets_dn)
+            current = api.Backend.ldap2.get_entry(targets_dn)
             members = current.get('memberPrincipal', [])
-            if not(self.cifs_principal in members):
-                current["memberPrincipal"] = members + [self.cifs_principal]
-                self.admin_conn.update_entry(current)
+            if not(self.principal in members):
+                current["memberPrincipal"] = members + [self.principal]
+                api.Backend.ldap2.update_entry(current)
             else:
                 self.print_msg('cifs principal already targeted, nothing to do.')
         except errors.NotFound:
             self.print_msg(UPGRADE_ERROR % dict(dn=targets_dn))
 
     def __write_smb_registry(self):
-        template = os.path.join(ipautil.SHARE_DIR, "smb.conf.template")
-        conf = ipautil.template_file(template, self.sub_dict)
-        [tmp_fd, tmp_name] = tempfile.mkstemp()
-        os.write(tmp_fd, conf)
-        os.close(tmp_fd)
-
         # Workaround for: https://fedorahosted.org/freeipa/ticket/5687
         # We make sure that paths.SMB_CONF file exists, hence touch it
         with open(paths.SMB_CONF, 'a'):
             os.utime(paths.SMB_CONF, None)
 
-        args = [paths.NET, "conf", "import", tmp_name]
-
-        try:
-            ipautil.run(args)
-        finally:
-            os.remove(tmp_name)
+        template = os.path.join(paths.USR_SHARE_IPA_DIR, "smb.conf.template")
+        conf = ipautil.template_file(template, self.sub_dict)
+        with tempfile.NamedTemporaryFile(mode='w') as tmp_conf:
+            tmp_conf.write(conf)
+            tmp_conf.flush()
+            ipautil.run([paths.NET, "conf", "import", tmp_conf.name])
 
     def __setup_group_membership(self):
         # Add the CIFS and host principals to the 'adtrust agents' group
         # as 389-ds only operates with GroupOfNames, we have to use
         # the principal's proper dn as defined in self.cifs_agent
-        service.add_principals_to_group(self.admin_conn, self.smb_dn, "member",
-                                        [self.cifs_agent, self.host_princ])
+        service.add_principals_to_group(
+            api.Backend.ldap2, self.smb_dn, "member",
+            [self.cifs_agent, self.host_princ])
 
-    def __setup_principal(self):
-        try:
-            api.Command.service_add(unicode(self.cifs_principal))
-        except errors.DuplicateEntry:
-            # CIFS principal already exists, it is not the first time
-            # adtrustinstance is managed
-            # That's fine, we we'll re-extract the key again.
-            pass
-        except Exception as e:
-            self.print_msg("Cannot add CIFS service: %s" % e)
-
+    def clean_previous_keytab(self, keytab=None):
+        """
+        Purge old CIFS keys from samba and clean up samba ccache
+        """
         self.clean_samba_keytab()
         installutils.remove_ccache(paths.KRB5CC_SAMBA)
 
-        try:
-            ipautil.run(["ipa-getkeytab", "--server", self.fqdn,
-                                          "--principal", self.cifs_principal,
-                                          "-k", self.samba_keytab])
-        except ipautil.CalledProcessError:
-            root_logger.critical("Failed to add key for %s"
-                                 % self.cifs_principal)
+    def set_keytab_owner(self, keytab=None, owner=None):
+        """
+        Do not re-set ownership of samba keytab
+        """
+        pass
 
     def clean_samba_keytab(self):
-        if os.path.exists(self.samba_keytab):
+        if os.path.exists(self.keytab):
             try:
-                ipautil.run(["ipa-rmkeytab", "--principal", self.cifs_principal,
-                                         "-k", self.samba_keytab])
+                ipautil.run([
+                    paths.IPA_RMKEYTAB, "--principal", self.principal,
+                    "-k", self.keytab
+                ])
             except ipautil.CalledProcessError as e:
                 if e.returncode != 5:
-                    root_logger.critical("Failed to remove old key for %s"
-                                         % self.cifs_principal)
+                    logger.critical("Failed to remove old key for %s",
+                                    self.principal)
 
     def srv_rec(self, host, port, prio):
         return "%(prio)d 100 %(port)d %(host)s" % dict(host=host,prio=prio,port=port)
@@ -609,7 +595,7 @@ class ADTRUSTInstance(service.Service):
 
     def __configure_selinux_for_smbd(self):
         try:
-            tasks.set_selinux_booleans(SELINUX_BOOLEAN_SETTINGS,
+            tasks.set_selinux_booleans(constants.SELINUX_BOOLEAN_ADTRUST,
                                        self.backup_state)
         except ipapython.errors.SetseboolError as e:
             self.print_msg(e.format_service_warning('adtrust service'))
@@ -622,7 +608,8 @@ class ADTRUSTInstance(service.Service):
         if not self.fqdn or not self.realm:
             self.print_msg("Cannot modify /etc/krb5.conf")
 
-        krbconf = ipaclient.ipachangeconf.IPAChangeConf("IPA Installer")
+        krbconf = (
+            ipaclient.install.ipachangeconf.IPAChangeConf("IPA Installer"))
         krbconf.setOptionAssignment((" = ", " "))
         krbconf.setSectionNameDelimiters(("[", "]"))
         krbconf.setSubSectionDelimiters(("{", "}"))
@@ -673,7 +660,7 @@ class ADTRUSTInstance(service.Service):
         try:
             cifs_services = DN(api.env.container_service, self.suffix)
             # Search for cifs services which also belong to adtrust agents, these are our DCs
-            res = self.admin_conn.get_entries(cifs_services,
+            res = api.Backend.ldap2.get_entries(cifs_services,
                 ldap.SCOPE_ONELEVEL,
                 "(&(krbprincipalname=cifs/*@%s)(memberof=%s))" % (self.realm, str(self.smb_dn)))
             if len(res) > 1:
@@ -689,7 +676,8 @@ class ADTRUSTInstance(service.Service):
                             self.cifs_hosts.append(normalize_zone(fqdn))
 
         except Exception as e:
-            root_logger.critical("Checking replicas for cifs principals failed with error '%s'" % e)
+            logger.critical("Checking replicas for cifs principals failed "
+                            "with error '%s'", e)
 
     def __enable_compat_tree(self):
         try:
@@ -697,32 +685,42 @@ class ADTRUSTInstance(service.Service):
             lookup_nsswitch_name = "schema-compat-lookup-nsswitch"
             for config in (("cn=users", "user"), ("cn=groups", "group")):
                 entry_dn = DN(config[0], compat_plugin_dn)
-                current = self.admin_conn.get_entry(entry_dn)
+                current = api.Backend.ldap2.get_entry(entry_dn)
                 lookup_nsswitch = current.get(lookup_nsswitch_name, [])
                 if not(config[1] in lookup_nsswitch):
                     current[lookup_nsswitch_name] = [config[1]]
-                    self.admin_conn.update_entry(current)
+                    api.Backend.ldap2.update_entry(current)
         except Exception as e:
-            root_logger.critical("Enabling nsswitch support in slapi-nis failed with error '%s'" % e)
+            logger.critical("Enabling nsswitch support in slapi-nis failed "
+                            "with error '%s'", e)
+
+    def __validate_server_hostname(self):
+        hostname = socket.gethostname()
+        if hostname != self.fqdn:
+            raise ValueError("Host reports different name than configured: "
+                             "'%s' versus '%s'. Samba requires to have "
+                             "the same hostname or Kerberos principal "
+                             "'cifs/%s' will not be found in Samba keytab." %
+                             (hostname, self.fqdn, self.fqdn))
 
     def __start(self):
         try:
             self.start()
-            services.service('winbind').start()
+            services.service('winbind', api).start()
         except Exception:
-            root_logger.critical("CIFS services failed to start")
+            logger.critical("CIFS services failed to start")
 
     def __stop(self):
         self.backup_state("running", self.is_running())
         try:
-            services.service('winbind').stop()
+            services.service('winbind', api).stop()
             self.stop()
         except Exception:
             pass
 
     def __restart_dirsrv(self):
         try:
-            services.knownservices.dirsrv.restart()
+            installutils.restart_dirsrv()
         except Exception:
             pass
 
@@ -740,16 +738,14 @@ class ADTRUSTInstance(service.Service):
         # Note that self.dm_password is None for ADTrustInstance because
         # we ensure to be called as root and using ldapi to use autobind
         try:
-            self.ldap_enable('ADTRUST', self.fqdn, self.dm_password, \
-                             self.suffix)
+            self.ldap_enable('ADTRUST', self.fqdn, None, self.suffix)
         except (ldap.ALREADY_EXISTS, errors.DuplicateEntry):
-            root_logger.info("ADTRUST Service startup entry already exists.")
+            logger.info("ADTRUST Service startup entry already exists.")
 
         try:
-            self.ldap_enable('EXTID', self.fqdn, self.dm_password, \
-                             self.suffix)
+            self.ldap_enable('EXTID', self.fqdn, None, self.suffix)
         except (ldap.ALREADY_EXISTS, errors.DuplicateEntry):
-            root_logger.info("EXTID Service startup entry already exists.")
+            logger.info("EXTID Service startup entry already exists.")
 
     def __setup_sub_dict(self):
         self.sub_dict = dict(REALM = self.realm,
@@ -780,16 +776,14 @@ class ADTRUSTInstance(service.Service):
         self.__setup_sub_dict()
 
     def find_local_id_range(self):
-        self.ldap_connect()
-
-        if self.admin_conn.get_entries(
+        if api.Backend.ldap2.get_entries(
                 DN(api.env.container_ranges, self.suffix),
                 ldap.SCOPE_ONELEVEL,
                 "(objectclass=ipaDomainIDRange)"):
             return
 
         try:
-            entry = self.admin_conn.get_entry(
+            entry = api.Backend.ldap2.get_entry(
                 DN(('cn', 'admins'), api.env.container_group, self.suffix))
         except errors.NotFound:
             raise ValueError("No local ID range and no admins group found.\n" \
@@ -806,13 +800,13 @@ class ADTRUSTInstance(service.Service):
                         "(gidNumber<=%d)(gidNumner>=%d)))" % \
                      ((base_id - 1), (base_id + id_range_size),
                       (base_id - 1), (base_id + id_range_size))
-        if self.admin_conn.get_entries(DN(('cn', 'accounts'), self.suffix),
+        if api.Backend.ldap2.get_entries(DN(('cn', 'accounts'), self.suffix),
                                        ldap.SCOPE_SUBTREE, id_filter):
             raise ValueError("There are objects with IDs out of the expected" \
                              "range.\nAdd local ID range manually and try " \
                              "again!")
 
-        entry = self.admin_conn.make_entry(
+        entry = api.Backend.ldap2.make_entry(
             DN(
                 ('cn', ('%s_id_range' % self.realm)),
                 api.env.container_ranges, self.suffix),
@@ -821,18 +815,18 @@ class ADTRUSTInstance(service.Service):
             ipaBaseID=[str(base_id)],
             ipaIDRangeSize=[str(id_range_size)],
         )
-        self.admin_conn.add_entry(entry)
+        api.Backend.ldap2.add_entry(entry)
 
     def create_instance(self):
-
-        self.ldap_connect()
-
+        self.step("validate server hostname",
+                  self.__validate_server_hostname)
         self.step("stopping smbd", self.__stop)
         self.step("creating samba domain object", \
                   self.__create_samba_domain_object)
         self.step("creating samba config registry", self.__write_smb_registry)
         self.step("writing samba config file", self.__write_smb_conf)
-        self.step("adding cifs Kerberos principal", self.__setup_principal)
+        self.step("adding cifs Kerberos principal",
+                  self.request_service_keytab)
         self.step("adding cifs and host Kerberos principals to the adtrust agents group", \
                   self.__setup_group_membership)
         self.step("check for cifs services defined on other replicas", self.__check_replica)
@@ -874,7 +868,7 @@ class ADTRUSTInstance(service.Service):
         self.restore_state("running")
         self.restore_state("enabled")
 
-        winbind = services.service("winbind")
+        winbind = services.service("winbind", api)
         # Always try to stop and disable smb service, since we do not leave
         # working configuration after uninstall
         try:
@@ -890,7 +884,7 @@ class ADTRUSTInstance(service.Service):
 
         # Restore the state of affected selinux booleans
         boolean_states = {name: self.restore_state(name)
-                          for name in SELINUX_BOOLEAN_SETTINGS}
+                          for name in constants.SELINUX_BOOLEAN_ADTRUST}
         try:
             tasks.set_selinux_booleans(boolean_states)
         except ipapython.errors.SetseboolError as e:

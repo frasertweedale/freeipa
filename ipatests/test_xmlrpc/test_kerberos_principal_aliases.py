@@ -10,11 +10,13 @@ from ipalib import errors, api
 from ipapython import ipautil
 from ipaplatform.paths import paths
 
+from ipatests.test_util import yield_fixture
 from ipatests.util import MockLDAP
 from ipatests.test_xmlrpc.xmlrpc_test import XMLRPC_test
 from ipatests.test_xmlrpc.tracker.user_plugin import UserTracker
 from ipatests.test_xmlrpc.tracker.host_plugin import HostTracker
 from ipatests.test_xmlrpc.tracker.service_plugin import ServiceTracker
+from ipatests.test_xmlrpc.tracker.stageuser_plugin import StageUserTracker
 from ipatests.test_xmlrpc.mock_trust import (
     mocked_trust_containers, get_trust_dn, get_trusted_dom_dict,
     encode_mockldap_value)
@@ -31,8 +33,23 @@ TRUSTED_DOMAIN_MOCK['ldif'] = get_trusted_dom_dict(
     TRUSTED_DOMAIN_MOCK['name'], TRUSTED_DOMAIN_MOCK['sid']
 )
 
+ADD_REMOVE_TEST_DATA = [
+    u'testuser-alias',
+    u'testhost-alias',
+    u'teststageuser-alias',
+]
+TRACKER_INIT_DATA = [
+    (UserTracker, (u'krbalias_user', u'krbalias', u'test',), {},),
+    (HostTracker, (u'testhost-krb',), {},),
+    (StageUserTracker, (u'krbalias_stageuser', u'krbalias', u'test',), {},),
+]
+TRACKER_DATA = [
+    (ADD_REMOVE_TEST_DATA[i],) + TRACKER_INIT_DATA[i]
+    for i in range(len(TRACKER_INIT_DATA))
+]
 
-@pytest.yield_fixture
+
+@yield_fixture
 def trusted_domain():
     """Fixture providing mocked AD trust entries
 
@@ -50,7 +67,7 @@ def trusted_domain():
         ldap.del_entry(trusted_dom['dn'])
 
 
-@pytest.yield_fixture
+@yield_fixture
 def trusted_domain_with_suffix():
     """Fixture providing mocked AD trust entries
 
@@ -85,13 +102,6 @@ def krbalias_user_c(request):
     return tracker.make_fixture(request)
 
 
-@pytest.fixture(scope='function')
-def krbalias_host(request):
-    tracker = HostTracker(u'testhost-krb')
-
-    return tracker.make_fixture(request)
-
-
 @pytest.fixture
 def krb_service_host(request):
     tracker = HostTracker(u'krb-srv-host')
@@ -108,6 +118,12 @@ def krbalias_service(request, krb_service_host):
     return tracker.make_fixture(request)
 
 
+@pytest.fixture(scope='function')
+def krbalias(request, tracker_cls, tracker_args, tracker_kwargs):
+    tracker = tracker_cls(*tracker_args, **tracker_kwargs)
+    return tracker.make_fixture(request)
+
+
 @pytest.fixture
 def ldapservice(request):
     tracker = ServiceTracker(
@@ -116,31 +132,22 @@ def ldapservice(request):
     tracker.track_create()
     return tracker
 
-
 class TestKerberosAliasManipulation(XMLRPC_test):
 
-    def test_add_user_principal_alias(self, krbalias_user):
-        krbalias_user.ensure_exists()
-        krbalias_user.add_principal([u'test-user-alias'])
-        krbalias_user.retrieve()
+    @pytest.mark.parametrize('alias,tracker_cls,tracker_args,tracker_kwargs',
+                             TRACKER_DATA)
+    def test_add_principal_alias(self, alias, krbalias):
+        krbalias.ensure_exists()
+        krbalias.add_principal([alias])
+        krbalias.retrieve()
 
-    def test_remove_user_principal_alias(self, krbalias_user):
-        krbalias_user.ensure_exists()
-        krbalias_user.add_principal([u'test-user-alias'])
-        krbalias_user.remove_principal(u'test-user-alias')
-        krbalias_user.retrieve()
-
-    def test_add_host_principal_alias(self, krbalias_host):
-        krbalias_host.ensure_exists()
-        krbalias_host.add_principal([u'testhost-krb-alias'])
-        krbalias_host.retrieve()
-
-    def test_remove_host_principal_alias(self, krbalias_host):
-        krbalias_host.ensure_exists()
-        krbalias_host.add_principal([u'testhost-krb-alias'])
-        krbalias_host.retrieve()
-        krbalias_host.remove_principal([u'testhost-krb-alias'])
-        krbalias_host.retrieve()
+    @pytest.mark.parametrize('alias,tracker_cls,tracker_args,tracker_kwargs',
+                             TRACKER_DATA)
+    def test_remove_principal_alias(self, alias, krbalias):
+        krbalias.ensure_exists()
+        krbalias.add_principal([alias])
+        krbalias.remove_principal(alias)
+        krbalias.retrieve()
 
     def test_add_service_principal_alias(self, krbalias_service):
         krbalias_service.ensure_exists()
@@ -260,7 +267,7 @@ class TestKerberosAliasExceptions(XMLRPC_test):
         # Add an alias overlapping the UPN of a trusted domain
         upn_suffix = (
             trusted_domain_with_suffix['ldif']['ipaNTAdditionalSuffixes']
-        )
+        ).decode('utf-8')
 
         with pytest.raises(errors.ValidationError):
             krbalias_user.add_principal(
@@ -278,7 +285,7 @@ class TestKerberosAliasExceptions(XMLRPC_test):
         # Add an alias overlapping the NETBIOS name of a trusted domain
         netbios_name = (
             trusted_domain_with_suffix['ldif']['ipaNTFlatName']
-        )
+        ).decode('utf-8')
 
         with pytest.raises(errors.ValidationError):
             krbalias_user.add_principal(

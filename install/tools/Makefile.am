@@ -4,7 +4,7 @@ SUBDIRS = 			\
         man			\
         $(NULL)
 
-sbin_SCRIPTS =			\
+dist_sbin_SCRIPTS =		\
 	ipa-ca-install		\
 	ipa-dns-install		\
 	ipa-kra-install		\
@@ -23,25 +23,19 @@ sbin_SCRIPTS =			\
 	ipa-managed-entries     \
 	ipa-ldap-updater	\
 	ipa-otptoken-import	\
-	ipa-upgradeconfig	\
 	ipa-backup		\
 	ipa-restore		\
 	ipa-advise		\
 	ipa-cacert-manage	\
 	ipa-winsync-migrate	\
-	$(NULL)
-
-EXTRA_DIST =			\
-	README			\
-	$(sbin_SCRIPTS)		\
+	ipa-pkinit-manage	\
 	$(NULL)
 
 appdir = $(libexecdir)/ipa/
-app_SCRIPTS =			\
+dist_app_SCRIPTS =		\
+	ipa-custodia		\
+	ipa-custodia-check	\
 	ipa-httpd-kdcproxy	\
+	ipa-httpd-pwdreader	\
 	ipa-pki-retrieve-key	\
 	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	Makefile.in

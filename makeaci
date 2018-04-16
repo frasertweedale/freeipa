@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 # Authors:
 #   Petr Viktorin <pviktori@redhat.com>
 #   John Dennis <jdennis@redhat.com>
@@ -29,8 +29,6 @@ from __future__ import print_function
 import sys
 import difflib
 from argparse import ArgumentParser
-
-import ignore_import_errors     # pylint: disable=unused-import
 
 from ipalib import api
 from ipapython.dn import DN
@@ -98,6 +96,7 @@ def main(options):
         plugins_on_demand=False,
         basedn=DN('dc=ipa,dc=example'),
         realm='IPA.EXAMPLE',
+        domain="example.com",
     )
 
     from ipaserver.install.plugins import update_managed_permissions
@@ -122,7 +121,7 @@ def main(options):
             print(file=sys.stderr)
             print('Managed permission ACI validation failed.', file=sys.stderr)
             print('Re-check permission changes and run `makeaci`.', file=sys.stderr)
-            exit('%s validation failed' % options.filename)
+            sys.exit('%s validation failed' % options.filename)
     else:
         with open(options.filename, 'w') as file:
             file.writelines(output_lines)

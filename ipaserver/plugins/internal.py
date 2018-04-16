@@ -154,7 +154,7 @@ class i18n_messages(Command):
     messages = {
         "ajax": {
             "401": {
-                "message": _("Your session has expired. Please re-login."),
+                "message": _("Your session has expired. Please log in again."),
             },
         },
         "actions": {
@@ -219,6 +219,8 @@ class i18n_messages(Command):
             "apply": _("Apply"),
             "back": _("Back"),
             "cancel": _("Cancel"),
+            "clear": _("Clear"),
+            "clear_title": _("Clear all fields on the page."),
             "close": _("Close"),
             "disable": _("Disable"),
             "download": _("Download"),
@@ -230,6 +232,8 @@ class i18n_messages(Command):
             "get": _("Get"),
             "hide": _("Hide"),
             "issue": _("Issue"),
+            "match": _("Match"),
+            "match_title": _("Match users according to certificate."),
             "ok": _("OK"),
             "refresh": _("Refresh"),
             "refresh_title": _("Reload current settings from the server."),
@@ -249,6 +253,10 @@ class i18n_messages(Command):
             "unapply": ("Un-apply"),
             "update": _("Update"),
             "view": _("View"),
+        },
+        "customization": {
+            "customization": _("Customization"),
+            "table_pagination": _("Pagination Size"),
         },
         "details": {
             "collapse_all": _("Collapse All"),
@@ -332,12 +340,21 @@ class i18n_messages(Command):
             "pad": _("PAD"),
         },
         "login": {
-            "form_auth": _("<i class=\"fa fa-info-circle\"></i> To login with <strong>username and password</strong>, enter them in the corresponding fields, then click Login."),
+            "form_auth": _(
+                "<i class=\"fa fa-info-circle\"></i> To log in with "
+                "<strong>username and password</strong>, enter them in the "
+                "corresponding fields, then click 'Log in'."),
             "header": _("Logged In As"),
-            "krb_auth_msg": _("<i class=\"fa fa-info-circle\"></i> To login with <strong>Kerberos</strong>, please make sure you have valid tickets (obtainable via kinit) and <a href='http://${host}/ipa/config/unauthorized.html'>configured</a> the browser correctly, then click Login."),
-            "login": _("Login"),
-            "logout": _("Logout"),
-            "logout_error": _("Logout error"),
+            "krb_auth_msg": _(
+                "<i class=\"fa fa-info-circle\"></i> To log in with "
+                "<strong>Kerberos</strong>, please make sure you have valid "
+                "tickets (obtainable via kinit) and <a href='http://${host}/"
+                "ipa/config/unauthorized.html'>configured</a> the browser "
+                "correctly, then click 'Log in'."),
+            "loading_md": _("Loading data"),
+            "login": _("Log in"),
+            "logout": _("Log out"),
+            "logout_error": _("Log out error"),
             "password": _("Password"),
             "sync_otp_token": _("Sync OTP Token"),
             "username": _("Username"),
@@ -426,7 +443,6 @@ class i18n_messages(Command):
                 "issued_on": _("Issued On"),
                 "issued_to": _("Issued To"),
                 "key_compromise": _("Key Compromise"),
-                "md5_fingerprint": _("MD5 Fingerprint"),
                 "missing": _("No Valid Certificate"),
                 "new_certificate": _("New Certificate"),
                 "new_cert_format": _("Certificate in base64 or PEM format"),
@@ -463,6 +479,26 @@ class i18n_messages(Command):
                 "validity": _("Validity"),
                 "view_certificate": _("Certificate for ${entity} ${primary_key}"),
                 "view_certificate_btn": _("View Certificate"),
+            },
+            "certmap_match": {
+                "cert_data": _("Certificate Data"),
+                "cert_for_match": _("Certificate For Match"),
+                "facet_label": _("Certificate Mapping Match"),
+                "domain": _("Domain"),
+                "matched_users": _("Matched Users"),
+                "userlogin": _("User Login"),
+            },
+            "certmap": {
+                "adder_title": _("Add Certificate Mapping Data"),
+                "data_label": _("Certificate mapping data"),
+                "certificate": _("Certificate"),
+                "conf_str": _("Configuration string"),
+                "deleter_content": _("Do you want to remove certificate mapping data ${data}?"),
+                "deleter_title": _("Remove Certificate Mapping Data"),
+                "issuer": _("Issuer"),
+                "issuer_subject": _("Issuer and subject"),
+                "subject": _("Subject"),
+                "version": _("Version"),
             },
             "config": {
                 "group": _("Group Options"),
@@ -522,11 +558,14 @@ class i18n_messages(Command):
             "group": {
                 "details": _("Group Settings"),
                 "external": _("External"),
+                "groups": _("Groups"),
+                "group_categories": _("Group categories"),
                 "make_external": _("Change to external group"),
                 "make_posix": _("Change to POSIX group"),
                 "nonposix": _("Non-POSIX"),
                 "posix": _("POSIX"),
                 "type": _("Group Type"),
+                "user_groups": _("User Groups"),
             },
             "hbacrule": {
                 "any_host": _("Any Host"),
@@ -587,12 +626,14 @@ class i18n_messages(Command):
                 "unprovisioned": _("Host unprovisioned"),
             },
             "hostgroup": {
+                "host_group": _("Host Groups"),
                 "identity": _("Host Group Settings"),
             },
             "idoverrideuser": {
                 "anchor_label": _("User to override"),
                 "anchor_tooltip": _("Enter trusted or IPA user login. Note: search doesn't list users from trusted domains."),
                 "anchor_tooltip_ad": _("Enter trusted user login."),
+                "profile": _("Profile"),
             },
             "idoverridegroup": {
                 "anchor_label": _("Group to override"),
@@ -629,6 +670,7 @@ class i18n_messages(Command):
                 "hostgroups": _("Host Groups"),
                 "hosts": _("Hosts"),
                 "identity": _("Netgroup Settings"),
+                "netgroups": _("Netgroups"),
                 "specified_hosts": _("Specified Hosts and Groups"),
                 "specified_users": _("Specified Users and Groups"),
                 "user": _("User"),
@@ -658,6 +700,15 @@ class i18n_messages(Command):
             },
             "privilege": {
                 "identity": _("Privilege Settings"),
+            },
+            "publickey": {
+                "set_dialog_help": _("Public key:"),
+                "set_dialog_title": _("Set public key"),
+                "show_set_key": _("Show/Set key"),
+                "status_mod_ns": _("Modified: key not set"),
+                "status_mod_s": _("Modified"),
+                "status_new_ns": _("New: key not set"),
+                "status_new_s": _("New: key set"),
             },
             "pwpolicy": {
                 "identity": _("Password Policy"),
@@ -704,8 +755,8 @@ class i18n_messages(Command):
                 "label_singular": _("Server Role"),
             },
             "servers": {
-                "ca_warning_message": _("It is strongly recommended to keep the CA services installed on more than one server."),
-                "ca_warning_title": _("Warning: Only One CA Server Detected"),
+                "svc_warning_title": _("Warning: Consider service replication"),
+                "svc_warning_message": _("It is strongly recommended to keep the following services installed on more than one server:"),
                 "remove_server": _("Delete Server"),
                 "remove_server_msg": _("Deleting a server removes it permanently from the topology. Note that this is a non-reversible action.")
             },
@@ -819,6 +870,35 @@ class i18n_messages(Command):
                 "unlock": _("Unlock"),
                 "unlock_confirm": _("Are you sure you want to unlock user ${object}?"),
             },
+            "vault": {
+                "add_warn_arch_ret": _(
+                    "Secrets can be added/retrieved to vault only by using "
+                    "vault-archive and vault-retrieve from CLI."
+                    ),
+                "add_warn_standard": _(
+                    "Content of 'standard' vaults can be seen by users with "
+                    "higher privileges (admins)."
+                    ),
+                "asymmetric_type": _("Asymmetric"),
+                "config_title": _("Vaults Config"),
+                "group": _("Group"),
+                "members": _("Members"),
+                "my_vaults_title": _("My User Vaults"),
+                "owners": _("Owners"),
+                "service": _("Service"),
+                "service_vaults_title": _("Service Vaults"),
+                "shared": _("Shared"),
+                "shared_vaults_title": _("Shared Vaults"),
+                "standard_type": _("Standard"),
+                "symmetric_type": _("Symmetric"),
+                "type": _("Vault Type"),
+                "type_tooltip": _(
+                    "Only standard vaults can be created in WebUI, use CLI "
+                    "for other types of vaults."
+                    ),
+                "user": _("User"),
+                "user_vaults_title": _("User Vaults"),
+            },
         },
         "password": {
             "current_password": _("Current Password"),
@@ -875,12 +955,12 @@ class i18n_messages(Command):
             "automount": _("Automount"),
             "cert": _("Certificates"),
             "dns": _("DNS"),
-            "hbac": _("Host Based Access Control"),
+            "hbac": _("Host-Based Access Control"),
             "identity": _("Identity"),
             "ipaserver": _("IPA Server"),
             "network_services": _("Network Services"),
             "policy": _("Policy"),
-            "role": _("Role Based Access Control"),
+            "role": _("Role-Based Access Control"),
             "sudo": _("Sudo"),
             "topology": _("Topology"),
             "trust": _("Trusts"),
@@ -910,6 +990,7 @@ class i18n_messages(Command):
                 "min_value": _("Minimum value is ${value}"),
                 "net_address": _("Not a valid network address (examples: 2001:db8::/64, 192.0.2.0/24)"),
                 "parse": _("Parse error"),
+                "positive_number": _("Must be a positive number"),
                 "port": _("'${port}' is not a valid port"),
                 "required": _("Required field"),
                 "unsupported": _("Unsupported value"),

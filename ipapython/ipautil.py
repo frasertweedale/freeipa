@@ -19,14 +19,16 @@
 
 from __future__ import print_function
 
+import codecs
+import logging
 import string
 import tempfile
 import subprocess
 import random
+import math
 import os
 import sys
 import copy
-import stat
 import shutil
 import socket
 import re
@@ -34,13 +36,11 @@ import datetime
 import netaddr
 import netifaces
 import time
-import gssapi
 import pwd
 import grp
 from contextlib import contextmanager
 import locale
 import collections
-from subprocess import CalledProcessError
 
 from dns import resolver, reversename
 from dns.exception import DNSException
@@ -49,31 +49,24 @@ import six
 from six.moves import input
 from six.moves import urllib
 
-from ipapython.ipa_log_manager import root_logger
-from ipapython import config
-from ipaplatform.paths import paths
 from ipapython.dn import DN
 
-SHARE_DIR = paths.USR_SHARE_IPA_DIR
-PLUGINS_SHARE_DIR = paths.IPA_PLUGINS
+logger = logging.getLogger(__name__)
 
-GEN_PWD_LEN = 22
-GEN_TMP_PWD_LEN = 12  # only for OTP password that is manually retyped by user
-
-# Having this in krb_utils would cause circular import
-KRB5_KDC_UNREACH = 2529639068 # Cannot contact any KDC for requested realm
-KRB5KDC_ERR_SVC_UNAVAILABLE = 2529638941 # A service is not available that is
-                                         # required to process the request
+# only for OTP password that is manually retyped by user
+TMP_PWD_ENTROPY_BITS = 128
 
 
-def get_domain_name():
-    try:
-        config.init_config()
-        domain_name = config.config.get_domain()
-    except Exception:
-        return None
+PROTOCOL_NAMES = {
+    socket.SOCK_STREAM: 'tcp',
+    socket.SOCK_DGRAM: 'udp'
+}
 
-    return domain_name
+InterfaceDetails = collections.namedtuple(
+    'InterfaceDetails', [
+        'name',  # interface name
+        'ifnet'  # network details of interface
+    ])
 
 
 class UnsafeIPAddress(netaddr.IPAddress):
@@ -142,7 +135,7 @@ class CheckedIPAddress(UnsafeIPAddress):
 
     Reserved or link-local addresses are never accepted.
     """
-    def __init__(self, addr, match_local=False, parse_netmask=True,
+    def __init__(self, addr, parse_netmask=True,
                  allow_loopback=False, allow_multicast=False):
         try:
             super(CheckedIPAddress, self).__init__(addr)
@@ -173,38 +166,6 @@ class CheckedIPAddress(UnsafeIPAddress):
         if not allow_multicast and self.is_multicast():
             raise ValueError("cannot use multicast IP address {}".format(addr))
 
-        if match_local:
-            if self.version == 4:
-                family = netifaces.AF_INET
-            elif self.version == 6:
-                family = netifaces.AF_INET6
-            else:
-                raise ValueError(
-                    "Unsupported address family ({})".format(self.version)
-                )
-
-            iface = None
-            for interface in netifaces.interfaces():
-                for ifdata in netifaces.ifaddresses(interface).get(family, []):
-
-                    # link-local addresses contain '%suffix' that causes parse
-                    # errors in IPNetwork
-                    ifaddr = ifdata['addr'].split(u'%', 1)[0]
-
-                    ifnet = netaddr.IPNetwork('{addr}/{netmask}'.format(
-                        addr=ifaddr,
-                        netmask=ifdata['netmask']
-                    ))
-                    if ifnet == self._net or (
-                            self._net is None and ifnet.ip == self):
-                        self._net = ifnet
-                        iface = interface
-                        break
-
-            if iface is None:
-                raise ValueError('no network interface matches the IP address '
-                                 'and netmask {}'.format(addr))
-
         if self._net is None:
             if self.version == 4:
                 self._net = netaddr.IPNetwork(
@@ -230,6 +191,76 @@ class CheckedIPAddress(UnsafeIPAddress):
 
     def is_broadcast_addr(self):
         return self.version == 4 and self == self._net.broadcast
+
+    def get_matching_interface(self):
+        """Find matching local interface for address
+        :return: InterfaceDetails named tuple or None if no interface has
+        this address
+        """
+        logger.debug("Searching for an interface of IP address: %s", self)
+        if self.version == 4:
+            family = netifaces.AF_INET
+        elif self.version == 6:
+            family = netifaces.AF_INET6
+        else:
+            raise ValueError(
+                "Unsupported address family ({})".format(self.version)
+            )
+
+        for interface in netifaces.interfaces():
+            for ifdata in netifaces.ifaddresses(interface).get(family, []):
+
+                # link-local addresses contain '%suffix' that causes parse
+                # errors in IPNetwork
+                ifaddr = ifdata['addr'].split(u'%', 1)[0]
+
+                # newer versions of netifaces provide IPv6 netmask in format
+                # 'ffff:ffff:ffff:ffff::/64'. We have to split and use prefix
+                # or the netmask with older versions
+                ifmask = ifdata['netmask'].split(u'/')[-1]
+
+                ifaddrmask = '{addr}/{netmask}'.format(
+                    addr=ifaddr,
+                    netmask=ifmask
+                )
+                logger.debug(
+                    "Testing local IP address: %s (interface: %s)",
+                    ifaddrmask, interface)
+
+                ifnet = netaddr.IPNetwork(ifaddrmask)
+
+                if ifnet.ip == self:
+                    return InterfaceDetails(interface, ifnet)
+        return None
+
+    def set_ip_net(self, ifnet):
+        """Set IP Network details for this address. IPNetwork is valid only
+        locally, so this should be set only for local IP addresses
+
+        :param ifnet: netaddr.IPNetwork object with information about IP
+        network where particula address belongs locally
+        """
+        assert isinstance(ifnet, netaddr.IPNetwork)
+        self._net = ifnet
+
+
+class CheckedIPAddressLoopback(CheckedIPAddress):
+    """IPv4 or IPv6 address with additional constraints with
+    possibility to use a loopback IP.
+    Reserved or link-local addresses are never accepted.
+    """
+    def __init__(self, addr, parse_netmask=True, allow_multicast=False):
+
+        super(CheckedIPAddressLoopback, self).__init__(
+                addr, parse_netmask=parse_netmask,
+                allow_multicast=allow_multicast,
+                allow_loopback=True)
+
+        if self.is_loopback():
+            # print is being used instead of a logger, because at this
+            # moment, in execution process, there is no logger configured
+            print("WARNING: You are using a loopback IP: {}".format(addr),
+                  file=sys.stderr)
 
 
 def valid_ip(addr):
@@ -295,6 +326,25 @@ def write_tmp_file(txt):
 
     return fd
 
+
+def flush_sync(f):
+    """Flush and fsync file to disk
+
+    :param f: a file object with fileno and name
+    """
+    # flush file buffer to file descriptor
+    f.flush()
+    # flush Kernel buffer to disk
+    os.fsync(f.fileno())
+    # sync metadata in directory
+    dirname = os.path.dirname(os.path.abspath(f.name))
+    dirfd = os.open(dirname, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
+
+
 def shell_quote(string):
     if isinstance(string, str):
         return "'" + string.replace("'", "'\\''") + "'"
@@ -302,27 +352,38 @@ def shell_quote(string):
         return b"'" + string.replace(b"'", b"'\\''") + b"'"
 
 
-if six.PY3:
-    def _log_arg(s):
-        """Convert string or bytes to a string suitable for logging"""
-        if isinstance(s, bytes):
-            return s.decode(locale.getpreferredencoding(),
-                            errors='replace')
-        else:
-            return s
-else:
-    _log_arg = str
-
-
 class _RunResult(collections.namedtuple('_RunResult',
                                         'output error_output returncode')):
     """Result of ipautil.run"""
 
 
+class CalledProcessError(subprocess.CalledProcessError):
+    """CalledProcessError with stderr
+
+    Hold stderr of failed call and print it in repr() to simplify debugging.
+    """
+    def __init__(self, returncode, cmd, output=None, stderr=None):
+        super(CalledProcessError, self).__init__(returncode, cmd, output)
+        self.stderr = stderr
+
+    def __str__(self):
+        args = [
+            self.__class__.__name__, '('
+            'Command {!s} '.format(self.cmd),
+            'returned non-zero exit status {!r}'.format(self.returncode)
+        ]
+        if self.stderr is not None:
+            args.append(': {!r}'.format(self.stderr))
+        args.append(')')
+        return ''.join(args)
+
+    __repr__ = __str__
+
+
 def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
         capture_output=False, skip_output=False, cwd=None,
-        runas=None, timeout=None, suplementary_groups=[],
-        capture_error=False, encoding=None, redirect_output=False):
+        runas=None, suplementary_groups=[],
+        capture_error=False, encoding=None, redirect_output=False, umask=None):
     """
     Execute an external command.
 
@@ -335,7 +396,7 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
 
         Example:
         We have a command
-            [paths.SETPASSWD, '--password', 'Secret123', 'someuser']
+            ['/usr/bin/setpasswd', '--password', 'Secret123', 'someuser']
         and we don't want to log the password so nolog would be set to:
         ('Secret123',)
         The resulting log output would be:
@@ -350,8 +411,6 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
     :param cwd: Current working directory
     :param runas: Name of a user that the command should be run as. The spawned
         process will have both real and effective UID and GID set.
-    :param timeout: Timeout if the command hasn't returned within the specified
-        number of seconds.
     :param suplementary_groups: List of group names that will be used as
         suplementary groups for subporcess.
         The option runas must be specified together with this option.
@@ -360,6 +419,7 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
         error_output, and (if it's not bytes) stdin.
         If None, the current encoding according to locale is used.
     :param redirect_output: Redirect (error) output to standard (error) output.
+    :param umask: Set file-creation mask before running the command.
 
     :return: An object with these attributes:
 
@@ -413,7 +473,7 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
     if stdin:
         p_in = subprocess.PIPE
     if skip_output:
-        p_out = p_err = open(paths.DEV_NULL, 'w')
+        p_out = p_err = open(os.devnull, 'w')
     elif redirect_output:
         p_out = sys.stdout
         p_err = sys.stderr
@@ -427,34 +487,30 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
     if six.PY3 and isinstance(stdin, str):
         stdin = stdin.encode(encoding)
 
-    if timeout:
-        # If a timeout was provided, use the timeout command
-        # to execute the requested command.
-        args[0:0] = [paths.BIN_TIMEOUT, str(timeout)]
+    arg_string = nolog_replace(repr(args), nolog)
+    logger.debug('Starting external process')
+    logger.debug('args=%s', arg_string)
 
-    arg_string = nolog_replace(' '.join(_log_arg(a) for a in args), nolog)
-    root_logger.debug('Starting external process')
-    root_logger.debug('args=%s' % arg_string)
+    def preexec_fn():
+        if runas is not None:
+            pent = pwd.getpwnam(runas)
 
-    preexec_fn = None
-    if runas is not None:
-        pent = pwd.getpwnam(runas)
+            suplementary_gids = [
+                grp.getgrnam(group).gr_gid for group in suplementary_groups
+            ]
 
-        suplementary_gids = [
-            grp.getgrnam(group).gr_gid for group in suplementary_groups
-        ]
+            logger.debug('runas=%s (UID %d, GID %s)', runas,
+                         pent.pw_uid, pent.pw_gid)
+            if suplementary_groups:
+                for group, gid in zip(suplementary_groups, suplementary_gids):
+                    logger.debug('suplementary_group=%s (GID %d)', group, gid)
 
-        root_logger.debug('runas=%s (UID %d, GID %s)', runas,
-            pent.pw_uid, pent.pw_gid)
-        if suplementary_groups:
-            for group, gid in zip(suplementary_groups, suplementary_gids):
-                root_logger.debug('suplementary_group=%s (GID %d)', group, gid)
+            os.setgroups(suplementary_gids)
+            os.setregid(pent.pw_gid, pent.pw_gid)
+            os.setreuid(pent.pw_uid, pent.pw_uid)
 
-        preexec_fn = lambda: (
-            os.setgroups(suplementary_gids),
-            os.setregid(pent.pw_gid, pent.pw_gid),
-            os.setreuid(pent.pw_uid, pent.pw_uid),
-        )
+        if umask:
+            os.umask(umask)
 
     try:
         p = subprocess.Popen(args, stdin=p_in, stdout=p_out, stderr=p_err,
@@ -462,20 +518,17 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
                              preexec_fn=preexec_fn)
         stdout, stderr = p.communicate(stdin)
     except KeyboardInterrupt:
-        root_logger.debug('Process interrupted')
+        logger.debug('Process interrupted')
         p.wait()
         raise
     except:
-        root_logger.debug('Process execution failed')
+        logger.debug('Process execution failed')
         raise
     finally:
         if skip_output:
             p_out.close()   # pylint: disable=E1103
 
-    if timeout and p.returncode == 124:
-        root_logger.debug('Process did not complete before timeout')
-
-    root_logger.debug('Process finished, return code=%s', p.returncode)
+    logger.debug('Process finished, return code=%s', p.returncode)
 
     # The command and its output may include passwords that we don't want
     # to log. Replace those.
@@ -494,9 +547,9 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
         else:
             error_log = stderr
         output_log = nolog_replace(output_log, nolog)
-        root_logger.debug('stdout=%s' % output_log)
+        logger.debug('stdout=%s', output_log)
         error_log = nolog_replace(error_log, nolog)
-        root_logger.debug('stderr=%s' % error_log)
+        logger.debug('stderr=%s', error_log)
 
     if capture_output:
         if six.PY2:
@@ -515,7 +568,9 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
         error_output = None
 
     if p.returncode != 0 and raiseonerr:
-        raise CalledProcessError(p.returncode, arg_string, str(output))
+        raise CalledProcessError(
+            p.returncode, arg_string, output_log, error_log
+        )
 
     result = _RunResult(output, error_output, p.returncode)
     result.raw_output = stdout
@@ -528,7 +583,7 @@ def run(args, stdin=None, raiseonerr=True, nolog=(), env=None,
 def nolog_replace(string, nolog):
     """Replace occurences of strings given in `nolog` with XXXXXXXX"""
     for value in nolog:
-        if not isinstance(value, six.string_types):
+        if not value or not isinstance(value, six.string_types):
             continue
 
         quoted = urllib.parse.quote(value)
@@ -538,88 +593,17 @@ def nolog_replace(string, nolog):
     return string
 
 
-def file_exists(filename):
-    try:
-        mode = os.stat(filename)[stat.ST_MODE]
-        return bool(stat.S_ISREG(mode))
-    except Exception:
-        return False
-
-def dir_exists(filename):
-    try:
-        mode = os.stat(filename)[stat.ST_MODE]
-        return bool(stat.S_ISDIR(mode))
-    except Exception:
-        return False
-
-
 def install_file(fname, dest):
     # SELinux: use copy to keep the right context
-    if file_exists(dest):
+    if os.path.isfile(dest):
         os.rename(dest, dest + ".orig")
     shutil.copy(fname, dest)
     os.remove(fname)
 
 
 def backup_file(fname):
-    if file_exists(fname):
+    if os.path.isfile(fname):
         os.rename(fname, fname + ".orig")
-
-def _ensure_nonempty_string(string, message):
-    if not isinstance(string, str) or not string:
-        raise ValueError(message)
-
-# uses gpg to compress and encrypt a file
-def encrypt_file(source, dest, password, workdir = None):
-    _ensure_nonempty_string(source, 'Missing Source File')
-    #stat it so that we get back an exception if it does no t exist
-    os.stat(source)
-
-    _ensure_nonempty_string(dest, 'Missing Destination File')
-    _ensure_nonempty_string(password, 'Missing Password')
-
-    #create a tempdir so that we can clean up with easily
-    tempdir = tempfile.mkdtemp('', 'ipa-', workdir)
-    gpgdir = tempdir+"/.gnupg"
-
-    try:
-        try:
-            #give gpg a fake dir so that we can leater remove all
-            #the cruft when we clean up the tempdir
-            os.mkdir(gpgdir)
-            args = [paths.GPG_AGENT, '--batch', '--homedir', gpgdir, '--daemon', paths.GPG, '--batch', '--homedir', gpgdir, '--passphrase-fd', '0', '--yes', '--no-tty', '-o', dest, '-c', source]
-            run(args, password, skip_output=True)
-        except:
-            raise
-    finally:
-        #job done, clean up
-        shutil.rmtree(tempdir, ignore_errors=True)
-
-
-def decrypt_file(source, dest, password, workdir = None):
-    _ensure_nonempty_string(source, 'Missing Source File')
-    #stat it so that we get back an exception if it does no t exist
-    os.stat(source)
-
-    _ensure_nonempty_string(dest, 'Missing Destination File')
-    _ensure_nonempty_string(password, 'Missing Password')
-
-    #create a tempdir so that we can clean up with easily
-    tempdir = tempfile.mkdtemp('', 'ipa-', workdir)
-    gpgdir = tempdir+"/.gnupg"
-
-    try:
-        try:
-            #give gpg a fake dir so that we can leater remove all
-            #the cruft when we clean up the tempdir
-            os.mkdir(gpgdir)
-            args = [paths.GPG_AGENT, '--batch', '--homedir', gpgdir, '--daemon', paths.GPG, '--batch', '--homedir', gpgdir, '--passphrase-fd', '0', '--yes', '--no-tty', '-o', dest, '-d', source]
-            run(args, password, skip_output=True)
-        except:
-            raise
-    finally:
-        #job done, clean up
-        shutil.rmtree(tempdir, ignore_errors=True)
 
 
 class CIDict(dict):
@@ -690,7 +674,9 @@ class CIDict(dict):
 
     if six.PY2:
         def has_key(self, key):
+            # pylint: disable=no-member
             return super(CIDict, self).has_key(key.lower())
+            # pylint: enable=no-member
 
     def get(self, key, failobj=None):
         try:
@@ -868,37 +854,94 @@ def parse_generalized_time(timestr):
     except ValueError:
         return None
 
-def ipa_generate_password(characters=None,pwd_len=None):
-    ''' Generates password. Password cannot start or end with a whitespace
-    character. It also cannot be formed by whitespace characters only.
-    Length of password as well as string of characters to be used by
-    generator could be optionaly specified by characters and pwd_len
-    parameters, otherwise default values will be used: characters string
-    will be formed by all printable non-whitespace characters and space,
-    pwd_len will be equal to value of GEN_PWD_LEN.
-    '''
-    if not characters:
-        characters=string.digits + string.ascii_letters + string.punctuation + ' '
-    else:
-        if characters.isspace():
-            raise ValueError("password cannot be formed by whitespaces only")
-    if not pwd_len:
-        pwd_len = GEN_PWD_LEN
 
-    upper_bound = len(characters) - 1
-    rndpwd = ''
-    r = random.SystemRandom()
+def ipa_generate_password(entropy_bits=256, uppercase=1, lowercase=1, digits=1,
+                          special=1, min_len=0):
+    """
+    Generate token containing at least `entropy_bits` bits and with the given
+    character restraints.
 
-    for x in range(pwd_len):
-        rndchar = characters[r.randint(0,upper_bound)]
-        if (x == 0) or (x == pwd_len-1):
-            while rndchar.isspace():
-                rndchar = characters[r.randint(0,upper_bound)]
-        rndpwd += rndchar
-    return rndpwd
+    :param entropy_bits:
+        The minimal number of entropy bits attacker has to guess:
+           128 bits entropy: secure
+           256 bits of entropy: secure enough if you care about quantum
+                                computers
+
+    Integer values specify minimal number of characters from given
+    character class and length.
+    Value None prevents given character from appearing in the token.
+
+    Example:
+    TokenGenerator(uppercase=3, lowercase=3, digits=0, special=None)
+
+    At least 3 upper and 3 lower case ASCII chars, may contain digits,
+    no special chars.
+    """
+    special_chars = '!$%&()*+,-./:;<>?@[]^_{|}~'
+    pwd_charsets = {
+        'uppercase': {
+            'chars': string.ascii_uppercase,
+            'entropy': math.log(len(string.ascii_uppercase), 2)
+        },
+        'lowercase': {
+            'chars': string.ascii_lowercase,
+            'entropy': math.log(len(string.ascii_lowercase), 2)
+        },
+        'digits': {
+            'chars': string.digits,
+            'entropy': math.log(len(string.digits), 2)
+        },
+        'special': {
+            'chars': special_chars,
+            'entropy': math.log(len(special_chars), 2)
+        },
+    }
+    req_classes = dict(
+        uppercase=uppercase,
+        lowercase=lowercase,
+        digits=digits,
+        special=special
+    )
+    # 'all' class is used when adding entropy to too-short tokens
+    # it contains characters from all allowed classes
+    pwd_charsets['all'] = {
+        'chars': ''.join([
+            charclass['chars'] for charclass_name, charclass
+            in pwd_charsets.items()
+            if req_classes[charclass_name] is not None
+        ])
+    }
+    pwd_charsets['all']['entropy'] = math.log(
+            len(pwd_charsets['all']['chars']), 2)
+    rnd = random.SystemRandom()
+
+    todo_entropy = entropy_bits
+    password = u''
+    # Generate required character classes:
+    # The order of generated characters is fixed to comply with check in
+    # NSS function sftk_newPinCheck() in nss/lib/softoken/fipstokn.c.
+    for charclass_name in ['digits', 'uppercase', 'lowercase', 'special']:
+        charclass = pwd_charsets[charclass_name]
+        todo_characters = req_classes[charclass_name]
+        if todo_characters is None:
+            continue
+        while todo_characters > 0:
+            password += rnd.choice(charclass['chars'])
+            todo_entropy -= charclass['entropy']
+            todo_characters -= 1
+
+    # required character classes do not provide sufficient entropy
+    # or does not fulfill minimal length constraint
+    allchars = pwd_charsets['all']
+    while todo_entropy > 0 or len(password) < min_len:
+        password += rnd.choice(allchars['chars'])
+        todo_entropy -= allchars['entropy']
+
+    return password
+
 
 def user_input(prompt, default = None, allow_empty = True):
-    if default == None:
+    if default is None:
         while True:
             try:
                 ret = input("%s: " % prompt)
@@ -950,16 +993,26 @@ def user_input(prompt, default = None, allow_empty = True):
             else:
                 return ret
 
+    return None
 
-def host_port_open(host, port, socket_type=socket.SOCK_STREAM, socket_timeout=None):
+
+def host_port_open(host, port, socket_type=socket.SOCK_STREAM,
+                   socket_timeout=None, log_errors=False,
+                   log_level=logging.DEBUG):
+    """
+    host: either hostname or IP address;
+          if hostname is provided, port MUST be open on ALL resolved IPs
+
+    returns True is port is open, False otherwise
+    """
+    port_open = True
+
+    # port has to be open on ALL resolved IPs
     for res in socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket_type):
         af, socktype, proto, _canonname, sa = res
+        s = None
         try:
-            try:
-                s = socket.socket(af, socktype, proto)
-            except socket.error:
-                s = None
-                continue
+            s = socket.socket(af, socktype, proto)
 
             if socket_timeout is not None:
                 s.settimeout(socket_timeout)
@@ -967,88 +1020,70 @@ def host_port_open(host, port, socket_type=socket.SOCK_STREAM, socket_timeout=No
             s.connect(sa)
 
             if socket_type == socket.SOCK_DGRAM:
-                s.send('')
+                s.send(b'')
                 s.recv(512)
-
-            return True
         except socket.error:
-            pass
+            port_open = False
+            if log_errors:
+                msg = ('Failed to connect to port %(port)s %(proto)s on '
+                       '%(addr)s' % dict(port=port,
+                                         proto=PROTOCOL_NAMES[socket_type],
+                                         addr=sa[0]))
+                logger.log(log_level, msg)
         finally:
-            if s:
+            if s is not None:
                 s.close()
 
-    return False
+    return port_open
 
-def bind_port_responder(port, socket_type=socket.SOCK_STREAM, socket_timeout=None, responder_data=None):
-    host = None   # all available interfaces
-    last_socket_error = None
 
-    # At first try to create IPv6 socket as it is able to accept both IPv6 and
-    # IPv4 connections (when not turned off)
-    families = (socket.AF_INET6, socket.AF_INET)
-    s = None
+def check_port_bindable(port, socket_type=socket.SOCK_STREAM):
+    """Check if a port is free and not bound by any other application
 
-    for family in families:
-        try:
-            addr_infos = socket.getaddrinfo(host, port, family, socket_type, 0,
-                            socket.AI_PASSIVE)
-        except socket.error as e:
-            last_socket_error = e
-            continue
-        for res in addr_infos:
-            af, socktype, proto, _canonname, sa = res
-            try:
-                s = socket.socket(af, socktype, proto)
-            except socket.error as e:
-                last_socket_error = e
-                s = None
-                continue
+    :param port: port number
+    :param socket_type: type (SOCK_STREAM for TCP, SOCK_DGRAM for UDP)
 
-            if socket_timeout is not None:
-                s.settimeout(1)
+    Returns True if the port is free, False otherwise
+    """
+    if socket_type == socket.SOCK_STREAM:
+        proto = 'TCP'
+    elif socket_type == socket.SOCK_DGRAM:
+        proto = 'UDP'
+    else:
+        raise ValueError(socket_type)
 
-            if af == socket.AF_INET6:
-                try:
-                    # Make sure IPv4 clients can connect to IPv6 socket
-                    s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-                except socket.error:
-                    pass
+    # Detect dual stack or IPv4 single stack
+    try:
+        s = socket.socket(socket.AF_INET6, socket_type)
+        anyaddr = '::'
+        logger.debug(
+            "check_port_bindable: Checking IPv4/IPv6 dual stack and %s",
+            proto
+        )
+    except socket.error:
+        s = socket.socket(socket.AF_INET, socket_type)
+        anyaddr = ''
+        logger.debug("check_port_bindable: Checking IPv4 only and %s", proto)
 
-            if socket_type == socket.SOCK_STREAM:
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-            try:
-                s.bind(sa)
-
-                while True:
-                    if socket_type == socket.SOCK_STREAM:
-                        s.listen(1)
-                        connection, _client_address = s.accept()
-                        try:
-                            if responder_data:
-                                connection.sendall(responder_data)
-                        finally:
-                            connection.close()
-                    elif socket_type == socket.SOCK_DGRAM:
-                        _data, addr = s.recvfrom(1)
-
-                        if responder_data:
-                            s.sendto(responder_data, addr)
-            except socket.timeout:
-                # Timeout is expectable as it was requested by caller, raise
-                # the exception back to him
-                raise
-            except socket.error as e:
-                last_socket_error = e
-                s.close()
-                s = None
-                continue
-            finally:
-                if s:
-                    s.close()
-
-    if s is None and last_socket_error is not None:
-        raise last_socket_error # pylint: disable=E0702
+    # Attempt to bind
+    try:
+        if socket_type == socket.SOCK_STREAM:
+            # reuse TCP sockets in TIME_WAIT state
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, True)
+        s.bind((anyaddr, port))
+    except socket.error as e:
+        logger.debug(
+            "check_port_bindable: failed to bind to port %i/%s: %s",
+            port, proto, e
+        )
+        return False
+    else:
+        logger.debug(
+            "check_port_bindable: bind success: %i/%s", port, proto
+        )
+        return True
+    finally:
+        s.close()
 
 
 def reverse_record_exists(ip_address):
@@ -1096,7 +1131,7 @@ $)''', re.VERBOSE)
     orig_stat = os.stat(filepath)
     old_values = dict()
     temp_filename = None
-    with tempfile.NamedTemporaryFile(delete=False) as new_config:
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as new_config:
         temp_filename = new_config.name
         with open(filepath, 'r') as f:
             for line in f:
@@ -1182,7 +1217,7 @@ $)''', re.VERBOSE)
     orig_stat = os.stat(filepath)
     old_values = dict()
     temp_filename = None
-    with tempfile.NamedTemporaryFile(delete=False) as new_config:
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as new_config:
         temp_filename = new_config.name
         with open(filepath, 'r') as f:
             in_section = False
@@ -1271,18 +1306,23 @@ def wait_for_open_ports(host, ports, timeout=0):
     if not isinstance(ports, (tuple, list)):
         ports = [ports]
 
-    root_logger.debug('wait_for_open_ports: %s %s timeout %d', host, ports, timeout)
+    logger.debug('wait_for_open_ports: %s %s timeout %d', host, ports, timeout)
     op_timeout = time.time() + timeout
 
     for port in ports:
+        logger.debug('waiting for port: %s', port)
+        log_error = True
         while True:
-            port_open = host_port_open(host, port)
+            port_open = host_port_open(host, port, log_errors=log_error)
+            log_error = False  # Log only first err so that the log is readable
 
             if port_open:
+                logger.debug('SUCCESS: port: %s', port)
                 break
             if timeout and time.time() > op_timeout: # timeout exceeded
                 raise socket.timeout("Timeout exceeded")
             time.sleep(1)
+
 
 def wait_for_open_socket(socket_name, timeout=0):
     """
@@ -1305,85 +1345,6 @@ def wait_for_open_socket(socket_name, timeout=0):
                 time.sleep(1)
             else:
                 raise e
-
-
-def kinit_keytab(principal, keytab, ccache_name, config=None, attempts=1):
-    """
-    Given a ccache_path, keytab file and a principal kinit as that user.
-
-    The optional parameter 'attempts' specifies how many times the credential
-    initialization should be attempted in case of non-responsive KDC.
-    """
-    errors_to_retry = {KRB5KDC_ERR_SVC_UNAVAILABLE,
-                       KRB5_KDC_UNREACH}
-    root_logger.debug("Initializing principal %s using keytab %s"
-                      % (principal, keytab))
-    root_logger.debug("using ccache %s" % ccache_name)
-    for attempt in range(1, attempts + 1):
-        old_config = os.environ.get('KRB5_CONFIG')
-        if config is not None:
-            os.environ['KRB5_CONFIG'] = config
-        else:
-            os.environ.pop('KRB5_CONFIG', None)
-        try:
-            name = gssapi.Name(principal, gssapi.NameType.kerberos_principal)
-            store = {'ccache': ccache_name,
-                     'client_keytab': keytab}
-            cred = gssapi.Credentials(name=name, store=store, usage='initiate')
-            root_logger.debug("Attempt %d/%d: success"
-                              % (attempt, attempts))
-            return cred
-        except gssapi.exceptions.GSSError as e:
-            if e.min_code not in errors_to_retry:  # pylint: disable=no-member
-                raise
-            root_logger.debug("Attempt %d/%d: failed: %s"
-                              % (attempt, attempts, e))
-            if attempt == attempts:
-                root_logger.debug("Maximum number of attempts (%d) reached"
-                                  % attempts)
-                raise
-            root_logger.debug("Waiting 5 seconds before next retry")
-            time.sleep(5)
-        finally:
-            if old_config is not None:
-                os.environ['KRB5_CONFIG'] = old_config
-            else:
-                os.environ.pop('KRB5_CONFIG', None)
-
-
-def kinit_password(principal, password, ccache_name, config=None,
-                   armor_ccache_name=None, canonicalize=False,
-                   enterprise=False):
-    """
-    perform interactive kinit as principal using password. If using FAST for
-    web-based authentication, use armor_ccache_path to specify http service
-    ccache.
-    """
-    root_logger.debug("Initializing principal %s using password" % principal)
-    args = [paths.KINIT, principal, '-c', ccache_name]
-    if armor_ccache_name is not None:
-        root_logger.debug("Using armor ccache %s for FAST webauth"
-                          % armor_ccache_name)
-        args.extend(['-T', armor_ccache_name])
-
-    if canonicalize:
-        root_logger.debug("Requesting principal canonicalization")
-        args.append('-C')
-
-    if enterprise:
-        root_logger.debug("Using enterprise principal")
-        args.append('-E')
-
-    env = {'LC_ALL': 'C'}
-    if config is not None:
-        env['KRB5_CONFIG'] = config
-
-    # this workaround enables us to capture stderr and put it
-    # into the raised exception in case of unsuccessful authentication
-    result = run(args, stdin=password, env=env, raiseonerr=False,
-                 capture_error=True)
-    if result.returncode:
-        raise RuntimeError(result.error_output)
 
 
 def dn_attribute_property(private_name):
@@ -1454,7 +1415,7 @@ def private_ccache(path=None):
     os.environ['KRB5CCNAME'] = path
 
     try:
-        yield
+        yield path
     finally:
         if original_value is not None:
             os.environ['KRB5CCNAME'] = original_value
@@ -1489,25 +1450,6 @@ else:
     fsdecode = os.fsdecode  #pylint: disable=no-member
 
 
-def is_fips_enabled():
-    """
-    Checks whether this host is FIPS-enabled.
-
-    Returns a boolean indicating if the host is FIPS-enabled, i.e. if the
-    file /proc/sys/crypto/fips_enabled contains a non-0 value. Otherwise,
-    or if the file /proc/sys/crypto/fips_enabled does not exist,
-    the function returns False.
-    """
-    try:
-        with open(paths.PROC_FIPS_ENABLED, 'r') as f:
-            if f.read().strip() != '0':
-                return True
-    except IOError:
-        # Consider that the host is not fips-enabled if the file does not exist
-        pass
-    return False
-
-
 def unescape_seq(seq, *args):
     """
     unescape (remove '\\') all occurences of sequence in input strings.
@@ -1533,3 +1475,84 @@ def escape_seq(seq, *args):
     """
 
     return tuple(a.replace(seq, u'\\{}'.format(seq)) for a in args)
+
+
+def decode_json(data):
+    """Decode JSON bytes to string with proper encoding
+
+    Only for supporting Py 3.5
+
+    Py 3.6 supports bytes as parameter for json.load, we can drop this when
+    there is no need for python 3.5 anymore
+
+    Code from:
+        https://bugs.python.org/file43513/json_detect_encoding_3.patch
+
+    :param data: JSON bytes
+    :return: return JSON string
+    """
+
+    def detect_encoding(b):
+        bstartswith = b.startswith
+        if bstartswith((codecs.BOM_UTF32_BE, codecs.BOM_UTF32_LE)):
+            return 'utf-32'
+        if bstartswith((codecs.BOM_UTF16_BE, codecs.BOM_UTF16_LE)):
+            return 'utf-16'
+        if bstartswith(codecs.BOM_UTF8):
+            return 'utf-8-sig'
+
+        if len(b) >= 4:
+            if not b[0]:
+                # 00 00 -- -- - utf-32-be
+                # 00 XX -- -- - utf-16-be
+                return 'utf-16-be' if b[1] else 'utf-32-be'
+            if not b[1]:
+                # XX 00 00 00 - utf-32-le
+                # XX 00 XX XX - utf-16-le
+                return 'utf-16-le' if b[2] or b[3] else 'utf-32-le'
+        elif len(b) == 2:
+            if not b[0]:
+                # 00 XX - utf-16-be
+                return 'utf-16-be'
+            if not b[1]:
+                # XX 00 - utf-16-le
+                return 'utf-16-le'
+        # default
+        return 'utf-8'
+
+    if isinstance(data, six.text_type):
+        return data
+
+    return data.decode(detect_encoding(data), 'surrogatepass')
+
+
+class APIVersion(tuple):
+    """API version parser and handler
+
+    The class is used to parse ipapython.version.API_VERSION and plugin
+    versions.
+    """
+    __slots__ = ()
+
+    def __new__(cls, version):
+        major, dot, minor = version.partition(u'.')
+        major = int(major)
+        minor = int(minor) if dot else 0
+        return tuple.__new__(cls, (major, minor))
+
+    def __str__(self):
+        return '{}.{}'.format(*self)
+
+    def __repr__(self):
+        return "<APIVersion('{}.{}')>".format(*self)
+
+    def __getnewargs__(self):
+        return str(self)
+
+    @property
+    def major(self):
+        return self[0]
+
+    @property
+    def minor(self):
+        return self[1]

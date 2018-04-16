@@ -1,4 +1,4 @@
-#!/usr/bin/python2 -E
+#!/usr/bin/python3 -E
 #
 # Authors:
 #   Rob Crittenden <rcritten@redhat.com>
@@ -27,53 +27,50 @@ import tempfile
 import shutil
 import traceback
 
-from ipapython import ipautil
-from ipalib import api
-from ipaserver.install import certs, cainstance, krainstance
-from ipaplatform import services
+from ipalib.install.kinit import kinit_keytab
+from ipalib import api, x509
+from ipaserver.install import certs, cainstance
 from ipaplatform.paths import paths
 
 
 def _main():
-    nickname = 'ipaCert'
-
-    api.bootstrap(in_server=True, context='restart')
+    api.bootstrap(in_server=True, context='restart', confdir=paths.ETC_IPA)
     api.finalize()
 
     tmpdir = tempfile.mkdtemp(prefix="tmp-")
     try:
         principal = str('host/%s@%s' % (api.env.host, api.env.realm))
         ccache_filename = os.path.join(tmpdir, 'ccache')
-        ipautil.kinit_keytab(principal, paths.KRB5_KEYTAB,
-                             ccache_filename)
+        kinit_keytab(principal, paths.KRB5_KEYTAB, ccache_filename)
         os.environ['KRB5CCNAME'] = ccache_filename
 
-        ca = cainstance.CAInstance(host_name=api.env.host, ldapi=False)
+        api.Backend.ldap2.connect()
+
+        ca = cainstance.CAInstance(host_name=api.env.host)
+        ra_certpath = paths.RA_AGENT_PEM
         if ca.is_renewal_master():
             # Fetch the new certificate
-            db = certs.CertDB(api.env.realm)
-            dercert = db.get_cert_from_db(nickname, pem=False)
-            if not dercert:
+            try:
+                cert = x509.load_certificate_from_file(ra_certpath)
+            except IOError as e:
                 syslog.syslog(
-                    syslog.LOG_ERR, "No certificate %s found." % nickname)
+                    syslog.LOG_ERR, "Can't open '{certpath}': {err}"
+                    .format(certpath=ra_certpath, err=e)
+                )
+                sys.exit(1)
+            except (TypeError, ValueError):
+                syslog.syslog(
+                    syslog.LOG_ERR, "'{certpath}' is not a valid certificate "
+                    "file".format(certpath=ra_certpath)
+                )
                 sys.exit(1)
 
             # Load it into dogtag
-            cainstance.update_people_entry(dercert)
-
-        if api.Command.kra_is_enabled()['result']:
-            krainstance.export_kra_agent_pem()
+            cainstance.update_people_entry(cert)
     finally:
+        if api.Backend.ldap2.isconnected():
+            api.Backend.ldap2.disconnect()
         shutil.rmtree(tmpdir)
-
-    # Now restart Apache so the new certificate is available
-    syslog.syslog(syslog.LOG_NOTICE, "Restarting httpd")
-    try:
-        services.knownservices.httpd.restart()
-    except Exception as e:
-        syslog.syslog(syslog.LOG_ERR, "Cannot restart httpd: %s" % e)
-    else:
-        syslog.syslog(syslog.LOG_NOTICE, "Restarted httpd")
 
 
 def main():

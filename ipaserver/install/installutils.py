@@ -21,9 +21,11 @@ from __future__ import absolute_import
 from __future__ import print_function
 
 import errno
+import logging
 import socket
 import getpass
 import gssapi
+import io
 import ldif
 import os
 import re
@@ -31,6 +33,7 @@ import fileinput
 import sys
 import tempfile
 import shutil
+import stat
 import traceback
 import textwrap
 from contextlib import contextmanager
@@ -41,31 +44,37 @@ import ldap
 import ldapurl
 import six
 # pylint: disable=import-error
-from six.moves.configparser import SafeConfigParser, NoOptionError
+if six.PY3:
+    # The SafeConfigParser class has been renamed to ConfigParser in Py3
+    from configparser import ConfigParser as SafeConfigParser
+else:
+    from ConfigParser import SafeConfigParser
+from six.moves.configparser import NoOptionError
 # pylint: enable=import-error
 
+from ipalib.install import sysrestore
+from ipalib.install.kinit import kinit_password
 import ipaplatform
-
-from ipapython import ipautil, sysrestore, admintool, version
+from ipapython import ipautil, admintool, version
 from ipapython.admintool import ScriptError
-from ipapython.ipa_log_manager import root_logger
+from ipapython.certdb import EXTERNAL_CA_TRUST_FLAGS
+from ipapython.ipaldap import DIRMAN_DN, LDAPClient
 from ipalib.util import validate_hostname
-from ipapython import config
-from ipalib import errors, x509
+from ipalib import api, errors, x509
 from ipapython.dn import DN
 from ipaserver.install import certs, service, sysupgrade
 from ipaplatform import services
 from ipaplatform.paths import paths
 from ipaplatform.tasks import tasks
-from ipapython import dnsutil
 
 if six.PY3:
     unicode = str
 
+logger = logging.getLogger(__name__)
+
 # Used to determine install status
 IPA_MODULES = [
-    'httpd', 'kadmin', 'dirsrv', 'pki-tomcatd', 'install', 'krb5kdc', 'ntpd',
-    'named', 'ipa_memcached']
+    'httpd', 'kadmin', 'dirsrv', 'pki-tomcatd', 'install', 'krb5kdc', 'named']
 
 
 class BadHostError(Exception):
@@ -160,16 +169,17 @@ def verify_fqdn(host_name, no_host_dns=False, local_hostname=True):
 
     if local_hostname:
         try:
-            root_logger.debug('Check if %s is a primary hostname for localhost', host_name)
+            logger.debug('Check if %s is a primary hostname for localhost',
+                         host_name)
             ex_name = socket.gethostbyaddr(host_name)
-            root_logger.debug('Primary hostname for localhost: %s', ex_name[0])
+            logger.debug('Primary hostname for localhost: %s', ex_name[0])
             if host_name != ex_name[0]:
                 raise HostLookupError("The host name %s does not match the primary host name %s. "\
                         "Please check /etc/hosts or DNS name resolution" % (host_name, ex_name[0]))
         except socket.gaierror:
             pass
         except socket.error as e:
-            root_logger.debug(
+            logger.debug(
                 'socket.gethostbyaddr() error: %d: %s',
                 e.errno, e.strerror)  # pylint: disable=no-member
 
@@ -178,10 +188,10 @@ def verify_fqdn(host_name, no_host_dns=False, local_hostname=True):
         return
 
     try:
-        root_logger.debug('Search DNS for %s', host_name)
+        logger.debug('Search DNS for %s', host_name)
         hostaddr = socket.getaddrinfo(host_name, None)
     except Exception as e:
-        root_logger.debug('Search failed: %s', e)
+        logger.debug('Search failed: %s', e)
         raise HostForwardLookupError("Unable to resolve host name, check /etc/hosts or DNS name resolution")
 
     if len(hostaddr) == 0:
@@ -189,7 +199,7 @@ def verify_fqdn(host_name, no_host_dns=False, local_hostname=True):
 
     # Verify this is NOT a CNAME
     try:
-        root_logger.debug('Check if %s is not a CNAME', host_name)
+        logger.debug('Check if %s is not a CNAME', host_name)
         resolver.query(host_name, rdatatype.CNAME)
         raise HostReverseLookupError("The IPA Server Hostname cannot be a CNAME, only A and AAAA names are allowed.")
     except DNSException:
@@ -204,17 +214,17 @@ def verify_fqdn(host_name, no_host_dns=False, local_hostname=True):
         if address == '127.0.0.1' or address == '::1':
             raise HostForwardLookupError("The IPA Server hostname must not resolve to localhost (%s). A routable IP address must be used. Check /etc/hosts to see if %s is an alias for %s" % (address, host_name, address))
         try:
-            root_logger.debug('Check reverse address of %s', address)
+            logger.debug('Check reverse address of %s', address)
             revname = socket.gethostbyaddr(address)[0]
         except Exception as e:
-            root_logger.debug('Check failed: %s', e)
-            root_logger.error(
+            logger.debug('Check failed: %s', e)
+            logger.error(
                 "Unable to resolve the IP address %s to a host name, "
                 "check /etc/hosts and DNS name resolution", address)
         else:
-            root_logger.debug('Found reverse name: %s', revname)
+            logger.debug('Found reverse name: %s', revname)
             if revname != host_name:
-                root_logger.error(
+                logger.error(
                     "The host name %s does not match the value %s obtained "
                     "by reverse lookup on IP address %s", host_name, revname,
                     address)
@@ -267,13 +277,15 @@ def add_record_to_hosts(ip, host_name, conf_file=paths.HOSTS):
 
 def read_ip_addresses():
     ips = []
-    print("Enter the IP address to use, or press Enter to finish.")
+    msg_first = "Please provide the IP address to be used for this host name"
+    msg_other = "Enter an additional IP address, or press Enter to skip"
     while True:
-        ip = ipautil.user_input("Please provide the IP address to be used for this host name", allow_empty = True)
+        msg = msg_other if ips else msg_first
+        ip = ipautil.user_input(msg, allow_empty=True)
         if not ip:
             break
         try:
-            ip_parsed = ipautil.CheckedIPAddress(ip, match_local=True)
+            ip_parsed = ipautil.CheckedIPAddress(ip)
         except Exception as e:
             print("Error: Invalid IP Address %s: %s" % (ip, e))
             continue
@@ -328,6 +340,21 @@ def _read_password_default_validator(password):
     if len(password) < 8:
         raise ValueError("Password must be at least 8 characters long")
 
+
+def validate_dm_password_ldap(password):
+    """
+    Validate DM password by attempting to connect to LDAP. api.env has to
+    contain valid ldap_uri.
+    """
+    client = LDAPClient(api.env.ldap_uri, cacert=paths.IPA_CA_CRT)
+    try:
+        client.simple_bind(DIRMAN_DN, password)
+    except errors.ACIError:
+        raise ValueError("Invalid Directory Manager password")
+    else:
+        client.unbind()
+
+
 def read_password(user, confirm=True, validate=True, retry=True, validator=_read_password_default_validator):
     correct = False
     pwd = None
@@ -379,109 +406,260 @@ def update_file(filename, orig, subst):
         return 1
 
 
+def quote_directive_value(value, quote_char):
+    """Quote a directive value
+    :param value: string to quote
+    :param quote_char: character which is used for quoting. All prior
+        occurences will be escaped before quoting to avoid unparseable value.
+    :returns: processed value
+    """
+    if value.startswith(quote_char) and value.endswith(quote_char):
+        return value
+
+    return "{quote}{value}{quote}".format(
+        quote=quote_char,
+        value="".join(ipautil.escape_seq(quote_char, value))
+    )
+
+
+def unquote_directive_value(value, quote_char):
+    """Unquote a directive value
+    :param value: string to unquote
+    :param quote_char: character to strip. All escaped occurences of
+        `quote_char` will be uncescaped during processing
+    :returns: processed value
+    """
+    unescaped_value = "".join(ipautil.unescape_seq(quote_char, value))
+    if (unescaped_value.startswith(quote_char) and
+            unescaped_value.endswith(quote_char)):
+        return unescaped_value[1:-1]
+
+    return unescaped_value
+
+
+_SENTINEL = object()
+
+
+class DirectiveSetter(object):
+    """Safe directive setter
+
+    with DirectiveSetter('/path/to/conf') as ds:
+        ds.set(key, value)
+    """
+    def __init__(self, filename, quotes=True, separator=' ', comment='#'):
+        self.filename = os.path.abspath(filename)
+        self.quotes = quotes
+        self.separator = separator
+        self.comment = comment
+        self.lines = None
+        self.stat = None
+
+    def __enter__(self):
+        with io.open(self.filename) as f:
+            self.stat = os.fstat(f.fileno())
+            self.lines = list(f)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is not None:
+            # something went wrong, reset
+            self.lines = None
+            self.stat = None
+            return
+
+        directory, prefix = os.path.split(self.filename)
+        # use tempfile in same directory to have atomic rename
+        fd, name = tempfile.mkstemp(prefix=prefix, dir=directory, text=True)
+        with io.open(fd, mode='w', closefd=True) as f:
+            for line in self.lines:
+                if not isinstance(line, six.text_type):
+                    line = line.decode('utf-8')
+                f.write(line)
+            self.lines = None
+            os.fchmod(f.fileno(), stat.S_IMODE(self.stat.st_mode))
+            os.fchown(f.fileno(), self.stat.st_uid, self.stat.st_gid)
+            self.stat = None
+            # flush and sync tempfile inode
+            f.flush()
+            os.fsync(f.fileno())
+
+        # rename file and sync directory inode
+        os.rename(name, self.filename)
+        dirfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dirfd)
+        finally:
+            os.close(dirfd)
+
+    def set(self, directive, value, quotes=_SENTINEL, separator=_SENTINEL,
+            comment=_SENTINEL):
+        """Set a single directive
+        """
+        if quotes is _SENTINEL:
+            quotes = self.quotes
+        if separator is _SENTINEL:
+            separator = self.separator
+        if comment is _SENTINEL:
+            comment = self.comment
+        # materialize lines
+        # set_directive_lines() modify item, shrink or enlage line count
+        self.lines = list(set_directive_lines(
+            quotes, separator, directive, value, self.lines, comment
+        ))
+
+    def setitems(self, items):
+        """Set multiple directives from a dict or list with key/value pairs
+        """
+        if isinstance(items, dict):
+            # dict-like, use sorted for stable order
+            items = sorted(items.items())
+        for k, v in items:
+            self.set(k, v)
+
+
 def set_directive(filename, directive, value, quotes=True, separator=' ',
-                  quote_char='\"'):
+                  comment='#'):
     """Set a name/value pair directive in a configuration file.
 
     A value of None means to drop the directive.
 
-    This has only been tested with nss.conf
+    Does not tolerate (or put) spaces around the separator.
 
-   :param directive: directive name
-   :param value: value of the directive
-   :param quotes: whether to quote `value` in `quote_char`. If true, then
-        the `quote_char` are first escaped to avoid unparseable directives
-   :param quote_char: the character used for quoting `value`
+    :param filename: input filename
+    :param directive: directive name
+    :param value: value of the directive
+    :param quotes: whether to quote `value` in double quotes. If true, then
+        any existing double quotes are first escaped to avoid
+        unparseable directives.
+    :param separator: character serving as separator between directive and
+        value.  Correct value required even when dropping a directive.
+    :param comment: comment character for the file to keep new values near
+                    their commented-out counterpart
     """
-
-    def format_directive(directive, value, separator, quotes, quote_char):
-        directive_sep = "{directive}{separator}".format(directive=directive,
-                                                        separator=separator)
-        transformed_value = value
-        if quotes:
-            transformed_value = "{quote}{value}{quote}".format(
-                quote=quote_char,
-                value="".join(ipautil.escape_seq(quote_char, value))
-            )
-
-        return "{directive_sep}{value}\n".format(
-            directive_sep=directive_sep, value=transformed_value)
-
-    valueset = False
     st = os.stat(filename)
-    fd = open(filename)
-    newfile = []
-    for line in fd:
-        if line.lstrip().startswith(directive):
-            valueset = True
-            if value is not None:
-                newfile.append(
-                    format_directive(
-                        directive, value, separator, quotes, quote_char))
-        else:
-            newfile.append(line)
-    fd.close()
-    if not valueset:
-        if value is not None:
-            newfile.append(
-                format_directive(
-                    directive, value, separator, quotes, quote_char))
+    with open(filename, 'r') as f:
+        lines = list(f)  # read the whole file
+        # materialize new list
+        new_lines = list(set_directive_lines(
+            quotes, separator, directive, value, lines, comment
+        ))
+    with open(filename, 'w') as f:
+        # don't construct the whole string; write line-wise
+        for line in new_lines:
+            f.write(line)
+    os.chown(filename, st.st_uid, st.st_gid)  # reset perms
 
-    fd = open(filename, "w")
-    fd.write("".join(newfile))
-    fd.close()
-    os.chown(filename, st.st_uid, st.st_gid) # reset perms
+
+def set_directive_lines(quotes, separator, k, v, lines, comment):
+    """Set a name/value pair in a configuration (iterable of lines).
+
+    Replaces the value of the key if found, otherwise adds it at
+    end.  If value is ``None``, remove the key if found.
+
+    Takes an iterable of lines (with trailing newline).
+    Yields lines (with trailing newline).
+
+    """
+    new_line = ""
+    if v is not None:
+        v_quoted = quote_directive_value(v, '"') if quotes else v
+        new_line = ''.join([k, separator, v_quoted, '\n'])
+
+    found = False
+    addnext = False  # add on next line, found a comment
+    matcher = re.compile(r'\s*{}'.format(re.escape(k + separator)))
+    cmatcher = re.compile(r'\s*{}\s*{}'.format(comment,
+                                               re.escape(k + separator)))
+    for line in lines:
+        if matcher.match(line):
+            found = True
+            addnext = False
+            if v is not None:
+                yield new_line
+        elif addnext:
+            found = True
+            addnext = False
+            yield new_line
+            yield line
+        elif cmatcher.match(line):
+            addnext = True
+            yield line
+        else:
+            yield line
+
+    if not found and v is not None:
+        yield new_line
+
 
 def get_directive(filename, directive, separator=' '):
     """
     A rather inefficient way to get a configuration directive.
+
+    :param filename: input filename
+    :param directive: directive name
+    :param separator: separator between directive and value
+
+    :returns: The (unquoted) value if the directive was found, None otherwise
     """
     fd = open(filename, "r")
     for line in fd:
         if line.lstrip().startswith(directive):
             line = line.strip()
-            result = line.split(separator, 1)[1]
-            result = result.strip('"')
+
+            (directive, sep, value) = line.partition(separator)
+            if not sep or not value:
+                raise ValueError("Malformed directive: {}".format(line))
+
+            result = unquote_directive_value(value.strip(), '"')
             result = result.strip(' ')
             fd.close()
             return result
     fd.close()
     return None
 
+
 def kadmin(command):
-    ipautil.run(["kadmin.local", "-q", command,
-                                 "-x", "ipa-setup-override-restrictions"])
+    return ipautil.run(
+        [
+            paths.KADMIN_LOCAL, "-q", command,
+            "-x", "ipa-setup-override-restrictions"
+        ],
+        capture_output=True,
+        capture_error=True
+    )
+
 
 def kadmin_addprinc(principal):
-    kadmin("addprinc -randkey " + principal)
+    return kadmin("addprinc -randkey " + principal)
+
 
 def kadmin_modprinc(principal, options):
-    kadmin("modprinc " + options + " " + principal)
+    return kadmin("modprinc " + options + " " + principal)
+
 
 def create_keytab(path, principal):
     try:
-        if ipautil.file_exists(path):
+        if os.path.isfile(path):
             os.remove(path)
     except os.error:
-        root_logger.critical("Failed to remove %s." % path)
+        logger.critical("Failed to remove %s.", path)
 
-    kadmin("ktadd -k " + path + " " + principal)
+    return kadmin("ktadd -k " + path + " " + principal)
 
 def resolve_ip_addresses_nss(fqdn):
     """Get list of IP addresses for given host (using NSS/getaddrinfo).
     :returns:
         list of IP addresses as UnsafeIPAddress objects
     """
-    # make sure the name is fully qualified
-    # so search path from resolv.conf does not apply
-    fqdn = str(dnsutil.DNSName(fqdn).make_absolute())
+    # it would be good disable search list processing from resolv.conf
+    # to avoid cases where we get IP address for an totally different name
+    # but there is no way to do this using getaddrinfo parameters
     try:
         addrinfos = socket.getaddrinfo(fqdn, None,
                                        socket.AF_UNSPEC, socket.SOCK_STREAM)
     except socket.error as ex:
         if ex.errno == socket.EAI_NODATA or ex.errno == socket.EAI_NONAME:
-            root_logger.debug('Name %s does not have any address: %s',
-                              fqdn, ex)
+            logger.debug('Name %s does not have any address: %s', fqdn, ex)
             return set()
         else:
             raise
@@ -494,11 +672,11 @@ def resolve_ip_addresses_nss(fqdn):
         except ValueError as ex:
             # getaddinfo may return link-local address other similar oddities
             # which are not accepted by CheckedIPAddress - skip these
-            root_logger.warning('Name %s resolved to an unacceptable IP '
-                                'address %s: %s', fqdn, ai[4][0], ex)
+            logger.warning('Name %s resolved to an unacceptable IP '
+                           'address %s: %s', fqdn, ai[4][0], ex)
         else:
             ip_addresses.add(ip)
-    root_logger.debug('Name %s resolved to %s', fqdn, ip_addresses)
+    logger.debug('Name %s resolved to %s', fqdn, ip_addresses)
     return ip_addresses
 
 def get_host_name(no_host_dns):
@@ -530,9 +708,10 @@ def get_server_ip_address(host_name, unattended, setup_dns, ip_addresses):
     if len(hostaddr):
         for ha in hostaddr:
             try:
-                ips.append(ipautil.CheckedIPAddress(ha, match_local=True))
+                ips.append(ipautil.CheckedIPAddress(ha))
             except ValueError as e:
-                root_logger.warning("Invalid IP address %s for %s: %s", ha, host_name, unicode(e))
+                logger.warning("Invalid IP address %s for %s: %s",
+                               ha, host_name, unicode(e))
 
     if not ips and not ip_addresses:
         if not unattended:
@@ -591,6 +770,84 @@ def update_hosts_file(ip_addresses, host_name, fstore):
         add_record_to_hosts(str(ip_address), host_name)
 
 
+def _ensure_nonempty_string(string, message):
+    if not isinstance(string, str) or not string:
+        raise ValueError(message)
+
+
+# uses gpg to compress and encrypt a file
+def encrypt_file(source, dest, password, workdir=None):
+    _ensure_nonempty_string(source, 'Missing Source File')
+    # stat it so that we get back an exception if it does no t exist
+    os.stat(source)
+
+    _ensure_nonempty_string(dest, 'Missing Destination File')
+    _ensure_nonempty_string(password, 'Missing Password')
+
+    # create a tempdir so that we can clean up with easily
+    tempdir = tempfile.mkdtemp('', 'ipa-', workdir)
+    gpgdir = os.path.join(tempdir, ".gnupg")
+
+    try:
+        try:
+            # give gpg a fake dir so that we can leater remove all
+            # the cruft when we clean up the tempdir
+            os.mkdir(gpgdir)
+            args = [paths.GPG_AGENT,
+                    '--batch',
+                    '--homedir', gpgdir,
+                    '--daemon', paths.GPG,
+                    '--batch',
+                    '--homedir', gpgdir,
+                    '--passphrase-fd', '0',
+                    '--yes',
+                    '--no-tty',
+                    '-o', dest,
+                    '-c', source]
+            ipautil.run(args, password, skip_output=True)
+        except:
+            raise
+    finally:
+        # job done, clean up
+        shutil.rmtree(tempdir, ignore_errors=True)
+
+
+def decrypt_file(source, dest, password, workdir=None):
+    _ensure_nonempty_string(source, 'Missing Source File')
+    # stat it so that we get back an exception if it does no t exist
+    os.stat(source)
+
+    _ensure_nonempty_string(dest, 'Missing Destination File')
+    _ensure_nonempty_string(password, 'Missing Password')
+
+    # create a tempdir so that we can clean up with easily
+    tempdir = tempfile.mkdtemp('', 'ipa-', workdir)
+    gpgdir = os.path.join(tempdir, ".gnupg")
+
+    try:
+        try:
+            # give gpg a fake dir so that we can leater remove all
+            # the cruft when we clean up the tempdir
+            os.mkdir(gpgdir)
+            args = [paths.GPG_AGENT,
+                    '--batch',
+                    '--homedir', gpgdir,
+                    '--daemon', paths.GPG,
+                    '--batch',
+                    '--homedir', gpgdir,
+                    '--passphrase-fd', '0',
+                    '--yes',
+                    '--no-tty',
+                    '-o', dest,
+                    '-d', source]
+            ipautil.run(args, password, skip_output=True)
+        except:
+            raise
+    finally:
+        # job done, clean up
+        shutil.rmtree(tempdir, ignore_errors=True)
+
+
 def expand_replica_info(filename, password):
     """
     Decrypt and expand a replica installation file into a temporary
@@ -599,8 +856,8 @@ def expand_replica_info(filename, password):
     top_dir = tempfile.mkdtemp("ipa")
     tarfile = top_dir+"/files.tar"
     dir_path = top_dir + "/realm_info"
-    ipautil.decrypt_file(filename, tarfile, password, top_dir)
-    ipautil.run(["tar", "xf", tarfile, "-C", top_dir])
+    decrypt_file(filename, tarfile, password, top_dir)
+    ipautil.run([paths.TAR, "xf", tarfile, "-C", top_dir])
     os.remove(tarfile)
 
     return top_dir, dir_path
@@ -611,10 +868,9 @@ def read_replica_info(dir_path, rconfig):
 
     rconfig is a ReplicaConfig object
     """
-    filename = dir_path + "/realm_info"
-    fd = open(filename)
+    filename = os.path.join(dir_path, "realm_info")
     config = SafeConfigParser()
-    config.readfp(fd)
+    config.read(filename)
 
     rconfig.realm_name = config.get("realm", "realm_name")
     rconfig.master_host_name = config.get("realm", "master_host_name")
@@ -629,15 +885,15 @@ def read_replica_info(dir_path, rconfig):
 def read_replica_info_dogtag_port(config_dir):
     portfile = config_dir + "/dogtag_directory_port.txt"
     default_port = 7389
-    if not ipautil.file_exists(portfile):
+    if not os.path.isfile(portfile):
         dogtag_master_ds_port = default_port
     else:
         with open(portfile) as fd:
             try:
                 dogtag_master_ds_port = int(fd.read())
             except (ValueError, IOError) as e:
-                root_logger.debug('Cannot parse dogtag DS port: %s', e)
-                root_logger.debug('Default to %d', default_port)
+                logger.debug('Cannot parse dogtag DS port: %s', e)
+                logger.debug('Default to %d', default_port)
                 dogtag_master_ds_port = default_port
 
     return dogtag_master_ds_port
@@ -648,31 +904,33 @@ def create_replica_config(dirman_password, filename, options):
     try:
         top_dir, dir = expand_replica_info(filename, dirman_password)
     except Exception as e:
-        root_logger.error("Failed to decrypt or open the replica file.")
+        logger.error("Failed to decrypt or open the replica file.")
         raise ScriptError(
             "ERROR: Failed to decrypt or open the replica file.\n"
             "Verify you entered the correct Directory Manager password.")
     config = ReplicaConfig(top_dir)
     read_replica_info(dir, config)
-    root_logger.debug(
-        'Installing replica file with version %d (0 means no version in prepared file).',
+    logger.debug(
+        'Installing replica file with version %d '
+        '(0 means no version in prepared file).',
         config.version)
     if config.version and config.version > version.NUM_VERSION:
-        root_logger.error(
-            'A replica file from a newer release (%d) cannot be installed on an older version (%d)',
+        logger.error(
+            'A replica file from a newer release (%d) cannot be installed on '
+            'an older version (%d)',
             config.version, version.NUM_VERSION)
         raise ScriptError()
     config.dirman_password = dirman_password
     try:
         host = get_host_name(options.no_host_dns)
     except BadHostError as e:
-        root_logger.error(str(e))
+        logger.error("%s", str(e))
         raise ScriptError()
     if config.host_name != host:
         try:
             print("This replica was created for '%s' but this machine is named '%s'" % (config.host_name, host))
             if not ipautil.user_input("This may cause problems. Continue?", False):
-                root_logger.debug(
+                logger.debug(
                     "Replica was created for %s but machine is named %s  "
                     "User chose to exit",
                     config.host_name, host)
@@ -680,7 +938,7 @@ def create_replica_config(dirman_password, filename, options):
             config.host_name = host
             print("")
         except KeyboardInterrupt:
-            root_logger.debug("Keyboard Interrupt")
+            logger.debug("Keyboard Interrupt")
             raise ScriptError(rval=0)
     config.dir = dir
     config.ca_ds_port = read_replica_info_dogtag_port(config.dir)
@@ -705,14 +963,14 @@ def check_server_configuration():
 
 
 def remove_file(filename):
-    """
-    Remove a file and log any exceptions raised.
+    """Remove a file and log any exceptions raised.
     """
     try:
-        if os.path.lexists(filename):
-            os.unlink(filename)
+        os.unlink(filename)
     except Exception as e:
-        root_logger.error('Error removing %s: %s' % (filename, str(e)))
+        # ignore missing file
+        if getattr(e, 'errno', None) != errno.ENOENT:
+            logger.error('Error removing %s: %s', filename, str(e))
 
 
 def rmtree(path):
@@ -723,7 +981,7 @@ def rmtree(path):
         if os.path.exists(path):
             shutil.rmtree(path)
     except Exception as e:
-        root_logger.error('Error removing %s: %s' % (path, str(e)))
+        logger.error('Error removing %s: %s', path, str(e))
 
 
 def is_ipa_configured():
@@ -738,16 +996,16 @@ def is_ipa_configured():
 
     for module in IPA_MODULES:
         if sstore.has_state(module):
-            root_logger.debug('%s is configured' % module)
+            logger.debug('%s is configured', module)
             installed = True
         else:
-            root_logger.debug('%s is not configured' % module)
+            logger.debug('%s is not configured', module)
 
     if fstore.has_files():
-        root_logger.debug('filestore has files')
+        logger.debug('filestore has files')
         installed = True
     else:
-        root_logger.debug('filestore is tracking no files')
+        logger.debug('filestore is tracking no files')
 
     return installed
 
@@ -768,7 +1026,7 @@ def run_script(main_function, operation_name, log_file_name=None,
     :param fail_message: Optional message displayed on failure
     """
 
-    root_logger.info('Starting script: %s', operation_name)
+    logger.info('Starting script: %s', operation_name)
     try:
         try:
             return_value = main_function()
@@ -778,26 +1036,24 @@ def run_script(main_function, operation_name, log_file_name=None,
                 (e.code is None or e.code == 0)  # pylint: disable=no-member
             ):
                 # Not an error after all
-                root_logger.info('The %s command was successful',
-                    operation_name)
+                logger.info('The %s command was successful', operation_name)
             else:
                 # Log at the DEBUG level, which is not output to the console
                 # (unless in debug/verbose mode), but is written to a logfile
                 # if one is open.
                 tb = sys.exc_info()[2]
-                root_logger.debug('\n'.join(traceback.format_tb(tb)))
-                root_logger.debug('The %s command failed, exception: %s: %s',
-                                  operation_name, type(e).__name__, e)
+                logger.debug("%s", '\n'.join(traceback.format_tb(tb)))
+                logger.debug('The %s command failed, exception: %s: %s',
+                             operation_name, type(e).__name__, e)
                 if fail_message and not isinstance(e, SystemExit):
                     print(fail_message)
                 raise
         else:
             if return_value:
-                root_logger.info('The %s command failed, return value %s',
-                    operation_name, return_value)
+                logger.info('The %s command failed, return value %s',
+                            operation_name, return_value)
             else:
-                root_logger.info('The %s command was successful',
-                    operation_name)
+                logger.info('The %s command was successful', operation_name)
             sys.exit(return_value)
 
     except BaseException as error:
@@ -829,7 +1085,7 @@ def handle_error(error, log_file_name=None):
         return error, 1
 
     if isinstance(error, errors.ACIError):
-        return error.message, 1
+        return str(error), 1
     if isinstance(error, ldap.INVALID_CREDENTIALS):
         return "Invalid password", 1
     if isinstance(error, ldap.INSUFFICIENT_ACCESS):
@@ -846,10 +1102,6 @@ def handle_error(error, log_file_name=None):
         )
         return message, 1
 
-    if isinstance(error, config.IPAConfigError):
-        message = "An IPA server to update cannot be found. Has one been configured yet?"
-        message += "\nThe error was: %s" % error
-        return message, 1
     if isinstance(error, errors.LDAPError):
         return "An error occurred while performing operations: %s" % error, 1
 
@@ -872,7 +1124,7 @@ def handle_error(error, log_file_name=None):
 
 
 def load_pkcs12(cert_files, key_password, key_nickname, ca_cert_files,
-                host_name):
+                host_name=None, realm_name=None):
     """
     Load and verify server certificate and private key from multiple files
 
@@ -891,27 +1143,24 @@ def load_pkcs12(cert_files, key_password, key_nickname, ca_cert_files,
         the CA certificate of the CA that issued the server certificate
     """
     with certs.NSSDatabase() as nssdb:
-        db_password = ipautil.ipa_generate_password()
-        db_pwdfile = ipautil.write_tmp_file(db_password)
-        nssdb.create_db(db_pwdfile.name)
+        nssdb.create_db()
 
         try:
-            nssdb.import_files(cert_files, db_pwdfile.name,
-                               True, key_password, key_nickname)
+            nssdb.import_files(cert_files, True, key_password, key_nickname)
         except RuntimeError as e:
             raise ScriptError(str(e))
 
         if ca_cert_files:
             try:
-                nssdb.import_files(ca_cert_files, db_pwdfile.name)
+                nssdb.import_files(ca_cert_files)
             except RuntimeError as e:
                 raise ScriptError(str(e))
 
         for nickname, trust_flags in nssdb.list_certs():
-            if 'u' in trust_flags:
+            if trust_flags.has_key:
                 key_nickname = nickname
                 continue
-            nssdb.trust_root_cert(nickname)
+            nssdb.trust_root_cert(nickname, EXTERNAL_CA_TRUST_FLAGS)
 
         # Check we have the whole cert chain & the CA is in it
         trust_chain = list(reversed(nssdb.get_trust_chain(key_nickname)))
@@ -921,10 +1170,8 @@ def load_pkcs12(cert_files, key_password, key_nickname, ca_cert_files,
             if ca_cert is None:
                 ca_cert = cert
 
-            nss_cert = x509.load_certificate(cert, x509.DER)
-            subject = DN(str(nss_cert.subject))
-            issuer = DN(str(nss_cert.issuer))
-            del nss_cert
+            subject = DN(cert.subject)
+            issuer = DN(cert.issuer)
 
             if subject == issuer:
                 break
@@ -941,13 +1188,21 @@ def load_pkcs12(cert_files, key_password, key_nickname, ca_cert_files,
                     "CA certificate %s in %s is not valid: %s" %
                     (subject, ", ".join(cert_files), e))
 
-        # Check server validity
-        try:
-            nssdb.verify_server_cert_validity(key_nickname, host_name)
-        except ValueError as e:
-            raise ScriptError(
-                "The server certificate in %s is not valid: %s" %
-                (", ".join(cert_files), e))
+        if host_name is not None:
+            try:
+                nssdb.verify_server_cert_validity(key_nickname, host_name)
+            except ValueError as e:
+                raise ScriptError(
+                    "The server certificate in %s is not valid: %s" %
+                    (", ".join(cert_files), e))
+
+        if realm_name is not None:
+            try:
+                nssdb.verify_kdc_cert_validity(key_nickname, realm_name)
+            except ValueError as e:
+                raise ScriptError(
+                    "The KDC certificate in %s is not valid: %s" %
+                    (", ".join(cert_files), e))
 
         out_file = tempfile.NamedTemporaryFile()
         out_password = ipautil.ipa_generate_password()
@@ -957,7 +1212,7 @@ def load_pkcs12(cert_files, key_password, key_nickname, ca_cert_files,
             '-o', out_file.name,
             '-n', key_nickname,
             '-d', nssdb.secdir,
-            '-k', db_pwdfile.name,
+            '-k', nssdb.pwd_file,
             '-w', out_pwdfile.name,
         ]
         ipautil.run(args)
@@ -979,25 +1234,25 @@ def stopped_service(service, instance_name=""):
     else:
         log_instance_name = ""
 
-    root_logger.debug('Ensuring that service %s%s is not running while '
-                      'the next set of commands is being executed.', service,
-                      log_instance_name)
+    logger.debug('Ensuring that service %s%s is not running while '
+                 'the next set of commands is being executed.', service,
+                 log_instance_name)
 
-    service_obj = services.service(service)
+    service_obj = services.service(service, api)
 
     # Figure out if the service is running, if not, yield
     if not service_obj.is_running(instance_name):
-        root_logger.debug('Service %s%s is not running, continue.', service,
-                          log_instance_name)
+        logger.debug('Service %s%s is not running, continue.', service,
+                     log_instance_name)
         yield
     else:
         # Stop the service, do the required stuff and start it again
-        root_logger.debug('Stopping %s%s.', service, log_instance_name)
+        logger.debug('Stopping %s%s.', service, log_instance_name)
         service_obj.stop(instance_name)
         try:
             yield
         finally:
-            root_logger.debug('Starting %s%s.', service, log_instance_name)
+            logger.debug('Starting %s%s.', service, log_instance_name)
             service_obj.start(instance_name)
 
 
@@ -1011,14 +1266,15 @@ def check_entropy():
                 emsg = 'WARNING: Your system is running out of entropy, ' \
                         'you may experience long delays'
                 service.print_msg(emsg)
-                root_logger.debug(emsg)
+                logger.debug("%s", emsg)
     except IOError as e:
-        root_logger.debug(
+        logger.debug(
             "Could not open %s: %s", paths.ENTROPY_AVAIL, e)
     except ValueError as e:
-        root_logger.debug("Invalid value in %s %s", paths.ENTROPY_AVAIL, e)
+        logger.debug("Invalid value in %s %s", paths.ENTROPY_AVAIL, e)
 
-def load_external_cert(files, subject_base):
+
+def load_external_cert(files, ca_subject):
     """
     Load and verify external CA certificate chain from multiple files.
 
@@ -1026,39 +1282,35 @@ def load_external_cert(files, subject_base):
     chain formats.
 
     :param files: Names of files to import
-    :param subject_base: Subject name base for IPA certificates
+    :param ca_subject: IPA CA subject DN
     :returns: Temporary file with the IPA CA certificate and temporary file
         with the external CA certificate chain
     """
     with certs.NSSDatabase() as nssdb:
-        db_password = ipautil.ipa_generate_password()
-        db_pwdfile = ipautil.write_tmp_file(db_password)
-        nssdb.create_db(db_pwdfile.name)
+        nssdb.create_db()
 
         try:
-            nssdb.import_files(files, db_pwdfile.name)
+            nssdb.import_files(files)
         except RuntimeError as e:
             raise ScriptError(str(e))
 
-        ca_subject = DN(('CN', 'Certificate Authority'), subject_base)
+        ca_subject = DN(ca_subject)
         ca_nickname = None
         cache = {}
         for nickname, _trust_flags in nssdb.list_certs():
-            cert = nssdb.get_cert(nickname, pem=True)
-
-            nss_cert = x509.load_certificate(cert)
-            subject = DN(str(nss_cert.subject))
-            issuer = DN(str(nss_cert.issuer))
-            del nss_cert
+            cert = nssdb.get_cert(nickname)
+            subject = DN(cert.subject)
+            issuer = DN(cert.issuer)
 
             cache[nickname] = (cert, subject, issuer)
             if subject == ca_subject:
                 ca_nickname = nickname
-            nssdb.trust_root_cert(nickname)
+            nssdb.trust_root_cert(nickname, EXTERNAL_CA_TRUST_FLAGS)
 
         if ca_nickname is None:
             raise ScriptError(
-                "IPA CA certificate not found in %s" % (", ".join(files)))
+                "IPA CA certificate with subject '%s' "
+                "was not found in %s." % (ca_subject, (",".join(files))))
 
         trust_chain = list(reversed(nssdb.get_trust_chain(ca_nickname)))
         ca_cert_chain = []
@@ -1082,11 +1334,11 @@ def load_external_cert(files, subject_base):
                     (subject, ", ".join(files), e))
 
     cert_file = tempfile.NamedTemporaryFile()
-    cert_file.write(ca_cert_chain[0] + '\n')
+    cert_file.write(ca_cert_chain[0].public_bytes(x509.Encoding.PEM) + b'\n')
     cert_file.flush()
 
     ca_file = tempfile.NamedTemporaryFile()
-    ca_file.write('\n'.join(ca_cert_chain[1:]) + '\n')
+    x509.write_certificate_list(ca_cert_chain[1:], ca_file.name)
     ca_file.flush()
 
     return cert_file, ca_file
@@ -1145,29 +1397,18 @@ def realm_to_ldapi_uri(realm_name):
     return 'ldapi://' + ldapurl.ldapUrlEscape(socketname)
 
 
-def install_service_keytab(api, principal, server, path,
-                           force_service_add=False):
-    try:
-        api.Command.service_add(principal, force=force_service_add)
-    except errors.DuplicateEntry:
-        pass
-
-    args = [paths.IPA_GETKEYTAB, '-k', path, '-p', principal, '-s', server]
-    ipautil.run(args)
-
-
 def check_creds(options, realm_name):
 
     # Check if ccache is available
     default_cred = None
     try:
-        root_logger.debug('KRB5CCNAME set to %s' %
-                          os.environ.get('KRB5CCNAME', None))
+        logger.debug('KRB5CCNAME set to %s',
+                     os.environ.get('KRB5CCNAME', None))
         # get default creds, will raise if none found
         default_cred = gssapi.creds.Credentials()
         principal = str(default_cred.name)
     except gssapi.raw.misc.GSSError as e:
-        root_logger.debug('Failed to find default ccache: %s' % e)
+        logger.debug('Failed to find default ccache: %s', e)
         principal = None
 
     # Check if the principal matches the requested one (if any)
@@ -1176,9 +1417,9 @@ def check_creds(options, realm_name):
         if op.find('@') == -1:
             op = '%s@%s' % (op, realm_name)
         if principal != op:
-            root_logger.debug('Specified principal %s does not match '
-                              'available credentials (%s)' %
-                              (options.principal, principal))
+            logger.debug('Specified principal %s does not match '
+                         'available credentials (%s)',
+                         options.principal, principal)
             principal = None
 
     if principal is None:
@@ -1202,16 +1443,16 @@ def check_creds(options, realm_name):
                 except EOFError:
                     stdin = None
                 if not stdin:
-                    root_logger.error(
+                    logger.error(
                         "Password must be provided for %s.", principal)
                     raise ScriptError("Missing password for %s" % principal)
             else:
                 if sys.stdin.isatty():
-                    root_logger.error("Password must be provided in " +
-                                      "non-interactive mode.")
-                    root_logger.info("This can be done via " +
-                                     "echo password | ipa-client-install " +
-                                     "... or with the -w option.")
+                    logger.error("Password must be provided in "
+                                 "non-interactive mode.")
+                    logger.info("This can be done via "
+                                "echo password | ipa-client-install "
+                                "... or with the -w option.")
                     raise ScriptError("Missing password for %s" % principal)
                 else:
                     stdin = sys.stdin.readline()
@@ -1220,9 +1461,9 @@ def check_creds(options, realm_name):
             options.admin_password = stdin
 
         try:
-            ipautil.kinit_password(principal, stdin, ccache_name)
+            kinit_password(principal, stdin, ccache_name)
         except RuntimeError as e:
-            root_logger.error("Kerberos authentication failed: %s" % e)
+            logger.error("Kerberos authentication failed: %s", e)
             raise ScriptError("Invalid credentials: %s" % e)
 
         os.environ['KRB5CCNAME'] = ccache_name
@@ -1310,6 +1551,7 @@ class ModifyLDIF(ldif.LDIFParser):
 
             if "replace" in entry:
                 for attr in entry["replace"]:
+                    attr = attr.decode('utf-8')
                     try:
                         self.replace_value(dn, attr, entry[attr])
                     except KeyError:
@@ -1317,18 +1559,20 @@ class ModifyLDIF(ldif.LDIFParser):
                                          "missing".format(dn=dn, attr=attr))
             elif "delete" in entry:
                 for attr in entry["delete"]:
+                    attr = attr.decode('utf-8')
                     self.remove_value(dn, attr, entry.get(attr, None))
             elif "add" in entry:
                 for attr in entry["add"]:
+                    attr = attr.decode('utf-8')
                     try:
                         self.replace_value(dn, attr, entry[attr])
                     except KeyError:
                         raise ValueError("add: {dn}, {attr}: values are "
                                          "missing".format(dn=dn, attr=attr))
             else:
-                root_logger.error("Ignoring entry: %s : only modifications "
-                                  "are allowed (missing \"changetype: "
-                                  "modify\")", dn)
+                logger.error("Ignoring entry: %s : only modifications "
+                             "are allowed (missing \"changetype: "
+                             "modify\")", dn)
 
     def handle(self, dn, entry):
         if dn in self.modifications:
@@ -1361,7 +1605,7 @@ class ModifyLDIF(ldif.LDIFParser):
         # check if there are any remaining modifications
         remaining_changes = set(self.modifications.keys()) - self.dn_updated
         for dn in remaining_changes:
-            root_logger.error(
+            logger.error(
                 "DN: %s does not exists or haven't been updated", dn)
 
 
@@ -1372,13 +1616,13 @@ def remove_keytab(keytab_path):
     :param keytab_path: path to the keytab file
     """
     try:
-        root_logger.debug("Removing service keytab: {}".format(keytab_path))
+        logger.debug("Removing service keytab: %s", keytab_path)
         os.remove(keytab_path)
     except OSError as e:
         if e.errno != errno.ENOENT:
-            root_logger.warning("Failed to remove Kerberos keytab '{}': "
-                                "{}".format(keytab_path, e))
-            root_logger.warning("You may have to remove it manually")
+            logger.warning("Failed to remove Kerberos keytab '%s': %s",
+                           keytab_path, e)
+            logger.warning("You may have to remove it manually")
 
 
 def remove_ccache(ccache_path=None, run_as=None):
@@ -1388,14 +1632,33 @@ def remove_ccache(ccache_path=None, run_as=None):
     :param ccache_path: path to the ccache file
     :param run_as: run kdestroy as this user
     """
-    root_logger.debug("Removing service credentials cache")
+    logger.debug("Removing service credentials cache")
     kdestroy_cmd = [paths.KDESTROY]
     if ccache_path is not None:
-        root_logger.debug("Ccache path: '{}'".format(ccache_path))
+        logger.debug("Ccache path: '%s'", ccache_path)
         kdestroy_cmd.extend(['-c', ccache_path])
 
     try:
         ipautil.run(kdestroy_cmd, runas=run_as, env={})
     except ipautil.CalledProcessError as e:
-        root_logger.warning(
-            "Failed to clear Kerberos credentials cache: {}".format(e))
+        logger.warning(
+            "Failed to clear Kerberos credentials cache: %s", e)
+
+
+def restart_dirsrv(instance_name="", capture_output=True):
+    """
+    Restart Directory server and perform ldap reconnect.
+    """
+    api.Backend.ldap2.disconnect()
+    services.knownservices.dirsrv.restart(instance_name=instance_name,
+                                          capture_output=capture_output,
+                                          wait=True, ldapi=True)
+    api.Backend.ldap2.connect()
+
+
+def default_subject_base(realm_name):
+    return DN(('O', realm_name))
+
+
+def default_ca_subject_dn(subject_base):
+    return DN(('CN', 'Certificate Authority'), subject_base)

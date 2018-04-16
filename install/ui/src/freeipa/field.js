@@ -96,6 +96,16 @@ field.field = IPA.field = function(spec) {
     that.param = spec.param || spec.name;
 
     /**
+     * Some fields needs to skip checking whether they are writable or not
+     * in metadata. It is possible by setting this option to true.
+     * Field example: association_table_field
+     *
+     * @property {string}
+     */
+    that.check_writable_from_metadata = spec.check_writable_from_metadata !== undefined ?
+                spec.check_writable_from_metadata : true;
+
+    /**
      * Entity param which provides access control rights
      *
      * - defaults to `param`
@@ -196,6 +206,14 @@ field.field = IPA.field = function(spec) {
     that.required = spec.required;
 
     /**
+     * Turns off loading value from command output on details pages.
+     * Used in certmap_match.
+     * @property {boolean}
+     */
+    that.autoload_value = spec.autoload_value === undefined ? true :
+                                spec.autoload_value;
+
+    /**
      * read_only is set when widget is created
      * @readonly
      * @property {boolean}
@@ -203,11 +221,25 @@ field.field = IPA.field = function(spec) {
     that.read_only = spec.read_only;
 
     /**
+     * Attribute for storing previous value of read_only attribute.
+     * It is set during changing read_only attribute.
+     * @property {boolean}
+     */
+    that.old_read_only = spec.read_only;
+
+    /**
      * Writable is set during load
      * @readonly
      * @property {boolean}
      */
     that.writable = true;
+
+    /**
+     * Attribute for storing previous value of writable attribute.
+     * It is set during changing writable attribute.
+     * @property {boolean}
+     */
+    that.old_writable = true;
 
     /**
      * Enabled
@@ -330,6 +362,19 @@ field.field = IPA.field = function(spec) {
         that.validators.push(IPA.metadata_validator());
     };
 
+
+    /**
+     * Evaluate if field was required before
+     * @return {boolean}
+     */
+    that.was_required = function() {
+        if (that.old_read_only) return false;
+        if (!that.old_writable) return false;
+
+        if (that.required !== undefined) return that.required;
+        return that.metadata && that.metadata.required;
+    };
+
     /**
      * Evaluate if field has to have some value
      * @return {boolean}
@@ -351,7 +396,7 @@ field.field = IPA.field = function(spec) {
      * @param {boolean} required
      */
     that.set_required = function(required) {
-        var old = that.is_required();
+        var old = that.was_required();
         that.required = required;
         var current = that.is_required();
 
@@ -451,10 +496,43 @@ field.field = IPA.field = function(spec) {
     };
 
     /**
+    * Evaluate if field is writable according to ACL in record and field
+    * configuration. Updates `writable` property.
+    *
+    * Not writable:
+    *
+    * - primary keys
+    * - with 'no_update' metadata flag
+    */
+    that.load_writable_from_metadata = function(writable) {
+        if (that.metadata) {
+            if (that.metadata.primary_key) {
+                writable = false;
+            }
+
+            // In case that field has set always_writable attribute, then
+            // 'no_update' flag is ignored in WebUI. It is done because of
+            // commands like user-{add,remove}-certmap. They operate with user's
+            // attribute, which cannot be changed using user-mod, but only
+            // using command user-{add,remove}-certmap. Therefore it has set
+            // 'no_update' flag, but we need to show 'Add', 'Remove' buttons in
+            // WebUI.
+            if (that.metadata.flags &&
+                array.indexOf(that.metadata.flags, 'no_update') > -1 &&
+                !that.always_writable) {
+                writable = false;
+            }
+        }
+
+        return writable;
+    };
+
+
+    /**
      * Evaluate if field is writable according to ACL in record and field
      * configuration. Updates `writable` property.
      *
-     * Not writable:
+     * Not writable (checked in method that.load_writable_from_metadata()):
      *
      * - primary keys
      * - with 'no_update' metadata flag
@@ -479,14 +557,8 @@ field.field = IPA.field = function(spec) {
             return has;
         }
 
-        if (that.metadata) {
-            if (that.metadata.primary_key) {
-                writable = false;
-            }
-
-            if (that.metadata.flags && array.indexOf(that.metadata.flags, 'no_update') > -1) {
-                writable = false;
-            }
+        if (that.check_writable_from_metadata) {
+            writable = that.load_writable_from_metadata(writable);
         }
 
         if (record && record.attributelevelrights) {
@@ -525,9 +597,9 @@ field.field = IPA.field = function(spec) {
      */
     that.set_writable = function(writable) {
 
-        var old = !!that.writable;
+        that.old_writable = !!that.writable;
         that.writable = writable;
-        if (old !== writable) {
+        if (that.old_writable !== writable) {
             that.emit('writable-change', { source: that, writable: writable });
         }
 
@@ -541,11 +613,12 @@ field.field = IPA.field = function(spec) {
      */
     that.set_read_only = function(read_only) {
 
-        var old = !!that.read_only;
+        that.old_read_only = !!that.read_only;
         that.read_only = read_only;
-        if (old !== read_only) {
+        if (that.old_read_only !== read_only) {
             that.emit('readonly-change', { source: that, readonly: read_only });
         }
+
         that.set_required(that.required); // force update of required
     };
 
@@ -802,6 +875,15 @@ field.Adapter = declare(null, {
     result_index: 0,
 
     /**
+     * When result of API call is an array of object this object index
+     * allows to specify exact object in array according to its position.
+     * Default value is null which means do not use object_index.
+     *
+     * @type {Number|null}
+     */
+    object_index: null,
+
+    /**
      * Name of the record which we want to extract from the result.
      * Used in dnslocations.
      * @type {String}
@@ -832,6 +914,10 @@ field.Adapter = declare(null, {
             else if (dr.results) {
                 var result = dr.results[this.result_index];
                 if (result) record = result[this.result_name];
+                var res_type = typeof record;
+                var obj_in_type = typeof this.object_index;
+                if (record && res_type === 'object' && obj_in_type === 'number')
+                    record = record[this.object_index];
             }
         }
         return record;
@@ -960,6 +1046,81 @@ field.validator = IPA.validator = function(spec) {
 
     return that;
 };
+
+/**
+ * Javascript integer validator
+ *
+ * It allows to insert only integer numbers which can be safely represented by
+ * Javascript.
+ *
+ * @class
+ * @alternateClassName IPA.integer_validator
+ * @extends IPA.validator
+ */
+ field.integer_validator = IPA.integer_validator = function(spec) {
+
+     var that = IPA.validator(spec);
+
+     /**
+      * @inheritDoc
+      */
+     that.validate = function(value) {
+
+         if (!value.match(/^-?\d+$/)) {
+             return that.false_result(text.get('@i18n:widget.validation.integer'));
+         }
+
+         if (!Number.isSafeInteger(parseInt(value, 10))) {
+             return that.false_result(text.get('@i18n:widget.validation.unsupported'));
+         }
+
+         return that.true_result();
+     };
+
+     that.integer_validate = that.validate;
+
+     return that;
+ };
+
+
+/**
+ * Javascript positive integer validator
+ *
+ * It allows to insert only positive integer.
+ *
+ * @class
+ * @alternateClassName IPA.positive_integer_validator
+ * @extends IPA.validator
+ */
+ field.positive_integer_validator = IPA.positive_integer_validator = function(spec) {
+
+    var that = IPA.integer_validator(spec);
+
+    /**
+    * @inheritDoc
+    */
+
+    that.validate = function(value) {
+
+        var integer_check = that.integer_validate(value);
+
+        if (!integer_check.valid) {
+            return integer_check;
+        }
+
+        var num = parseInt(value, 10);
+
+        if (num <= 0) {
+            return that.false_result(
+                text.get('@i18n:widget.validation.positive_number'));
+        }
+
+        return that.true_result();
+    };
+
+    return that;
+ };
+
 
 /**
  * Metadata validator
@@ -1259,6 +1420,37 @@ field.certs_field = IPA.certs_field = function(spec) {
     return that;
 };
 
+
+/**
+ * Used along with custom_command_multivalued widget
+ *
+ * - by default has `w_if_no_aci` to workaround missing object class
+ * - by default has always_writable=true to workaround aci rights
+ *
+ * @class
+ * @alternateClassName IPA.custom_command_multivalued_field
+ * @extends IPA.field
+ */
+field.certmap_command_multivalued_field = function(spec) {
+
+    spec = spec || {};
+    spec.flags = spec.flags || ['w_if_no_aci'];
+
+    var that = IPA.field(spec);
+
+    /**
+     * Set field always writable in case that it is set to true
+     * @param Boolean always_writable
+     */
+    that.always_writable = spec.always_writable === undefined ? true :
+            spec.always_writable;
+
+    return that;
+};
+
+
+IPA.custom_command_multivalued_field = field.custom_command_multivalued_field;
+
 /**
  * SSH Keys Adapter
  * @class
@@ -1356,6 +1548,124 @@ field.ObjectAdapter = declare([field.Adapter], {
         }
 
         return record;
+    }
+});
+
+
+/**
+ * Custom adapter for fields which handles situations when there is no value
+ * for attribute (name) of the field and we want to use alternative attribute
+ * from response. We can set the alternative attribute name to the 'alt_attr'
+ * attribute of the adapter.
+ * This adapter is used i.e. in table in search facet for services. Handles
+ * situations where older services don't have canonical name.
+ *
+ * @class
+ * @extends field.Adapter
+ */
+field.AlternateAttrFieldAdapter = declare([field.Adapter], {
+    /**
+     * In case that the value is not get using field name then use alternative
+     * name.
+     * @param {Object} data Object which contains the record or the record
+     * @param {string} [attribute] attribute name - overrides `context.param`
+     * @param {Mixed} [def_val] default value - overrides `context.default_value`
+     * @returns {Array} attribute value
+     */
+    load: function(data, attribute, def_val) {
+        var record = this.get_record(data);
+        var value = null;
+        var attr = attribute || this.context.param;
+        var def = def_val || this.context.default_value;
+        if (record) {
+            value = this.get_value(record, attr);
+            if (util.is_empty(value) && this.context.adapter.alt_attr) {
+                value = this.get_value(record, this.context.adapter.alt_attr);
+            }
+        }
+        if (util.is_empty(value) && !util.is_empty(def)) {
+            value = util.normalize_value(def);
+        }
+        value = rpc.extract_objects(value);
+        return value;
+    }
+});
+
+
+/**
+ * Custom adapter specifically implemented for certmap_match where it
+ * transform items in format {domain: "xxx", uid: [arrayof_uids]} to
+ * {[{domain: "xxx", uid: "uid1"}, {domain: "xxx", uid: 'uid2'}, ...]}.
+ * This is necessary for possibility to correctly display table.
+ *
+ * @class
+ * @extends field.Adapter
+ */
+field.CertMatchTransformAdapter = declare([field.Adapter], {
+
+    /**
+    * @param {Array} record
+    */
+    transform_one_record: function(record) {
+        var domain = record.domain;
+        var uids = record.uid;
+        var results = [];
+
+        for (var i=0, l=uids.length; i<l; i++) {
+            results.push({
+                domain: domain,
+                uid: uids[i]
+            });
+        }
+
+        return results;
+    },
+
+    /**
+     * Transform record to array of arrays with objects in the following format:
+     * {domain: 'xxx', uid: 'uid1'}
+     *
+     * @param {Array|Object} record
+     */
+    transform_record: function(record) {
+        if (lang.isArray(record)) {
+            for (var i=0, l=record.length; i<l; i++) {
+                record[i] = this.transform_one_record(record[i]);
+            }
+        } else {
+            record = this.transform_one_record(record);
+        }
+    },
+
+    /**
+     * Merge array of arrays of object into array of objects.
+     *
+     * @param {Array} records
+     */
+    merge_object_into_array: function(records) {
+        if (!lang.isArray(records)) return records;
+
+        var merged = [];
+        for (var i=0, l=records.length; i<l; i++) {
+            merged = merged.concat(records[i]);
+        }
+
+        return merged;
+    },
+
+    /**
+     *
+     * @param {Object} data Object which contains the record or the record
+     * @returns {Array} attribute values
+     */
+    load: function(data) {
+        var record = this.get_record(data);
+
+        this.transform_record(record);
+
+        var values = this.merge_object_into_array(record);
+
+        return values;
     }
 });
 
@@ -1612,6 +1922,7 @@ field.register = function() {
     f.register('checkbox', field.checkbox_field);
     f.register('checkboxes', field.field);
     f.register('combobox', field.field);
+    f.register('certmap_multivalued', field.certmap_command_multivalued_field);
     f.register('datetime', field.datetime_field);
     f.register('enable', field.enable_field);
     f.register('entity_select', field.field);
@@ -1629,9 +1940,13 @@ field.register = function() {
     v.register('metadata', field.metadata_validator);
     v.register('unsupported', field.unsupported_validator);
     v.register('same_password', field.same_password_validator);
+    v.register('integer', field.integer_validator);
+    v.register('positive_integer', field.positive_integer_validator);
 
     l.register('adapter', field.Adapter);
     l.register('object_adapter', field.ObjectAdapter);
+    l.register('alternate_attr_field_adapter', field.AlternateAttrFieldAdapter);
+    l.register('certmatch_transform', field.CertMatchTransformAdapter);
 };
 phases.on('registration', field.register);
 

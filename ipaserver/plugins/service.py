@@ -19,11 +19,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import logging
+
+from cryptography.hazmat.primitives import hashes
 import six
 
 from ipalib import api, errors, messages
-from ipalib import Bytes, StrEnum, Bool, Str, Flag
-from ipalib.parameters import Principal
+from ipalib import StrEnum, Bool, Str, Flag
+from ipalib.parameters import Principal, Certificate
 from ipalib.plugable import Registry
 from .baseldap import (
     host_is_master,
@@ -48,8 +51,6 @@ from ipalib import util
 from ipalib import output
 from ipapython import kerberos
 from ipapython.dn import DN
-
-import nss.nss as nss
 
 
 if six.PY3:
@@ -116,6 +117,8 @@ EXAMPLES:
    ipa-getkeytab -s ipa.example.com -p HTTP/web.example.com -k /etc/httpd/httpd.keytab
 
 """)
+
+logger = logging.getLogger(__name__)
 
 register = Registry()
 
@@ -212,13 +215,6 @@ def normalize_principal(value):
 
     return unicode(principal)
 
-def validate_certificate(ugettext, cert):
-    """
-    Check whether the certificate is properly encoded to DER
-    """
-    if api.env.in_server:
-        x509.validate_certificate(cert, datatype=x509.DER)
-
 
 def revoke_certs(certs):
     """
@@ -266,16 +262,17 @@ def set_certificate_attrs(entry_attrs):
         cert = entry_attrs['usercertificate'][0]
     else:
         cert = entry_attrs['usercertificate']
-    cert = x509.normalize_certificate(cert)
-    cert = x509.load_certificate(cert, datatype=x509.DER)
-    entry_attrs['subject'] = unicode(cert.subject)
+    entry_attrs['subject'] = unicode(DN(cert.subject))
     entry_attrs['serial_number'] = unicode(cert.serial_number)
     entry_attrs['serial_number_hex'] = u'0x%X' % cert.serial_number
-    entry_attrs['issuer'] = unicode(cert.issuer)
-    entry_attrs['valid_not_before'] = unicode(cert.valid_not_before_str)
-    entry_attrs['valid_not_after'] = unicode(cert.valid_not_after_str)
-    entry_attrs['md5_fingerprint'] = unicode(nss.data_to_hex(nss.md5_digest(cert.der_data), 64)[0])
-    entry_attrs['sha1_fingerprint'] = unicode(nss.data_to_hex(nss.sha1_digest(cert.der_data), 64)[0])
+    entry_attrs['issuer'] = unicode(DN(cert.issuer))
+    entry_attrs['valid_not_before'] = x509.format_datetime(
+            cert.not_valid_before)
+    entry_attrs['valid_not_after'] = x509.format_datetime(cert.not_valid_after)
+    entry_attrs['sha1_fingerprint'] = x509.to_hex_with_colons(
+        cert.fingerprint(hashes.SHA1()))
+    entry_attrs['sha256_fingerprint'] = x509.to_hex_with_colons(
+        cert.fingerprint(hashes.SHA256()))
 
 def check_required_principal(ldap, principal):
     """
@@ -472,7 +469,7 @@ class service(LDAPObject):
             require_service=True,
             flags={'no_create'}
         ),
-        Bytes('usercertificate*', validate_certificate,
+        Certificate('usercertificate*',
             cli_name='certificate',
             label=_('Certificate'),
             doc=_('Base-64 encoded service certificate'),
@@ -502,12 +499,12 @@ class service(LDAPObject):
             label=_('Not After'),
             flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
         ),
-        Str('md5_fingerprint',
-            label=_('Fingerprint (MD5)'),
-            flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
-        ),
         Str('sha1_fingerprint',
             label=_('Fingerprint (SHA1)'),
+            flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
+        ),
+        Str('sha256_fingerprint',
+            label=_('Fingerprint (SHA256)'),
             flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
         ),
         Str('revocation_reason?',
@@ -626,10 +623,6 @@ class service_add(LDAPCreate):
 
         self.obj.validate_ipakrbauthzdata(entry_attrs)
 
-        certs = options.get('usercertificate', [])
-        certs_der = [x509.normalize_certificate(c) for c in certs]
-        entry_attrs['usercertificate'] = certs_der
-
         if not options.get('force', False):
             # We know the host exists if we've gotten this far but we
             # really want to discourage creating services for hosts that
@@ -699,23 +692,22 @@ class service_mod(LDAPUpdate):
 
         # verify certificates
         certs = entry_attrs.get('usercertificate') or []
-        certs_der = [x509.normalize_certificate(c) for c in certs]
         # revoke removed certificates
         ca_is_enabled = self.api.Command.ca_is_enabled()['result']
         if 'usercertificate' in options and ca_is_enabled:
             try:
                 entry_attrs_old = ldap.get_entry(dn, ['usercertificate'])
             except errors.NotFound:
-                self.obj.handle_not_found(*keys)
+                raise self.obj.handle_not_found(*keys)
             old_certs = entry_attrs_old.get('usercertificate', [])
-            old_certs_der = [x509.normalize_certificate(c) for c in old_certs]
-            removed_certs_der = set(old_certs_der) - set(certs_der)
-            for der in removed_certs_der:
-                rm_certs = api.Command.cert_find(certificate=der)['result']
+            removed_certs = set(old_certs) - set(certs)
+            for cert in removed_certs:
+                rm_certs = api.Command.cert_find(
+                    certificate=cert.public_bytes(x509.Encoding.DER))['result']
                 revoke_certs(rm_certs)
 
         if certs:
-            entry_attrs['usercertificate'] = certs_der
+            entry_attrs['usercertificate'] = certs
 
         update_krbticketflags(ldap, entry_attrs, attrs_list, options, True)
 
@@ -789,7 +781,7 @@ class service_find(LDAPSearch):
                         reason=e
                     )
                 )
-                self.log.error("Invalid certificate: {err}".format(err=e))
+                logger.error("Invalid certificate: %s", e)
                 del(entry_attrs['usercertificate'])
 
             set_kerberos_attrs(entry_attrs, options)
@@ -827,7 +819,7 @@ class service_show(LDAPRetrieve):
                     reason=e,
                 )
             )
-            self.log.error("Invalid certificate: {err}".format(err=e))
+            logger.error("Invalid certificate: %s", e)
             del(entry_attrs['usercertificate'])
 
         set_kerberos_attrs(entry_attrs, options)

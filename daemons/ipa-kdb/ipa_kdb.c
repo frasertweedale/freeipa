@@ -50,6 +50,7 @@ static void ipadb_context_free(krb5_context kcontext,
         free((*ctx)->uri);
         free((*ctx)->base);
         free((*ctx)->realm_base);
+        free((*ctx)->accounts_base);
         free((*ctx)->kdc_hostname);
         /* ldap free lcontext */
         if ((*ctx)->lcontext) {
@@ -65,6 +66,10 @@ static void ipadb_context_free(krb5_context kcontext,
             free(cfg->authz_data[c]);
         }
         free(cfg->authz_data);
+
+#ifdef HAVE_KRB5_CERTAUTH_PLUGIN
+        ipa_certauth_free_moddata(&((*ctx)->certauth_moddata));
+#endif
 
         free(*ctx);
         *ctx = NULL;
@@ -460,6 +465,12 @@ int ipadb_get_connection(struct ipadb_context *ipactx)
     ret = ipadb_reinit_mspac(ipactx, false);
     if (ret && ret != ENOENT) {
         /* TODO: log that there is an issue with adtrust settings */
+        if (ipactx->lcontext == NULL) {
+            /* for some reason ldap connection was reset in ipadb_reinit_mspac
+             * and is no longer established => failure of ipadb_get_connection
+             */
+            goto done;
+        }
     }
 
     ret = 0;
@@ -511,6 +522,7 @@ static krb5_error_code ipadb_init_module(krb5_context kcontext,
     if (!ipactx) {
         return ENOMEM;
     }
+    ipactx->magic = IPA_CONTEXT_MAGIC;
 
     /* only check for unsupported 'temporary' value for now */
     for (i = 0; db_args != NULL && db_args[i] != NULL; i++) {
@@ -549,6 +561,12 @@ static krb5_error_code ipadb_init_module(krb5_context kcontext,
 
     ret = asprintf(&ipactx->realm_base, "cn=%s,cn=kerberos,%s",
                                         ipactx->realm, ipactx->base);
+    if (ret == -1) {
+        ret = ENOMEM;
+        goto fail;
+    }
+
+    ret = asprintf(&ipactx->accounts_base, "cn=accounts,%s", ipactx->base);
     if (ret == -1) {
         ret = ENOMEM;
         goto fail;
@@ -613,6 +631,7 @@ static krb5_error_code ipadb_get_age(krb5_context kcontext,
     return 0;
 }
 
+#if KRB5_KDB_DAL_MAJOR_VERSION == 5
 static void *ipadb_alloc(krb5_context context, void *ptr, size_t size)
 {
     return realloc(ptr, size);
@@ -622,48 +641,114 @@ static void ipadb_free(krb5_context context, void *ptr)
 {
     free(ptr);
 }
+#endif
 
 /* KDB Virtual Table */
 
-kdb_vftabl kdb_function_table = {
-    KRB5_KDB_DAL_MAJOR_VERSION,         /* major version number */
-    0,                                  /* minor version number */
-    ipadb_init_library,                 /* init_library */
-    ipadb_fini_library,                 /* fini_library */
-    ipadb_init_module,                  /* init_module */
-    ipadb_fini_module,                  /* fini_module */
-    ipadb_create,                       /* create */
-    NULL,                               /* destroy */
-    ipadb_get_age,                      /* get_age */
-    NULL,                               /* lock */
-    NULL,                               /* unlock */
-    ipadb_get_principal,                /* get_principal */
-    ipadb_free_principal,               /* free_principal */
-    ipadb_put_principal,                /* put_principal */
-    ipadb_delete_principal,             /* delete_principal */
-    ipadb_iterate,                      /* iterate */
-    ipadb_create_pwd_policy,            /* create_policy */
-    ipadb_get_pwd_policy,               /* get_policy */
-    ipadb_put_pwd_policy,               /* put_policy */
-    ipadb_iterate_pwd_policy,           /* iter_policy */
-    ipadb_delete_pwd_policy,            /* delete_policy */
-    ipadb_free_pwd_policy,              /* free_policy */
-    ipadb_alloc,                        /* alloc */
-    ipadb_free,                         /* free */
-    ipadb_fetch_master_key,             /* fetch_master_key */
-    NULL,                               /* fetch_master_key_list */
-    ipadb_store_master_key_list,        /* store_master_key_list */
-    NULL,                               /* dbe_search_enctype */
-    ipadb_change_pwd,                   /* change_pwd */
-    NULL,                               /* promote_db */
-    NULL,                               /* decrypt_key_data */
-    NULL,                               /* encrypt_key_data */
-    ipadb_sign_authdata,                /* sign_authdata */
-    ipadb_check_transited_realms,       /* check_transited_realms */
-    ipadb_check_policy_as,              /* check_policy_as */
-    NULL,                               /* check_policy_tgs */
-    ipadb_audit_as_req,                 /* audit_as_req */
-    NULL,                               /* refresh_config */
-    ipadb_check_allowed_to_delegate     /* check_allowed_to_delegate */
-};
+/* We explicitly want to keep different ABI tables below separate. */
+/* Do not merge them together. Older ABI does not need to be updated */
 
+#if KRB5_KDB_DAL_MAJOR_VERSION == 5
+kdb_vftabl kdb_function_table = {
+    .maj_ver = KRB5_KDB_DAL_MAJOR_VERSION,
+    .min_ver = 0,
+    .init_library = ipadb_init_library,
+    .fini_library = ipadb_fini_library,
+    .init_module = ipadb_init_module,
+    .fini_module = ipadb_fini_module,
+    .create = ipadb_create,
+    .get_age = ipadb_get_age,
+    .get_principal = ipadb_get_principal,
+    .free_principal = ipadb_free_principal,
+    .put_principal = ipadb_put_principal,
+    .delete_principal = ipadb_delete_principal,
+    .iterate = ipadb_iterate,
+    .create_policy = ipadb_create_pwd_policy,
+    .get_policy = ipadb_get_pwd_policy,
+    .put_policy = ipadb_put_pwd_policy,
+    .iter_policy = ipadb_iterate_pwd_policy,
+    .delete_policy = ipadb_delete_pwd_policy,
+    .free_policy = ipadb_free_pwd_policy,
+    .alloc = ipadb_alloc,
+    .free = ipadb_free,
+    .fetch_master_key = ipadb_fetch_master_key,
+    .store_master_key_list = ipadb_store_master_key_list,
+    .change_pwd = ipadb_change_pwd,
+    .sign_authdata = ipadb_sign_authdata,
+    .check_transited_realms = ipadb_check_transited_realms,
+    .check_policy_as = ipadb_check_policy_as,
+    .audit_as_req = ipadb_audit_as_req,
+    .check_allowed_to_delegate = ipadb_check_allowed_to_delegate
+};
+#endif
+
+#if (KRB5_KDB_DAL_MAJOR_VERSION == 6) && !defined(HAVE_KDB_FREEPRINCIPAL_EDATA)
+kdb_vftabl kdb_function_table = {
+    .maj_ver = KRB5_KDB_DAL_MAJOR_VERSION,
+    .min_ver = 0,
+    .init_library = ipadb_init_library,
+    .fini_library = ipadb_fini_library,
+    .init_module = ipadb_init_module,
+    .fini_module = ipadb_fini_module,
+    .create = ipadb_create,
+    .get_age = ipadb_get_age,
+    .get_principal = ipadb_get_principal,
+    .put_principal = ipadb_put_principal,
+    .delete_principal = ipadb_delete_principal,
+    .iterate = ipadb_iterate,
+    .create_policy = ipadb_create_pwd_policy,
+    .get_policy = ipadb_get_pwd_policy,
+    .put_policy = ipadb_put_pwd_policy,
+    .iter_policy = ipadb_iterate_pwd_policy,
+    .delete_policy = ipadb_delete_pwd_policy,
+    .fetch_master_key = ipadb_fetch_master_key,
+    .store_master_key_list = ipadb_store_master_key_list,
+    .change_pwd = ipadb_change_pwd,
+    .sign_authdata = ipadb_sign_authdata,
+    .check_transited_realms = ipadb_check_transited_realms,
+    .check_policy_as = ipadb_check_policy_as,
+    .audit_as_req = ipadb_audit_as_req,
+    .check_allowed_to_delegate = ipadb_check_allowed_to_delegate
+};
+#endif
+
+#if ((KRB5_KDB_DAL_MAJOR_VERSION == 6) || \
+     (KRB5_KDB_DAL_MAJOR_VERSION == 7)) && \
+    defined(HAVE_KDB_FREEPRINCIPAL_EDATA)
+kdb_vftabl kdb_function_table = {
+    .maj_ver = KRB5_KDB_DAL_MAJOR_VERSION,
+    .min_ver = 1,
+    .init_library = ipadb_init_library,
+    .fini_library = ipadb_fini_library,
+    .init_module = ipadb_init_module,
+    .fini_module = ipadb_fini_module,
+    .create = ipadb_create,
+    .get_age = ipadb_get_age,
+    .get_principal = ipadb_get_principal,
+    .put_principal = ipadb_put_principal,
+    .delete_principal = ipadb_delete_principal,
+    .iterate = ipadb_iterate,
+    .create_policy = ipadb_create_pwd_policy,
+    .get_policy = ipadb_get_pwd_policy,
+    .put_policy = ipadb_put_pwd_policy,
+    .iter_policy = ipadb_iterate_pwd_policy,
+    .delete_policy = ipadb_delete_pwd_policy,
+    .fetch_master_key = ipadb_fetch_master_key,
+    .store_master_key_list = ipadb_store_master_key_list,
+    .change_pwd = ipadb_change_pwd,
+    .sign_authdata = ipadb_sign_authdata,
+    .check_transited_realms = ipadb_check_transited_realms,
+    .check_policy_as = ipadb_check_policy_as,
+    .audit_as_req = ipadb_audit_as_req,
+    .check_allowed_to_delegate = ipadb_check_allowed_to_delegate,
+    /* The order is important, DAL version 6.1 added
+     * the free_principal_e_data callback */
+    .free_principal_e_data = ipadb_free_principal_e_data,
+};
+#endif
+
+#if (KRB5_KDB_DAL_MAJOR_VERSION != 5) && \
+    (KRB5_KDB_DAL_MAJOR_VERSION != 6) && \
+    (KRB5_KDB_DAL_MAJOR_VERSION != 7)
+#error unsupported DAL major version
+#endif

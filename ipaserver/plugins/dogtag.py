@@ -241,17 +241,18 @@ digits and nothing else follows.
 
 import datetime
 import json
+import logging
+
 from lxml import etree
 import time
+import contextlib
 
 import six
-from six.moves import urllib
 
 from ipalib import Backend, api
 from ipapython.dn import DN
 import ipapython.cookie
-from ipapython import dogtag
-from ipapython import ipautil
+from ipapython import dogtag, ipautil, certdb
 
 if api.env.in_server:
     import pki
@@ -261,6 +262,8 @@ if api.env.in_server:
 
 if six.PY3:
     unicode = str
+
+logger = logging.getLogger(__name__)
 
 # These are general status return values used when
 # CMSServlet.outputError() is invoked.
@@ -1202,7 +1205,6 @@ import os
 import random
 from ipaserver.plugins import rabase
 from ipalib.constants import TYPE_ERROR
-from ipalib.util import cachedproperty
 from ipalib import _
 from ipaplatform.paths import paths
 
@@ -1225,85 +1227,91 @@ class RestClient(Backend):
             profile_api.create_profile(...)
 
     """
+    DEFAULT_PROFILE = dogtag.DEFAULT_PROFILE
+    KDC_PROFILE = dogtag.KDC_PROFILE
     path = None
 
     @staticmethod
     def _parse_dogtag_error(body):
         try:
-            return pki.PKIException.from_json(json.loads(body))
+            return pki.PKIException.from_json(
+                json.loads(ipautil.decode_json(body)))
         except Exception:
             return None
 
     def __init__(self, api):
+        self.ca_cert = api.env.tls_ca_cert
         if api.env.in_tree:
-            self.sec_dir = api.env.dot_ipa + os.sep + 'alias'
-            self.pwd_file = self.sec_dir + os.sep + '.pwd'
+            self.client_certfile = os.path.join(
+                api.env.dot_ipa, 'ra-agent.pem')
+
+            self.client_keyfile = os.path.join(
+                api.env.dot_ipa, 'ra-agent.key')
         else:
-            self.sec_dir = paths.HTTPD_ALIAS_DIR
-            self.pwd_file = paths.ALIAS_PWDFILE_TXT
-        self.noise_file = self.sec_dir + os.sep + '.noise'
-        self.ipa_key_size = "2048"
-        self.ipa_certificate_nickname = "ipaCert"
-        self.ca_certificate_nickname = "caCert"
-        self._read_password()
+            self.client_certfile = paths.RA_AGENT_PEM
+            self.client_keyfile = paths.RA_AGENT_KEY
         super(RestClient, self).__init__(api)
 
+        self._ca_host = None
         # session cookie
         self.override_port = None
         self.cookie = None
 
-    def _read_password(self):
-        try:
-            with open(self.pwd_file) as f:
-                self.password = f.readline().strip()
-        except IOError:
-            self.password = ''
-
-    @cachedproperty
+    @property
     def ca_host(self):
         """
-        :return:   host
-                   as str
+        :returns: FQDN of a host hopefully providing a CA service
 
-        Select our CA host.
+        Select our CA host, cache it for the first time.
         """
+        if self._ca_host is not None:
+            return self._ca_host
+
         ldap2 = self.api.Backend.ldap2
         if host_has_service(api.env.ca_host, ldap2, "CA"):
-            return api.env.ca_host
-        if api.env.host != api.env.ca_host:
+            object.__setattr__(self, '_ca_host', api.env.ca_host)
+        elif api.env.host != api.env.ca_host:
             if host_has_service(api.env.host, ldap2, "CA"):
-                return api.env.host
-        host = select_any_master(ldap2)
-        if host:
-            return host
+                object.__setattr__(self, '_ca_host', api.env.host)
         else:
-            return api.env.ca_host
+            object.__setattr__(self, '_ca_host', select_any_master(ldap2))
+        if self._ca_host is None:
+            object.__setattr__(self, '_ca_host', api.env.ca_host)
+        return self._ca_host
 
     def __enter__(self):
         """Log into the REST API"""
         if self.cookie is not None:
             return
+
+        # Refresh the ca_host property
+        object.__setattr__(self, '_ca_host', None)
+
         status, resp_headers, _resp_body = dogtag.https_request(
             self.ca_host, self.override_port or self.env.ca_agent_port,
-            '/ca/rest/account/login',
-            self.sec_dir, self.password, self.ipa_certificate_nickname,
+            url='/ca/rest/account/login',
+            cafile=self.ca_cert,
+            client_certfile=self.client_certfile,
+            client_keyfile=self.client_keyfile,
             method='GET'
         )
         cookies = ipapython.cookie.Cookie.parse(resp_headers.get('set-cookie', ''))
         if status != 200 or len(cookies) == 0:
             raise errors.RemoteRetrieveError(reason=_('Failed to authenticate to CA REST API'))
-        self.cookie = str(cookies[0])
+        object.__setattr__(self, 'cookie', str(cookies[0]))
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         """Log out of the REST API"""
         dogtag.https_request(
             self.ca_host, self.override_port or self.env.ca_agent_port,
-            '/ca/rest/account/logout',
-            self.sec_dir, self.password, self.ipa_certificate_nickname,
+            url='/ca/rest/account/logout',
+            cafile=self.ca_cert,
+            client_certfile=self.client_certfile,
+            client_keyfile=self.client_keyfile,
             method='GET'
         )
-        self.cookie = None
+        object.__setattr__(self, 'cookie', None)
 
     def _ssldo(self, method, path, headers=None, body=None, use_session=True):
         """
@@ -1341,8 +1349,10 @@ class RestClient(Backend):
         # perform main request
         status, resp_headers, resp_body = dogtag.https_request(
             self.ca_host, self.override_port or self.env.ca_agent_port,
-            resource,
-            self.sec_dir, self.password, self.ipa_certificate_nickname,
+            url=resource,
+            cafile=self.ca_cert,
+            client_certfile=self.client_certfile,
+            client_keyfile=self.client_keyfile,
             method=method, headers=headers, body=body
         )
         if status < 200 or status >= 300:
@@ -1380,28 +1390,8 @@ class ra(rabase.rabase, RestClient):
         if detail is not None:
             err_msg = u'%s (%s)' % (err_msg, detail)
 
-        self.error('%s.%s(): %s', type(self).__name__, func_name, err_msg)
+        logger.error('%s.%s(): %s', type(self).__name__, func_name, err_msg)
         raise errors.CertificateOperationError(error=err_msg)
-
-    @cachedproperty
-    def ca_host(self):
-        """
-        :return:   host
-                   as str
-
-        Select our CA host.
-        """
-        ldap2 = self.api.Backend.ldap2
-        if host_has_service(api.env.ca_host, ldap2, "CA"):
-            return api.env.ca_host
-        if api.env.host != api.env.ca_host:
-            if host_has_service(api.env.host, ldap2, "CA"):
-                return api.env.host
-        host = select_any_master(ldap2)
-        if host:
-            return host
-        else:
-            return api.env.ca_host
 
     def _request(self, url, port, **kw):
         """
@@ -1423,7 +1413,12 @@ class ra(rabase.rabase, RestClient):
 
         Perform an HTTPS request
         """
-        return dogtag.https_request(self.ca_host, port, url, self.sec_dir, self.password, self.ipa_certificate_nickname, **kw)
+        return dogtag.https_request(
+            self.ca_host, port, url,
+            cafile=self.ca_cert,
+            client_certfile=self.client_certfile,
+            client_keyfile=self.client_keyfile,
+            **kw)
 
     def get_parse_result_xml(self, xml_text, parse_func):
         '''
@@ -1442,8 +1437,9 @@ class ra(rabase.rabase, RestClient):
             self.raise_certificate_operation_error('get_parse_result_xml',
                                                    detail=str(e))
         result = parse_func(doc)
-        self.debug("%s() xml_text:\n%s\n"
-                   "parse_result:\n%s" % (parse_func.__name__, xml_text, result))
+        logger.debug(
+            "%s() xml_text:\n%r\nparse_result:\n%r",
+            parse_func.__name__, xml_text, result)
         return result
 
     def check_request_status(self, request_id):
@@ -1480,7 +1476,7 @@ class ra(rabase.rabase, RestClient):
 
 
         """
-        self.debug('%s.check_request_status()', type(self).__name__)
+        logger.debug('%s.check_request_status()', type(self).__name__)
 
         # Call CMS
         http_status, _http_headers, http_body = (
@@ -1516,7 +1512,7 @@ class ra(rabase.rabase, RestClient):
 
         return cmd_result
 
-    def get_certificate(self, serial_number=None):
+    def get_certificate(self, serial_number):
         """
         Retrieve an existing certificate.
 
@@ -1561,7 +1557,7 @@ class ra(rabase.rabase, RestClient):
 
 
         """
-        self.debug('%s.get_certificate()', type(self).__name__)
+        logger.debug('%s.get_certificate()', type(self).__name__)
 
         # Convert serial number to integral type from string to properly handle
         # radix issues. Note: the int object constructor will properly handle large
@@ -1628,10 +1624,10 @@ class ra(rabase.rabase, RestClient):
             ``unicode``, decimal representation
 
         """
-        self.debug('%s.request_certificate()', type(self).__name__)
+        logger.debug('%s.request_certificate()', type(self).__name__)
 
         # Call CMS
-        template = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        template = u'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <CertEnrollmentRequest>
                 <ProfileID>{profile}</ProfileID>
                 <Input id="i1">
@@ -1665,7 +1661,7 @@ class ra(rabase.rabase, RestClient):
         )
 
         try:
-            resp_obj = json.loads(http_body)
+            resp_obj = json.loads(ipautil.decode_json(http_body))
         except ValueError:
             raise errors.RemoteRetrieveError(reason=_("Response from CA was not valid JSON"))
 
@@ -1718,7 +1714,7 @@ class ra(rabase.rabase, RestClient):
         +---------------+---------------+---------------+
 
         """
-        self.debug('%s.revoke_certificate()', type(self).__name__)
+        logger.debug('%s.revoke_certificate()', type(self).__name__)
         if type(revocation_reason) is not int:
             raise TypeError(TYPE_ERROR % ('revocation_reason', int, revocation_reason, type(revocation_reason)))
 
@@ -1780,7 +1776,7 @@ class ra(rabase.rabase, RestClient):
         +---------------+---------------+---------------+
         """
 
-        self.debug('%s.take_certificate_off_hold()', type(self).__name__)
+        logger.debug('%s.take_certificate_off_hold()', type(self).__name__)
 
         # Convert serial number to integral type from string to properly handle
         # radix issues. Note: the int object constructor will properly handle large
@@ -1832,7 +1828,7 @@ class ra(rabase.rabase, RestClient):
             ts = time.strptime(value, '%Y-%m-%d')
             return int(time.mktime(ts) * 1000)
 
-        self.debug('%s.find()', type(self).__name__)
+        logger.debug('%s.find()', type(self).__name__)
 
         # Create the root element
         page = etree.Element('CertSearchRequest')
@@ -1907,36 +1903,33 @@ class ra(rabase.rabase, RestClient):
             e = etree.SubElement(page, opt)
             e.text = str(booloptions[opt]).lower()
 
-        payload = etree.tostring(doc, pretty_print=False, xml_declaration=True, encoding='UTF-8')
-        self.debug('%s.find(): request: %s', type(self).__name__, payload)
+        payload = etree.tostring(doc, pretty_print=False,
+                                 xml_declaration=True, encoding='UTF-8')
+        logger.debug('%s.find(): request: %s', type(self).__name__, payload)
 
-        url = 'http://%s/ca/rest/certs/search?size=%d' % (
-            ipautil.format_netloc(self.ca_host, 8080),
-            options.get('sizelimit', 100))
+        # pylint: disable=unused-variable
+        status, _, data = dogtag.https_request(
+            self.ca_host, 443,
+            url='/ca/rest/certs/search?size=%d' % (
+                 options.get('sizelimit', 0x7fffffff)),
+            client_certfile=None,
+            client_keyfile=None,
+            cafile=self.ca_cert,
+            method='POST',
+            headers={'Accept-Encoding': 'gzip, deflate',
+                     'User-Agent': 'IPA',
+                     'Content-Type': 'application/xml'},
+            body=payload
+        )
 
-        opener = urllib.request.build_opener()
-        opener.addheaders = [('Accept-Encoding', 'gzip, deflate'),
-                             ('User-Agent', 'IPA')]
-
-        req = urllib.request.Request(url=url, data=payload, headers={'Content-Type': 'application/xml'})
-        try:
-            response = opener.open(req)
-        except urllib.error.HTTPError as e:
-            self.debug('HTTP Response code: %d' % e.getcode())
-            if e.getcode() == 501:
-                self.raise_certificate_operation_error('find',
-                    detail=_('find not supported on CAs upgraded from 9 to 10'))
+        if status != 200:
             self.raise_certificate_operation_error('find',
-                                                   detail=e.msg)
-        except urllib.error.URLError as e:
-            self.raise_certificate_operation_error('find',
-                                                   detail=e.reason)
+                                                   detail=status)
 
-        data = response.readlines()
-        self.debug('%s.find(): response: %s', type(self).__name__, data)
+        logger.debug('%s.find(): response: %s', type(self).__name__, data)
         parser = etree.XMLParser()
         try:
-            doc = etree.fromstring(data[0], parser)
+            doc = etree.fromstring(data, parser)
         except etree.XMLSyntaxError as e:
             self.raise_certificate_operation_error('find',
                                                    detail=e.msg)
@@ -1958,6 +1951,16 @@ class ra(rabase.rabase, RestClient):
             issuer_dn = cert.xpath('IssuerDN')
             if len(issuer_dn) == 1:
                 response_request['issuer'] = unicode(issuer_dn[0].text)
+
+            not_valid_before = cert.xpath('NotValidBefore')
+            if len(not_valid_before) == 1:
+                response_request['valid_not_before'] = (
+                    unicode(not_valid_before[0].text))
+
+            not_valid_after = cert.xpath('NotValidAfter')
+            if len(not_valid_after) == 1:
+                response_request['valid_not_after'] = (
+                    unicode(not_valid_after[0].text))
 
             status = cert.xpath('Status')
             if len(status) == 1:
@@ -2000,6 +2003,7 @@ class kra(Backend):
         else:
             return api.env.ca_host
 
+    @contextlib.contextmanager
     def get_client(self):
         """
         Returns an authenticated KRA client to access KRA services.
@@ -2011,9 +2015,11 @@ class kra(Backend):
             # TODO: replace this with a more specific exception
             raise RuntimeError('KRA service is not enabled')
 
+        tempdb = certdb.NSSDatabase()
+        tempdb.create_db()
         crypto = cryptoutil.NSSCryptoProvider(
-            paths.HTTPD_ALIAS_DIR,
-            password_file=paths.ALIAS_PWDFILE_TXT)
+            tempdb.secdir,
+            password_file=tempdb.pwd_file)
 
         # TODO: obtain KRA host & port from IPA service list or point to KRA load balancer
         # https://fedorahosted.org/freeipa/ticket/4557
@@ -2023,9 +2029,16 @@ class kra(Backend):
             str(self.kra_port),
             'kra')
 
-        connection.set_authentication_cert(paths.KRA_AGENT_PEM)
+        connection.session.cert = (paths.RA_AGENT_PEM, paths.RA_AGENT_KEY)
+        # uncomment the following when this commit makes it to release
+        # https://git.fedorahosted.org/cgit/pki.git/commit/?id=71ae20c
+        # connection.set_authentication_cert(paths.RA_AGENT_PEM,
+        #                                    paths.RA_AGENT_KEY)
 
-        return KRAClient(connection, crypto)
+        try:
+            yield KRAClient(connection, crypto)
+        finally:
+            tempdb.close()
 
 
 @register()
@@ -2113,17 +2126,33 @@ class ra_lightweight_ca(RestClient):
             body=json.dumps({"parentID": "host-authority", "dn": unicode(dn)}),
         )
         try:
-            return json.loads(resp_body)
-        except:
-            raise errors.RemoteRetrieveError(reason=_("Response from CA was not valid JSON"))
+            return json.loads(ipautil.decode_json(resp_body))
+        except Exception as e:
+            logger.debug('%s', e, exc_info=True)
+            raise errors.RemoteRetrieveError(
+                reason=_("Response from CA was not valid JSON"))
 
     def read_ca(self, ca_id):
         _status, _resp_headers, resp_body = self._ssldo(
             'GET', ca_id, headers={'Accept': 'application/json'})
         try:
-            return json.loads(resp_body)
-        except:
-            raise errors.RemoteRetrieveError(reason=_("Response from CA was not valid JSON"))
+            return json.loads(ipautil.decode_json(resp_body))
+        except Exception as e:
+            logger.debug('%s', e, exc_info=True)
+            raise errors.RemoteRetrieveError(
+                reason=_("Response from CA was not valid JSON"))
+
+    def read_ca_cert(self, ca_id):
+        _status, _resp_headers, resp_body = self._ssldo(
+            'GET', '{}/cert'.format(ca_id),
+            headers={'Accept': 'application/pkix-cert'})
+        return resp_body
+
+    def read_ca_chain(self, ca_id):
+        _status, _resp_headers, resp_body = self._ssldo(
+            'GET', '{}/chain'.format(ca_id),
+            headers={'Accept': 'application/pkcs7-mime'})
+        return resp_body
 
     def disable_ca(self, ca_id):
         self._ssldo(

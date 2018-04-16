@@ -93,7 +93,8 @@ return {
                             name: 'krbprincipalname',
                             item_name: 'principal',
                             child_spec: {
-                                $type: 'krb_principal'
+                                $type: 'non_editable_row',
+                                data_name: 'krb-principal'
                             }
                         },
                         {
@@ -123,11 +124,11 @@ return {
                             add_field_label: '@i18n:authtype.auth_indicator',
                             options: [
                                 {
-                                    label: '@i18n:authtype.otp',
+                                    label: 'otp',
                                     value: 'otp'
                                 },
                                 {
-                                    label: '@i18n:authtype.type_radius',
+                                    label: 'radius',
                                     value: 'radius'
                                 }
                             ],
@@ -197,6 +198,7 @@ return {
                             $type: 'association_table',
                             id: 'host_ipaallowedtoperform_read_keys_user',
                             name: 'ipaallowedtoperform_read_keys_user',
+                            flags: ['w_if_no_aci'],
                             add_method: 'allow_retrieve_keytab',
                             remove_method: 'disallow_retrieve_keytab',
                             add_title: '@i18n:keytab.add_retrive',
@@ -213,6 +215,7 @@ return {
                             $type: 'association_table',
                             id: 'host_ipaallowedtoperform_read_keys_group',
                             name: 'ipaallowedtoperform_read_keys_group',
+                            flags: ['w_if_no_aci'],
                             add_method: 'allow_retrieve_keytab',
                             remove_method: 'disallow_retrieve_keytab',
                             add_title: '@i18n:keytab.add_retrive',
@@ -229,6 +232,7 @@ return {
                             $type: 'association_table',
                             id: 'service_ipaallowedtoperform_read_keys_host',
                             name: 'ipaallowedtoperform_read_keys_host',
+                            flags: ['w_if_no_aci'],
                             add_method: 'allow_retrieve_keytab',
                             remove_method: 'disallow_retrieve_keytab',
                             add_title: '@i18n:keytab.add_retrive',
@@ -245,6 +249,7 @@ return {
                             $type: 'association_table',
                             id: 'service_ipaallowedtoperform_read_keys_hostgroup',
                             name: 'ipaallowedtoperform_read_keys_hostgroup',
+                            flags: ['w_if_no_aci'],
                             add_method: 'allow_retrieve_keytab',
                             remove_method: 'disallow_retrieve_keytab',
                             add_title: '@i18n:keytab.add_retrive',
@@ -268,6 +273,7 @@ return {
                             $type: 'association_table',
                             id: 'host_ipaallowedtoperform_write_keys_user',
                             name: 'ipaallowedtoperform_write_keys_user',
+                            flags: ['w_if_no_aci'],
                             add_method: 'allow_create_keytab',
                             remove_method: 'disallow_create_keytab',
                             add_title: '@i18n:keytab.add_create',
@@ -284,6 +290,7 @@ return {
                             $type: 'association_table',
                             id: 'host_ipaallowedtoperform_write_keys_group',
                             name: 'ipaallowedtoperform_write_keys_group',
+                            flags: ['w_if_no_aci'],
                             add_method: 'allow_create_keytab',
                             remove_method: 'disallow_create_keytab',
                             add_title: '@i18n:keytab.add_create',
@@ -300,6 +307,7 @@ return {
                             $type: 'association_table',
                             id: 'service_ipaallowedtoperform_write_keys_host',
                             name: 'ipaallowedtoperform_write_keys_host',
+                            flags: ['w_if_no_aci'],
                             add_method: 'allow_create_keytab',
                             remove_method: 'disallow_create_keytab',
                             add_title: '@i18n:keytab.add_create',
@@ -316,6 +324,7 @@ return {
                             $type: 'association_table',
                             id: 'service_ipaallowedtoperform_write_keys_hostgroup',
                             name: 'ipaallowedtoperform_write_keys_hostgroup',
+                            flags: ['w_if_no_aci'],
                             add_method: 'allow_create_keytab',
                             remove_method: 'disallow_create_keytab',
                             add_title: '@i18n:keytab.add_create',
@@ -494,6 +503,7 @@ IPA.host.details_facet = function(spec, no_init) {
             retry: false,
             options: {
                 host: [ pkey ],
+                sizelimit: 0,
                 all: true
             }
         });

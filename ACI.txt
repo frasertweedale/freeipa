@@ -40,6 +40,18 @@ dn: cn=caacls,cn=ca,dc=ipa,dc=example
 aci: (targetattr = "cn || description || ipaenabledflag")(targetfilter = "(objectclass=ipacaacl)")(version 3.0;acl "permission:System: Modify CA ACL";allow (write) groupdn = "ldap:///cn=System: Modify CA ACL,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=caacls,cn=ca,dc=ipa,dc=example
 aci: (targetattr = "cn || createtimestamp || description || entryusn || hostcategory || ipacacategory || ipacertprofilecategory || ipaenabledflag || ipamemberca || ipamembercertprofile || ipauniqueid || member || memberhost || memberservice || memberuser || modifytimestamp || objectclass || servicecategory || usercategory")(targetfilter = "(objectclass=ipacaacl)")(version 3.0;acl "permission:System: Read CA ACLs";allow (compare,read,search) userdn = "ldap:///all";)
+dn: cn=certmap,dc=ipa,dc=example
+aci: (targetattr = "ipacertmappromptusername")(targetfilter = "(objectclass=ipacertmapconfigobject)")(version 3.0;acl "permission:System: Modify Certmap Configuration";allow (write) groupdn = "ldap:///cn=System: Modify Certmap Configuration,cn=permissions,cn=pbac,dc=ipa,dc=example";)
+dn: cn=certmap,dc=ipa,dc=example
+aci: (targetattr = "cn || ipacertmappromptusername")(targetfilter = "(objectclass=ipacertmapconfigobject)")(version 3.0;acl "permission:System: Read Certmap Configuration";allow (compare,read,search) userdn = "ldap:///all";)
+dn: cn=certmaprules,cn=certmap,dc=ipa,dc=example
+aci: (targetfilter = "(objectclass=ipacertmaprule)")(version 3.0;acl "permission:System: Add Certmap Rules";allow (add) groupdn = "ldap:///cn=System: Add Certmap Rules,cn=permissions,cn=pbac,dc=ipa,dc=example";)
+dn: cn=certmaprules,cn=certmap,dc=ipa,dc=example
+aci: (targetfilter = "(objectclass=ipacertmaprule)")(version 3.0;acl "permission:System: Delete Certmap Rules";allow (delete) groupdn = "ldap:///cn=System: Delete Certmap Rules,cn=permissions,cn=pbac,dc=ipa,dc=example";)
+dn: cn=certmaprules,cn=certmap,dc=ipa,dc=example
+aci: (targetattr = "associateddomain || cn || description || ipacertmapmaprule || ipacertmapmatchrule || ipacertmappriority || ipaenabledflag || objectclass")(targetfilter = "(objectclass=ipacertmaprule)")(version 3.0;acl "permission:System: Modify Certmap Rules";allow (write) groupdn = "ldap:///cn=System: Modify Certmap Rules,cn=permissions,cn=pbac,dc=ipa,dc=example";)
+dn: cn=certmaprules,cn=certmap,dc=ipa,dc=example
+aci: (targetattr = "associateddomain || cn || createtimestamp || description || entryusn || ipacertmapmaprule || ipacertmapmatchrule || ipacertmappriority || ipaenabledflag || modifytimestamp || objectclass")(targetfilter = "(objectclass=ipacertmaprule)")(version 3.0;acl "permission:System: Read Certmap Rules";allow (compare,read,search) userdn = "ldap:///all";)
 dn: cn=certprofiles,cn=ca,dc=ipa,dc=example
 aci: (targetfilter = "(objectclass=ipacertprofile)")(version 3.0;acl "permission:System: Delete Certificate Profile";allow (delete) groupdn = "ldap:///cn=System: Delete Certificate Profile,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=certprofiles,cn=ca,dc=ipa,dc=example
@@ -49,7 +61,7 @@ aci: (targetattr = "cn || description || ipacertprofilestoreissued")(targetfilte
 dn: cn=certprofiles,cn=ca,dc=ipa,dc=example
 aci: (targetattr = "cn || createtimestamp || description || entryusn || ipacertprofilestoreissued || modifytimestamp || objectclass")(targetfilter = "(objectclass=ipacertprofile)")(version 3.0;acl "permission:System: Read Certificate Profiles";allow (compare,read,search) userdn = "ldap:///all";)
 dn: cn=ipaconfig,cn=etc,dc=ipa,dc=example
-aci: (targetattr = "cn || createtimestamp || entryusn || ipacertificatesubjectbase || ipaconfigstring || ipacustomfields || ipadefaultemaildomain || ipadefaultloginshell || ipadefaultprimarygroup || ipagroupobjectclasses || ipagroupsearchfields || ipahomesrootdir || ipakrbauthzdata || ipamaxusernamelength || ipamigrationenabled || ipapwdexpadvnotify || ipasearchrecordslimit || ipasearchtimelimit || ipaselinuxusermapdefault || ipaselinuxusermaporder || ipauserauthtype || ipauserobjectclasses || ipausersearchfields || modifytimestamp || objectclass")(targetfilter = "(objectclass=ipaguiconfig)")(version 3.0;acl "permission:System: Read Global Configuration";allow (compare,read,search) userdn = "ldap:///all";)
+aci: (targetattr = "cn || createtimestamp || entryusn || ipacertificatesubjectbase || ipaconfigstring || ipacustomfields || ipadefaultemaildomain || ipadefaultloginshell || ipadefaultprimarygroup || ipadomainresolutionorder || ipagroupobjectclasses || ipagroupsearchfields || ipahomesrootdir || ipakrbauthzdata || ipamaxusernamelength || ipamigrationenabled || ipapwdexpadvnotify || ipasearchrecordslimit || ipasearchtimelimit || ipaselinuxusermapdefault || ipaselinuxusermaporder || ipauserauthtype || ipauserobjectclasses || ipausersearchfields || modifytimestamp || objectclass")(targetfilter = "(objectclass=ipaguiconfig)")(version 3.0;acl "permission:System: Read Global Configuration";allow (compare,read,search) userdn = "ldap:///all";)
 dn: cn=costemplates,cn=accounts,dc=ipa,dc=example
 aci: (targetfilter = "(objectclass=costemplate)")(version 3.0;acl "permission:System: Add Group Password Policy costemplate";allow (add) groupdn = "ldap:///cn=System: Add Group Password Policy costemplate,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=costemplates,cn=accounts,dc=ipa,dc=example
@@ -83,9 +95,13 @@ aci: (targetattr = "a6record || aaaarecord || afsdbrecord || aplrecord || arecor
 dn: cn=groups,cn=accounts,dc=ipa,dc=example
 aci: (targetfilter = "(|(objectclass=ipausergroup)(objectclass=posixgroup))")(version 3.0;acl "permission:System: Add Groups";allow (add) groupdn = "ldap:///cn=System: Add Groups,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=groups,cn=accounts,dc=ipa,dc=example
+aci: (targetattr = "ipaexternalmember")(targetfilter = "(objectclass=ipaexternalgroup)")(version 3.0;acl "permission:System: Modify External Group Membership";allow (write) groupdn = "ldap:///cn=System: Modify External Group Membership,cn=permissions,cn=pbac,dc=ipa,dc=example";)
+dn: cn=groups,cn=accounts,dc=ipa,dc=example
 aci: (targetattr = "member")(targetfilter = "(&(!(cn=admins))(objectclass=ipausergroup))")(version 3.0;acl "permission:System: Modify Group Membership";allow (write) groupdn = "ldap:///cn=System: Modify Group Membership,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=groups,cn=accounts,dc=ipa,dc=example
 aci: (targetattr = "cn || description || gidnumber || ipauniqueid || mepmanagedby || objectclass")(targetfilter = "(|(objectclass=ipausergroup)(objectclass=posixgroup))")(version 3.0;acl "permission:System: Modify Groups";allow (write) groupdn = "ldap:///cn=System: Modify Groups,cn=permissions,cn=pbac,dc=ipa,dc=example";)
+dn: cn=groups,cn=accounts,dc=ipa,dc=example
+aci: (targetattr = "ipaexternalmember")(targetfilter = "(|(objectclass=ipausergroup)(objectclass=posixgroup))")(version 3.0;acl "permission:System: Read External Group Membership";allow (compare,read,search) userdn = "ldap:///all";)
 dn: dc=ipa,dc=example
 aci: (targetattr = "cn || createtimestamp || entryusn || gidnumber || memberuid || modifytimestamp || objectclass")(target = "ldap:///cn=groups,cn=compat,dc=ipa,dc=example")(version 3.0;acl "permission:System: Read Group Compat Tree";allow (compare,read,search) userdn = "ldap:///anyone";)
 dn: cn=groups,cn=accounts,dc=ipa,dc=example
@@ -167,7 +183,7 @@ aci: (targetattr = "createtimestamp || description || entryusn || gecos || gidnu
 dn: cn=ranges,cn=etc,dc=ipa,dc=example
 aci: (targetattr = "cn || createtimestamp || entryusn || ipabaseid || ipabaserid || ipaidrangesize || ipanttrusteddomainsid || iparangetype || ipasecondarybaserid || modifytimestamp || objectclass")(targetfilter = "(objectclass=ipaidrange)")(version 3.0;acl "permission:System: Read ID Ranges";allow (compare,read,search) userdn = "ldap:///all";)
 dn: cn=views,cn=accounts,dc=ipa,dc=example
-aci: (targetattr = "cn || createtimestamp || description || entryusn || modifytimestamp || objectclass")(targetfilter = "(objectclass=nsContainer)")(version 3.0;acl "permission:System: Read ID Views";allow (compare,read,search) userdn = "ldap:///all";)
+aci: (targetattr = "cn || createtimestamp || description || entryusn || ipadomainresolutionorder || modifytimestamp || objectclass")(targetfilter = "(objectclass=nsContainer)")(version 3.0;acl "permission:System: Read ID Views";allow (compare,read,search) userdn = "ldap:///all";)
 dn: cn=IPA.EXAMPLE,cn=kerberos,dc=ipa,dc=example
 aci: (targetattr = "createtimestamp || entryusn || krbdefaultencsalttypes || krbmaxrenewableage || krbmaxticketlife || krbsupportedencsalttypes || modifytimestamp || objectclass")(targetfilter = "(objectclass=krbticketpolicyaux)")(version 3.0;acl "permission:System: Read Default Kerberos Ticket Policy";allow (compare,read,search) groupdn = "ldap:///cn=System: Read Default Kerberos Ticket Policy,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=users,cn=accounts,dc=ipa,dc=example
@@ -335,7 +351,9 @@ aci: (targetattr = "member")(target = "ldap:///cn=ipausers,cn=groups,cn=accounts
 dn: cn=users,cn=accounts,dc=ipa,dc=example
 aci: (targetfilter = "(objectclass=posixaccount)")(version 3.0;acl "permission:System: Add Users";allow (add) groupdn = "ldap:///cn=System: Add Users,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=users,cn=accounts,dc=ipa,dc=example
-aci: (targetattr = "krbprincipalkey || passwordhistory || sambalmpassword || sambantpassword || userpassword")(targetfilter = "(&(!(memberOf=cn=admins,cn=groups,cn=accounts,dc=ipa,dc=example))(objectclass=posixaccount))")(version 3.0;acl "permission:System: Change User password";allow (write) groupdn = "ldap:///cn=System: Change User password,cn=permissions,cn=pbac,dc=ipa,dc=example";)
+aci: (targetattr = "krbpasswordexpiration || krbprincipalkey || passwordhistory || sambalmpassword || sambantpassword || userpassword")(targetfilter = "(&(!(memberOf=cn=admins,cn=groups,cn=accounts,dc=ipa,dc=example))(objectclass=posixaccount))")(version 3.0;acl "permission:System: Change User password";allow (write) groupdn = "ldap:///cn=System: Change User password,cn=permissions,cn=pbac,dc=ipa,dc=example";)
+dn: cn=users,cn=accounts,dc=ipa,dc=example
+aci: (targetattr = "ipacertmapdata || objectclass")(targetfilter = "(objectclass=posixaccount)")(version 3.0;acl "permission:System: Manage User Certificate Mappings";allow (write) groupdn = "ldap:///cn=System: Manage User Certificate Mappings,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=users,cn=accounts,dc=ipa,dc=example
 aci: (targetattr = "usercertificate")(targetfilter = "(objectclass=posixaccount)")(version 3.0;acl "permission:System: Manage User Certificates";allow (write) groupdn = "ldap:///cn=System: Manage User Certificates,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=users,cn=accounts,dc=ipa,dc=example
@@ -347,7 +365,7 @@ aci: (targetattr = "businesscategory || carlicense || cn || departmentnumber || 
 dn: cn=UPG Definition,cn=Definitions,cn=Managed Entries,cn=etc,dc=ipa,dc=example
 aci: (targetattr = "*")(target = "ldap:///cn=UPG Definition,cn=Definitions,cn=Managed Entries,cn=etc,dc=ipa,dc=example")(version 3.0;acl "permission:System: Read UPG Definition";allow (compare,read,search) groupdn = "ldap:///cn=System: Read UPG Definition,cn=permissions,cn=pbac,dc=ipa,dc=example";)
 dn: cn=users,cn=accounts,dc=ipa,dc=example
-aci: (targetattr = "audio || businesscategory || carlicense || departmentnumber || destinationindicator || employeenumber || employeetype || facsimiletelephonenumber || homephone || homepostaladdress || inetuserhttpurl || inetuserstatus || internationalisdnnumber || jpegphoto || l || labeleduri || mail || mobile || o || ou || pager || photo || physicaldeliveryofficename || postaladdress || postalcode || postofficebox || preferreddeliverymethod || preferredlanguage || registeredaddress || roomnumber || secretary || seealso || st || street || telephonenumber || teletexterminalidentifier || telexnumber || usercertificate || usersmimecertificate || x121address || x500uniqueidentifier")(targetfilter = "(objectclass=posixaccount)")(version 3.0;acl "permission:System: Read User Addressbook Attributes";allow (compare,read,search) userdn = "ldap:///all";)
+aci: (targetattr = "audio || businesscategory || carlicense || departmentnumber || destinationindicator || employeenumber || employeetype || facsimiletelephonenumber || homephone || homepostaladdress || inetuserhttpurl || inetuserstatus || internationalisdnnumber || ipacertmapdata || jpegphoto || l || labeleduri || mail || mobile || o || ou || pager || photo || physicaldeliveryofficename || postaladdress || postalcode || postofficebox || preferreddeliverymethod || preferredlanguage || registeredaddress || roomnumber || secretary || seealso || st || street || telephonenumber || teletexterminalidentifier || telexnumber || usercertificate || usersmimecertificate || x121address || x500uniqueidentifier")(targetfilter = "(objectclass=posixaccount)")(version 3.0;acl "permission:System: Read User Addressbook Attributes";allow (compare,read,search) userdn = "ldap:///all";)
 dn: dc=ipa,dc=example
 aci: (targetattr = "cn || createtimestamp || entryusn || gecos || gidnumber || homedirectory || loginshell || modifytimestamp || objectclass || uid || uidnumber")(target = "ldap:///cn=users,cn=compat,dc=ipa,dc=example")(version 3.0;acl "permission:System: Read User Compat Tree";allow (compare,read,search) userdn = "ldap:///anyone";)
 dn: cn=users,cn=accounts,dc=ipa,dc=example

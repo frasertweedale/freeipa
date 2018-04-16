@@ -1,4 +1,4 @@
-#! /usr/bin/python2 -E
+#!/usr/bin/python3 -E
 # Authors: Ade Lee <alee@redhat.com>
 #
 # Copyright (C) 2014  Red Hat
@@ -20,15 +20,17 @@
 
 from __future__ import print_function
 
+import logging
+import os
+import sys
 import tempfile
+from optparse import SUPPRESS_HELP  # pylint: disable=deprecated-module
 
 from textwrap import dedent
 from ipalib import api
 from ipalib.constants import DOMAIN_LEVEL_0
 from ipaplatform.paths import paths
 from ipapython import admintool
-from ipapython import ipautil
-from ipapython.dn import DN
 from ipaserver.install import service
 from ipaserver.install import cainstance
 from ipaserver.install import krainstance
@@ -38,6 +40,8 @@ from ipaserver.install.installutils import create_replica_config
 from ipaserver.install import dogtaginstance
 from ipaserver.install import kra
 from ipaserver.install.installutils import ReplicaConfig
+
+logger = logging.getLogger(__name__)
 
 
 class KRAInstall(admintool.AdminTool):
@@ -70,43 +74,25 @@ class KRAInstall(admintool.AdminTool):
         parser.add_option(
             "--uninstall",
             dest="uninstall", action="store_true", default=False,
-            help="uninstall an existing installation. The uninstall can "
-                 "be run with --unattended option")
+            help=SUPPRESS_HELP)
 
     def validate_options(self, needs_root=True):
         super(KRAInstall, self).validate_options(needs_root=True)
 
         installutils.check_server_configuration()
 
-        api.bootstrap(in_server=True)
+        api.bootstrap(in_server=True, confdir=paths.ETC_IPA)
         api.finalize()
 
     @classmethod
     def get_command_class(cls, options, args):
         if options.uninstall:
-            return KRAUninstaller
+            sys.exit(
+                'ERROR: Standalone KRA uninstallation was removed in '
+                'FreeIPA 4.5 as it had never worked properly and only caused '
+                'issues.')
         else:
             return KRAInstaller
-
-
-class KRAUninstaller(KRAInstall):
-    log_file_name = paths.IPASERVER_KRA_UNINSTALL_LOG
-
-    def validate_options(self, needs_root=True):
-        super(KRAUninstaller, self).validate_options(needs_root=True)
-
-        if self.args:
-            self.option_parser.error("Too many parameters provided.")
-
-        _kra = krainstance.KRAInstance(api)
-        if not _kra.is_installed():
-            self.option_parser.error(
-                "Cannot uninstall.  There is no KRA installed on this system."
-            )
-
-    def run(self):
-        super(KRAUninstaller, self).run()
-        kra.uninstall(True)
 
 
 class KRAInstaller(KRAInstall):
@@ -120,7 +106,7 @@ class KRAInstaller(KRAInstall):
 
     FAIL_MESSAGE = '''
         Your system may be partly configured.
-        Run ipa-kra-install --uninstall to clean up.
+        If you run into issues, you may have to re-install IPA on this server.
     '''
 
     def validate_options(self, needs_root=True):
@@ -136,7 +122,7 @@ class KRAInstaller(KRAInstall):
             self.option_parser.error("Too many arguments provided")
         elif len(self.args) == 1:
             self.replica_file = self.args[0]
-            if not ipautil.file_exists(self.replica_file):
+            if not os.path.isfile(self.replica_file):
                 self.option_parser.error(
                     "Replica file %s does not exist" % self.replica_file)
 
@@ -154,9 +140,18 @@ class KRAInstaller(KRAInstall):
     def run(self):
         super(KRAInstaller, self).run()
 
+        # Verify DM password. This has to be called after ask_for_options(),
+        # so it can't be placed in validate_options().
+        try:
+            installutils.validate_dm_password_ldap(self.options.password)
+        except ValueError:
+            raise admintool.ScriptError(
+                "Directory Manager password is invalid")
+
         if not cainstance.is_ca_installed_locally():
             raise RuntimeError("Dogtag CA is not installed. "
-                               "Please install the CA first")
+                               "Please install a CA first with the "
+                               "`ipa-ca-install` command.")
 
         # check if KRA is not already installed
         _kra = krainstance.KRAInstance(api)
@@ -180,16 +175,15 @@ class KRAInstaller(KRAInstall):
 
         self.options.dm_password = self.options.password
         self.options.setup_ca = False
+        self.options.setup_kra = True
 
-        conn = api.Backend.ldap2
-        conn.connect(bind_dn=DN(('cn', 'Directory Manager')),
-                     bind_pw=self.options.password)
+        api.Backend.ldap2.connect()
 
         config = None
         if self.installing_replica:
             if self.options.promote:
                 config = ReplicaConfig()
-                config.master_host_name = None
+                config.kra_host_name = None
                 config.realm_name = api.env.realm
                 config.host_name = api.env.host
                 config.domain_name = api.env.domain
@@ -202,17 +196,17 @@ class KRAInstaller(KRAInstall):
                     self.options.password,
                     self.replica_file,
                     self.options)
+                config.kra_host_name = config.master_host_name
+
+            config.setup_kra = True
 
             if config.subject_base is None:
-                attrs = conn.get_ipa_config()
+                attrs = api.Backend.ldap2.get_ipa_config()
                 config.subject_base = attrs.get('ipacertificatesubjectbase')[0]
 
-            if config.master_host_name is None:
-                config.kra_host_name = \
-                    service.find_providing_server('KRA', conn, api.env.ca_host)
-                config.master_host_name = config.kra_host_name
-            else:
-                config.kra_host_name = config.master_host_name
+            if config.kra_host_name is None:
+                config.kra_host_name = service.find_providing_server(
+                    'KRA', api.Backend.ldap2, api.env.ca_host)
 
         try:
             kra.install_check(api, config, self.options)
@@ -224,5 +218,7 @@ class KRAInstaller(KRAInstall):
         try:
             kra.install(api, config, self.options)
         except:
-            self.log.error(dedent(self.FAIL_MESSAGE))
+            logger.error('%s', dedent(self.FAIL_MESSAGE))
             raise
+
+        api.Backend.ldap2.disconnect()

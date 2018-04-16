@@ -2,14 +2,10 @@ AUTOMAKE_OPTIONS = 1.7 subdir-objects
 
 NULL =
 
-KRB5_UTIL_DIR = ../../util
-IPA_UTIL_DIR = ../../../util
 
 AM_CPPFLAGS =						\
-	-I.						\
 	-I$(srcdir)					\
-	-I$(KRB5_UTIL_DIR)				\
-	-I$(IPA_UTIL_DIR)				\
+	-I$(top_srcdir)/util				\
 	-DPREFIX=\""$(prefix)"\" 			\
 	-DBINDIR=\""$(bindir)"\"			\
 	-DLIBDIR=\""$(libdir)"\" 			\
@@ -22,6 +18,7 @@ AM_CPPFLAGS =						\
 	$(WARN_CFLAGS)					\
 	$(NDRPAC_CFLAGS)				\
 	$(NSS_CFLAGS)					\
+	$(SSSCERTMAP_CFLAGS)				\
 	$(NULL)
 
 plugindir = $(libdir)/krb5/plugins/kdb
@@ -31,15 +28,23 @@ plugin_LTLIBRARIES = 		\
 
 ipadb_la_SOURCES = 		\
 	ipa_kdb.c		\
+	ipa_kdb.h		\
 	ipa_kdb_common.c	\
 	ipa_kdb_mkey.c		\
 	ipa_kdb_passwords.c	\
 	ipa_kdb_principals.c	\
 	ipa_kdb_pwdpolicy.c	\
 	ipa_kdb_mspac.c		\
+	ipa_kdb_mspac_private.h	\
 	ipa_kdb_delegation.c	\
 	ipa_kdb_audit_as.c	\
 	$(NULL)
+
+dist_noinst_DATA = ipa_kdb.exports
+
+if BUILD_IPA_CERTAUTH_PLUGIN
+ipadb_la_SOURCES += ipa_kdb_certauth.c
+endif
 
 ipadb_la_LDFLAGS = 		\
 	-avoid-version 		\
@@ -52,10 +57,13 @@ ipadb_la_LIBADD = 		\
 	$(NDRPAC_LIBS)		\
 	$(UNISTRING_LIBS)	\
 	$(NSS_LIBS)             \
-	$(KRB5_UTIL_DIR)/libutil.la	\
+	$(SSSCERTMAP_LIBS)	\
+	$(top_builddir)/util/libutil.la	\
 	$(NULL)
 
 if HAVE_CMOCKA
+TESTS_ENVIRONMENT = . $(srcdir)/tests/test_setup.sh;
+dist_ipa_kdb_tests_SOURCES = tests/test_setup.sh
 TESTS = ipa_kdb_tests
 check_PROGRAMS = ipa_kdb_tests
 endif
@@ -72,6 +80,11 @@ ipa_kdb_tests_SOURCES =        \
        ipa_kdb_delegation.c    \
        ipa_kdb_audit_as.c      \
        $(NULL)
+
+if BUILD_IPA_CERTAUTH_PLUGIN
+ipa_kdb_tests_SOURCES += ipa_kdb_certauth.c
+endif
+
 ipa_kdb_tests_CFLAGS = $(CMOCKA_CFLAGS)
 ipa_kdb_tests_LDADD =          \
        $(CMOCKA_LIBS)          \
@@ -80,17 +93,16 @@ ipa_kdb_tests_LDADD =          \
        $(NDRPAC_LIBS)          \
        $(UNISTRING_LIBS)       \
        $(NSS_LIBS)             \
-       $(KRB5_UTIL_DIR)/libutil.la	\
+       $(SSSCERTMAP_LIBS)      \
+       $(top_builddir)/util/libutil.la	\
        -lkdb5                  \
        -lsss_idmap             \
        $(NULL)
 
-dist_noinst_DATA = ipa_kdb.exports
+clean-local:
+	rm -f tests/.dirstamp
 
 EXTRA_DIST =			\
 	README			\
+	README.s4u2proxy.txt	\
 	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	Makefile.in

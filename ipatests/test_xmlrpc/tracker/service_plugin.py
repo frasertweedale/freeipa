@@ -37,13 +37,13 @@ class ServiceTracker(KerberosAliasMixin, Tracker):
         u'dn', u'krbprincipalname', u'usercertificate', u'has_keytab',
         u'ipakrbauthzdata', u'ipaallowedtoperform', u'subject',
         u'managedby', u'serial_number', u'serial_number_hex', u'issuer',
-        u'valid_not_before', u'valid_not_after', u'md5_fingerprint',
-        u'sha1_fingerprint', u'krbprincipalauthind', u'managedby_host',
+        u'valid_not_before', u'valid_not_after', u'sha1_fingerprint',
+        u'sha256_fingerprint', u'krbprincipalauthind', u'managedby_host',
         u'krbcanonicalname'}
     retrieve_all_keys = retrieve_keys | {
         u'ipaKrbPrincipalAlias', u'ipaUniqueID', u'krbExtraData',
         u'krbLastPwdChange', u'krbLoginFailedCount', u'memberof',
-        u'objectClass', u'ipakrbrequirespreauth',
+        u'objectClass', u'ipakrbrequirespreauth', u'krbpwdpolicyreference',
         u'ipakrbokasdelegate', u'ipakrboktoauthasdelegate'}
 
     create_keys = (retrieve_keys | {u'objectclass', u'ipauniqueid'}) - {
@@ -85,6 +85,10 @@ class ServiceTracker(KerberosAliasMixin, Tracker):
 
         return self.make_command('service_mod', self.name, **updates)
 
+    def make_disable_command(self):
+        """ make command  that disables the service principal """
+        return self.make_command('service_disable', self.name)
+
     def create(self, force=True):
         """Helper function to create an entry and check the result"""
         self.ensure_missing()
@@ -104,6 +108,11 @@ class ServiceTracker(KerberosAliasMixin, Tracker):
             u'krbcanonicalname': [u'{0}'.format(self.name)],
             u'has_keytab': False,
             u'ipakrboktoauthasdelegate': False,
+            u'krbpwdpolicyreference': [DN(
+                u'cn=Default Service Password Policy',
+                self.api.env.container_service,
+                self.api.env.basedn,
+            )],
         }
 
         for key in self.options:

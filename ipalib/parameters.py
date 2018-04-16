@@ -108,22 +108,35 @@ import six
 # pylint: disable=import-error
 from six.moves.xmlrpc_client import MAXINT, MININT
 # pylint: enable=import-error
+from cryptography import x509 as crypto_x509
 
 from ipalib.text import _ as ugettext
 from ipalib.base import check_name
 from ipalib.plugable import ReadOnly, lock
 from ipalib.errors import ConversionError, RequirementError, ValidationError
-from ipalib.errors import PasswordMismatch, Base64DecodeError
+from ipalib.errors import (
+    PasswordMismatch, Base64DecodeError, CertificateFormatError,
+    CertificateOperationError
+)
 from ipalib.constants import TYPE_ERROR, CALLABLE_ERROR, LDAP_GENERALIZED_TIME_FORMAT
 from ipalib.text import Gettext, FixMe
 from ipalib.util import json_serialize, validate_idna_domain
+from ipalib.x509 import (
+    load_der_x509_certificate, IPACertificate, default_backend)
+from ipalib.util import strip_csr_header, apirepr
 from ipapython import kerberos
 from ipapython.dn import DN
 from ipapython.dnsutil import DNSName
 
 
 def _is_null(value):
-    return not value and value != 0 # NOTE: False == 0
+    if value:
+        return False
+    elif isinstance(value, six.integer_types + (float, decimal.Decimal)):
+        # 0 is not NULL
+        return False
+    else:
+        return True
 
 if six.PY3:
     unicode = str
@@ -242,11 +255,12 @@ class DefaultFrom(ReadOnly):
         """
         vals = tuple(kw.get(k, None) for k in self.keys)
         if None in vals:
-            return
+            return None
         try:
             return self.callback(*vals)
         except Exception:
             pass
+        return None
 
     def __json__(self):
         return self.keys
@@ -461,17 +475,14 @@ class Param(ReadOnly):
                         value = kind(value)
                     elif type(value) is str:
                         value = kind([value])
-                if (
-                    type(kind) is type and not isinstance(value, kind)
-                    or
-                    type(kind) is tuple and not isinstance(value, kind)
-                ):
-                    raise TypeError(
-                        TYPE_ERROR % (key, kind, value, type(value))
-                    )
-                elif kind is callable and not callable(value):
+                if kind is callable and not callable(value):
                     raise TypeError(
                         CALLABLE_ERROR % (key, value, type(value))
+                    )
+                elif (isinstance(kind, (type, tuple)) and
+                      not isinstance(value, kind)):
+                    raise TypeError(
+                        TYPE_ERROR % (key, kind, value, type(value))
                     )
                 kw[key] = value
             elif key not in ('required', 'multivalue'):
@@ -496,7 +507,7 @@ class Param(ReadOnly):
         self.nice = '%s(%r)' % (self.__class__.__name__, self.param_spec)
 
         # Make sure no unknown kw were given:
-        assert all(type(t) is type for t in self.allowed_types)
+        assert all(isinstance(t, type) for t in self.allowed_types)
         if not set(t[0] for t in self.kwargs).issuperset(self.__kw):
             extra = set(kw) - set(t[0] for t in self.kwargs)
             raise TypeError(
@@ -589,9 +600,12 @@ class Param(ReadOnly):
             elif isinstance(value, six.integer_types):
                 value = str(value)
             elif isinstance(value, (tuple, set, frozenset)):
-                value = repr(list(value))
-            else:
+                value = apirepr(list(value))
+            elif key == 'cli_name':
+                # always represented as native string
                 value = repr(value)
+            else:
+                value = apirepr(value)
             yield '%s=%s' % (key, value)
 
     def __call__(self, value, **kw):
@@ -841,8 +855,10 @@ class Param(ReadOnly):
         """
         Convert a single scalar value.
         """
-        if type(value) in self.allowed_types:
-            return value
+        for t in self.allowed_types:
+            if isinstance(value, t):
+                return value
+
         raise ConversionError(name=self.name, error=ugettext(self.type_error))
 
     def validate(self, value, supplied=None):
@@ -872,7 +888,10 @@ class Param(ReadOnly):
             self._validate_scalar(value)
 
     def _validate_scalar(self, value, index=None):
-        if type(value) not in self.allowed_types:
+        for t in self.allowed_types:
+            if isinstance(value, t):
+                break
+        else:
             raise TypeError(
                 TYPE_ERROR % (self.name, self.type, value, type(value))
             )
@@ -1124,6 +1143,8 @@ class Int(Number):
             return _('must be at least %(minvalue)d') % dict(
                 minvalue=self.minvalue,
             )
+        else:
+            return None
 
     def _rule_maxvalue(self, _, value):
         """
@@ -1134,6 +1155,8 @@ class Int(Number):
             return _('can be at most %(maxvalue)d') % dict(
                 maxvalue=self.maxvalue,
             )
+        else:
+            return None
 
 
 class Decimal(Number):
@@ -1196,6 +1219,8 @@ class Decimal(Number):
             return _('must be at least %(minvalue)s') % dict(
                 minvalue=self.minvalue,
             )
+        else:
+            return None
 
     def _rule_maxvalue(self, _, value):
         """
@@ -1206,6 +1231,8 @@ class Decimal(Number):
             return _('can be at most %(maxvalue)s') % dict(
                 maxvalue=self.maxvalue,
             )
+        else:
+            return None
 
     def _enforce_numberclass(self, value):
         numberclass = value.number_class()
@@ -1220,7 +1247,7 @@ class Decimal(Number):
     def _enforce_precision(self, value):
         assert type(value) is decimal.Decimal
         if self.precision is not None:
-            quantize_exp = decimal.Decimal(10) ** -self.precision
+            quantize_exp = decimal.Decimal(10) ** -int(self.precision)
             try:
                 value = value.quantize(quantize_exp)
             except decimal.DecimalException as e:
@@ -1337,6 +1364,8 @@ class Data(Param):
                 return _('must match pattern "%(pattern)s"') % dict(
                     pattern=self.pattern,
                 )
+        else:
+            return None
 
 
 class Bytes(Data):
@@ -1374,6 +1403,8 @@ class Bytes(Data):
             return _('must be at least %(minlength)d bytes') % dict(
                 minlength=self.minlength,
             )
+        else:
+            return None
 
     def _rule_maxlength(self, _, value):
         """
@@ -1384,6 +1415,8 @@ class Bytes(Data):
             return _('can be at most %(maxlength)d bytes') % dict(
                 maxlength=self.maxlength,
             )
+        else:
+            return None
 
     def _rule_length(self, _, value):
         """
@@ -1394,6 +1427,8 @@ class Bytes(Data):
             return _('must be exactly %(length)d bytes') % dict(
                 length=self.length,
             )
+        else:
+            return None
 
     def _convert_scalar(self, value, index=None):
         if isinstance(value, unicode):
@@ -1402,6 +1437,96 @@ class Bytes(Data):
             except (TypeError, ValueError) as e:
                 raise Base64DecodeError(reason=str(e))
         return super(Bytes, self)._convert_scalar(value)
+
+
+class Certificate(Param):
+    type = crypto_x509.Certificate
+    type_error = _('must be a certificate')
+    allowed_types = (IPACertificate, bytes, unicode)
+
+    def _convert_scalar(self, value, index=None):
+        """
+        :param value: either DER certificate or base64 encoded certificate
+        :returns: bytes representing value converted to DER format
+        """
+        if isinstance(value, bytes):
+            try:
+                value = value.decode('ascii')
+            except UnicodeDecodeError:
+                # value is possibly a DER-encoded certificate
+                pass
+
+        if isinstance(value, unicode):
+            # if we received unicodes right away or we got them after the
+            # decoding, we will now try to receive DER-certificate
+            try:
+                value = base64.b64decode(value)
+            except (TypeError, ValueError) as e:
+                raise Base64DecodeError(reason=str(e))
+
+        if isinstance(value, bytes):
+            # we now only have either bytes or an IPACertificate object
+            # if it's bytes, make it an IPACertificate object
+            try:
+                value = load_der_x509_certificate(value)
+            except ValueError as e:
+                raise CertificateFormatError(error=str(e))
+
+        return super(Certificate, self)._convert_scalar(value)
+
+
+class CertificateSigningRequest(Param):
+    type = crypto_x509.CertificateSigningRequest
+    type_error = _('must be a certificate signing request')
+    allowed_types = (crypto_x509.CertificateSigningRequest, bytes, unicode)
+
+    def __extract_der_from_input(self, value):
+        """
+        Tries to get the DER representation of whatever we receive as an input
+
+        :param value:
+            bytes instance containing something we hope is a certificate
+            signing request
+        :returns:
+            base64-decoded representation of whatever we found in case input
+            had been something else than DER or something which resembles
+            DER, in which case we would just return input
+        """
+        try:
+            value.decode('utf-8')
+        except UnicodeDecodeError:
+            # possibly DER-encoded CSR or something similar
+            return value
+
+        value = strip_csr_header(value)
+        return base64.b64decode(value)
+
+    def _convert_scalar(self, value, index=None):
+        """
+        :param value:
+            either DER csr, base64-encoded csr or an object implementing the
+            cryptography.CertificateSigningRequest interface
+        :returns:
+            an object with the cryptography.CertificateSigningRequest interface
+        """
+        if isinstance(value, unicode):
+            try:
+                value = value.encode('ascii')
+            except UnicodeDecodeError:
+                raise CertificateOperationError('not a valid CSR')
+
+        if isinstance(value, bytes):
+            # try to extract DER from whatever we got
+            value = self.__extract_der_from_input(value)
+            try:
+                value = crypto_x509.load_der_x509_csr(
+                    value, backend=default_backend())
+            except ValueError as e:
+                raise CertificateOperationError(
+                    error=_("Failure decoding Certificate Signing Request:"
+                            " %s") % e)
+
+        return super(CertificateSigningRequest, self)._convert_scalar(value)
 
 
 class Str(Data):
@@ -1451,9 +1576,11 @@ class Str(Data):
         """
         assert type(value) is unicode
         if self.noextrawhitespace is False:
-            return
+            return None
         if len(value) != len(value.strip()):
             return _('Leading and trailing spaces are not allowed')
+        else:
+            return None
 
     def _rule_minlength(self, _, value):
         """
@@ -1464,6 +1591,8 @@ class Str(Data):
             return _('must be at least %(minlength)d characters') % dict(
                 minlength=self.minlength,
             )
+        else:
+            return None
 
     def _rule_maxlength(self, _, value):
         """
@@ -1474,6 +1603,8 @@ class Str(Data):
             return _('can be at most %(maxlength)d characters') % dict(
                 maxlength=self.maxlength,
             )
+        else:
+            return None
 
     def _rule_length(self, _, value):
         """
@@ -1484,6 +1615,8 @@ class Str(Data):
             return _('must be exactly %(length)d characters') % dict(
                 length=self.length,
             )
+        else:
+            return None
 
     def sort_key(self, value):
         return value.lower()
@@ -1553,6 +1686,8 @@ class Enum(Param):
             else:
                 values = u', '.join("'%s'" % value for value in self.values)
                 return _('must be one of %(values)s') % dict(values=values)
+        else:
+            return None
 
 class BytesEnum(Enum):
     """
@@ -1659,12 +1794,16 @@ class DateTime(Param):
 
     def _convert_scalar(self, value, index=None):
         if isinstance(value, six.string_types):
-            for date_format in self.accepted_formats:
-                try:
-                    time = datetime.datetime.strptime(value, date_format)
-                    return time
-                except ValueError:
-                    pass
+            if value == u'now':
+                time = datetime.datetime.utcnow()
+                return time
+            else:
+                for date_format in self.accepted_formats:
+                    try:
+                        time = datetime.datetime.strptime(value, date_format)
+                        return time
+                    except ValueError:
+                        pass
 
             # If we get here, the strptime call did not succeed for any
             # the accepted formats, therefore raise error
@@ -1955,10 +2094,14 @@ class DNSNameParam(Param):
     def _rule_only_absolute(self, _, value):
         if self.only_absolute and not value.is_absolute():
             return _('must be absolute')
+        else:
+            return None
 
     def _rule_only_relative(self, _, value):
         if self.only_relative and value.is_absolute():
             return _('must be relative')
+        else:
+            return None
 
 
 class Dict(Param):

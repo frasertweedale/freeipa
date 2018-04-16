@@ -6,21 +6,21 @@ import collections
 import errno
 import json
 import locale
+import logging
 import os
 import time
 
 from . import compat
 from . import schema
 from ipaclient.plugins.rpcclient import rpcclient
-from ipaplatform.paths import paths
+from ipalib.constants import USER_CACHE_PATH
 from ipapython.dnsutil import DNSName
-from ipapython.ipa_log_manager import log_mgr
 
-logger = log_mgr.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class ServerInfo(collections.MutableMapping):
-    _DIR = os.path.join(paths.USER_CACHE_PATH, 'ipa', 'servers')
+    _DIR = os.path.join(USER_CACHE_PATH, 'ipa', 'servers')
 
     def __init__(self, api):
         hostname = DNSName(api.env.server).ToASCII()
@@ -30,9 +30,9 @@ class ServerInfo(collections.MutableMapping):
 
         # copy-paste from ipalib/rpc.py
         try:
-            self._language = (
-                 locale.setlocale(locale.LC_ALL, '').split('.')[0].lower()
-            )
+            self._language = locale.setlocale(
+                locale.LC_MESSAGES, ''
+            ).split('.')[0].lower()
         except locale.Error:
             self._language = 'en_us'
 
@@ -42,9 +42,15 @@ class ServerInfo(collections.MutableMapping):
         try:
             with open(self._path, 'r') as sc:
                 self._dict = json.load(sc)
-        except EnvironmentError as e:
-            if e.errno != errno.ENOENT:
-                logger.warning('Failed to read server info: {}'.format(e))
+        except Exception as e:
+            if (isinstance(e, EnvironmentError) and
+                    e.errno == errno.ENOENT):  # pylint: disable=no-member
+                # ignore non-existent file, this happens when the cache was
+                # erased or the server is contacted for the first time
+                pass
+            else:
+                # warn that the file is unreadable, probably corrupted
+                logger.warning('Failed to read server info: %s', e)
 
     def _write(self):
         try:
@@ -56,7 +62,7 @@ class ServerInfo(collections.MutableMapping):
             with open(self._path, 'w') as sc:
                 json.dump(self._dict, sc)
         except EnvironmentError as e:
-            logger.warning('Failed to write server info: {}'.format(e))
+            logger.warning('Failed to write server info: %s', e)
 
     def __getitem__(self, key):
         return self._dict[key]
@@ -104,7 +110,9 @@ class ServerInfo(collections.MutableMapping):
 
 def get_package(api):
     if api.env.in_tree:
+        # pylint: disable=import-error,ipa-forbidden-import
         from ipaserver import plugins
+        # pylint: enable=import-error,ipa-forbidden-import
     else:
         try:
             plugins = api._remote_plugins

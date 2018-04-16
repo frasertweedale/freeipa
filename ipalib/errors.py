@@ -108,7 +108,6 @@ import six
 
 from ipalib.text import ngettext as ungettext
 from ipalib import messages
-from ipaplatform.paths import paths  # pylint: disable=unused-import
 
 
 class PrivateError(Exception):
@@ -151,7 +150,7 @@ class SubprocessError(PrivateError):
     The exit code of the sub-process is available via the ``returncode``
     instance attribute.  For example:
 
-    >>> e = SubprocessError(returncode=1, argv=(paths.BIN_FALSE,))
+    >>> e = SubprocessError(returncode=1, argv=('/bin/false',))
     >>> e.returncode
     1
     >>> e.argv  # argv is also available
@@ -370,7 +369,7 @@ class ServerCommandError(PublicError):
     For example:
 
     >>> e = CommandError(name='foobar')
-    >>> raise ServerCommandError(error=e.message, server='https://localhost')
+    >>> raise ServerCommandError(error=str(e), server='https://localhost')
     Traceback (most recent call last):
       ...
     ServerCommandError: error on server 'https://localhost': unknown command 'foobar'
@@ -445,6 +444,25 @@ class RefererError(PublicError):
     errno = 911
     format = _('Missing or invalid HTTP Referer, %(referer)s')
 
+
+class EnvironmentError(PublicError):
+    """
+    **912** Raised when a command is called with invalid environment settings
+    """
+
+    errno = 912
+
+
+class SystemEncodingError(PublicError):
+    """
+    **913** Raised when system encoding is not UTF-8
+    """
+
+    errno = 913
+    format = _(
+        "System encoding must be UTF-8, '%(encoding)s' is not supported. "
+        "Set LC_ALL=\"C.UTF-8\", or LC_ALL=\"\" and LC_CTYPE=\"C.UTF-8\"."
+    )
 
 ##############################################################################
 # 1000 - 1999: Authentication errors
@@ -1414,6 +1432,34 @@ class HTTPRequestError(RemoteRetrieveError):
 
     errno = 4035
     format = _('Request failed with status %(status)s: %(reason)s')
+
+
+class RedundantMappingRule(SingleMatchExpected):
+    """
+    **4036** Raised when more than one rule in a CSR generation ruleset matches
+    a particular helper.
+
+    For example:
+
+    >>> raise RedundantMappingRule(ruleset='syntaxSubject', helper='certutil')
+    Traceback (most recent call last):
+      ...
+    RedundantMappingRule: Mapping ruleset "syntaxSubject" has more than one
+    rule for the certutil helper.
+    """
+
+    errno = 4036
+    format = _('Mapping ruleset "%(ruleset)s" has more than one rule for the'
+               ' %(helper)s helper')
+
+
+class CSRTemplateError(ExecutionError):
+    """
+    **4037** Raised when evaluation of a CSR generation template fails
+    """
+
+    errno = 4037
+    format = _('%(reason)s')
 
 
 class BuiltinError(ExecutionError):

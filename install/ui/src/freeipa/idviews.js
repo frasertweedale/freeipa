@@ -100,6 +100,11 @@ return {
                     fields: [
                         'cn',
                         {
+                            name: 'ipadomainresolutionorder',
+                            flags: ['w_if_no_aci'],
+                            tooltip: '@mc-opt:idview_mod:ipadomainresolutionorder:doc'
+                        },
+                        {
                             $type: 'textarea',
                             name: 'description'
                         }
@@ -435,6 +440,7 @@ idviews.id_override_user_details_facet = function(spec) {
             retry: false,
             options: {
                 idoverrideuser: [ pkey ],
+                sizelimit: 0,
                 all: true
             }
         });
@@ -445,6 +451,21 @@ idviews.id_override_user_details_facet = function(spec) {
     };
 
     return that;
+};
+
+
+idviews.aduser_idoverrideuser_pre_op = function(spec, context) {
+    spec = spec || [];
+
+    if (!IPA.is_aduser_selfservice) return spec;
+
+    var facet = spec.facets[0];
+    facet.label = '@i18n:objects.idoverrideuser.profile';
+    facet.actions = [];
+    facet.header_actions = [];
+    facet.disable_breadcrumb = true;
+
+    return spec;
 };
 
 /**
@@ -943,7 +964,11 @@ idviews.register = function() {
     var w = reg.widget;
 
     e.register({type: 'idview', spec: idviews.spec});
-    e.register({type: 'idoverrideuser', spec: idviews.idoverrideuser_spec});
+    e.register({
+        type: 'idoverrideuser',
+        spec: idviews.idoverrideuser_spec,
+        pre_ops: [idviews.aduser_idoverrideuser_pre_op]
+    });
     e.register({type: 'idoverridegroup', spec: idviews.idoverridegroup_spec});
     f.copy('attribute', 'idview_appliedtohosts', {
         factory: idviews.appliedtohosts_facet

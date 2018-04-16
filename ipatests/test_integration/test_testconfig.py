@@ -20,7 +20,7 @@
 import json
 import copy
 
-from ipatests.test_integration import config
+from ipatests.pytest_plugins.integration import config
 from ipapython.ipautil import write_tmp_file
 from ipatests.util import assert_deepequal
 from ipalib.constants import MAX_DOMAIN_LEVEL
@@ -41,7 +41,8 @@ DEFAULT_OUTPUT_DICT = {
     "dirman_password": "Secret123",
     "ntp_server": "ntp.clock.test",
     "admin_password": "Secret123",
-    "domain_level": MAX_DOMAIN_LEVEL
+    "domain_level": MAX_DOMAIN_LEVEL,
+    "log_journal_since": "-1h",
 }
 
 DEFAULT_OUTPUT_ENV = {
@@ -60,6 +61,7 @@ DEFAULT_OUTPUT_ENV = {
     "IPv6SETUP": "",
     "IPADEBUG": "",
     "DOMAINLVL": str(MAX_DOMAIN_LEVEL),
+    "LOG_JOURNAL_SINCE": "-1h",
 }
 
 DEFAULT_INPUT_ENV = {
@@ -150,7 +152,7 @@ class TestMinimalConfig(CheckConfig):
     extra_input_dict = dict(
         domains=[
             dict(name='ipadomain.test', type='IPA', hosts=[
-                dict(name='master', ip='192.0.2.1'),
+                dict(name='master', ip='192.0.2.1', host_type=None),
             ]),
         ],
     )
@@ -169,6 +171,7 @@ class TestMinimalConfig(CheckConfig):
                         ip="192.0.2.1",
                         external_hostname="master.ipadomain.test",
                         role="master",
+                        host_type=None,
                     ),
                 ],
             ),
@@ -210,23 +213,29 @@ class TestComplexConfig(CheckConfig):
     extra_input_dict = dict(
         domains=[
             dict(name='ipadomain.test', type='IPA', hosts=[
-                dict(name='master', ip='192.0.2.1', role='master'),
-                dict(name='replica1', ip='192.0.2.2', role='replica'),
+                dict(name='master', ip='192.0.2.1', role='master',
+                     host_type=None),
+                dict(name='replica1', ip='192.0.2.2', role='replica',
+                     host_type=None),
                 dict(name='replica2', ip='192.0.2.3', role='replica',
-                              external_hostname='r2.ipadomain.test'),
-                dict(name='client1', ip='192.0.2.4', role='client'),
+                     external_hostname='r2.ipadomain.test', host_type=None),
+                dict(name='client1', ip='192.0.2.4', role='client',
+                     host_type=None),
                 dict(name='client2', ip='192.0.2.5', role='client',
-                              external_hostname='c2.ipadomain.test'),
-                dict(name='extra', ip='192.0.2.6', role='extrarole'),
-                dict(name='extram1', ip='192.0.2.7', role='extrarolem'),
+                     external_hostname='c2.ipadomain.test', host_type=None),
+                dict(name='extra', ip='192.0.2.6', role='extrarole',
+                     host_type=None),
+                dict(name='extram1', ip='192.0.2.7', role='extrarolem',
+                     host_type=None),
                 dict(name='extram2', ip='192.0.2.8', role='extrarolem',
-                              external_hostname='e2.ipadomain.test'),
+                     external_hostname='e2.ipadomain.test', host_type=None),
             ]),
             dict(name='addomain.test', type='AD', hosts=[
-                dict(name='ad', ip='192.0.2.33', role='ad'),
+                dict(name='ad', ip='192.0.2.33', role='ad', host_type=None),
             ]),
             dict(name='ipadomain2.test', type='IPA', hosts=[
-                dict(name='master.ipadomain2.test', ip='192.0.2.65'),
+                dict(name='master.ipadomain2.test', ip='192.0.2.65',
+                     host_type=None),
             ]),
         ],
     )
@@ -265,48 +274,56 @@ class TestComplexConfig(CheckConfig):
                         ip="192.0.2.1",
                         external_hostname="master.ipadomain.test",
                         role="master",
+                        host_type=None,
                     ),
                     dict(
                         name='replica1.ipadomain.test',
                         ip="192.0.2.2",
                         external_hostname="replica1.ipadomain.test",
                         role="replica",
+                        host_type=None,
                     ),
                     dict(
                         name='replica2.ipadomain.test',
                         ip="192.0.2.3",
                         external_hostname="r2.ipadomain.test",
                         role="replica",
+                        host_type=None,
                     ),
                     dict(
                         name='client1.ipadomain.test',
                         ip="192.0.2.4",
                         external_hostname="client1.ipadomain.test",
                         role="client",
+                        host_type=None,
                     ),
                     dict(
                         name='client2.ipadomain.test',
                         ip="192.0.2.5",
                         external_hostname="c2.ipadomain.test",
                         role="client",
+                        host_type=None,
                     ),
                     dict(
                         name='extra.ipadomain.test',
                         ip="192.0.2.6",
                         external_hostname="extra.ipadomain.test",
                         role="extrarole",
+                        host_type=None,
                     ),
                     dict(
                         name='extram1.ipadomain.test',
                         ip="192.0.2.7",
                         external_hostname="extram1.ipadomain.test",
                         role="extrarolem",
+                        host_type=None,
                     ),
                     dict(
                         name='extram2.ipadomain.test',
                         ip="192.0.2.8",
                         external_hostname="e2.ipadomain.test",
                         role="extrarolem",
+                        host_type=None,
                     ),
                 ],
             ),
@@ -319,6 +336,7 @@ class TestComplexConfig(CheckConfig):
                         ip="192.0.2.33",
                         external_hostname="ad.addomain.test",
                         role="ad",
+                        host_type=None,
                     ),
                 ],
             ),
@@ -331,6 +349,7 @@ class TestComplexConfig(CheckConfig):
                         ip="192.0.2.65",
                         external_hostname="master.ipadomain2.test",
                         role="master",
+                        host_type=None,
                     ),
                 ],
             ),

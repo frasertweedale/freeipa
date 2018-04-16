@@ -13,12 +13,13 @@ from ipatests.test_xmlrpc.xmlrpc_test import (
     fuzzy_digits, fuzzy_uuid, raises_exact)
 from ipatests.test_xmlrpc.tracker.base import Tracker
 from ipatests.test_xmlrpc.tracker.kerberos_aliases import KerberosAliasMixin
+from ipatests.test_xmlrpc.tracker.certmapdata import CertmapdataMixin
 
 if six.PY3:
     unicode = str
 
 
-class UserTracker(KerberosAliasMixin, Tracker):
+class UserTracker(CertmapdataMixin, KerberosAliasMixin, Tracker):
     """ Class for host plugin like tests """
 
     retrieve_keys = {
@@ -62,29 +63,59 @@ class UserTracker(KerberosAliasMixin, Tracker):
 
     primary_keys = {u'uid', u'dn'}
 
-    def __init__(self, name, givenname, sn, **kwargs):
+    def __init__(self, name=None, givenname=None, sn=None, **kwargs):
+        """ Check for non-empty unicode string for the required attributes
+        in the init method """
+
+        if not (isinstance(givenname, six.string_types) and givenname):
+            raise ValueError(
+                "Invalid first name provided: {!r}".format(givenname)
+                )
+        if not (isinstance(sn, six.string_types) and sn):
+            raise ValueError("Invalid second name provided: {!r}".format(sn))
+
         super(UserTracker, self).__init__(default_version=None)
-        self.uid = name
-        self.givenname = givenname
-        self.sn = sn
+        self.uid = unicode(name)
+        self.givenname = unicode(givenname)
+        self.sn = unicode(sn)
         self.dn = DN(('uid', self.uid), api.env.container_user, api.env.basedn)
 
         self.kwargs = kwargs
 
-    def make_create_command(self):
-        """ Make function that crates a user using user-add """
-        return self.make_command(
-            'user_add', self.uid,
-            givenname=self.givenname,
-            sn=self.sn, **self.kwargs
-            )
+    def make_create_command(self, force=None):
+
+        """ Make function that creates a user using user-add
+            with all set of attributes and with minimal values,
+            where uid is not specified """
+
+        if self.uid is not None:
+            return self.make_command(
+                'user_add', self.uid,
+                givenname=self.givenname,
+                sn=self.sn, **self.kwargs
+                )
+        else:
+            return self.make_command(
+                'user_add', givenname=self.givenname,
+                sn=self.sn, **self.kwargs
+                )
 
     def make_delete_command(self, no_preserve=True, preserve=False):
-        """ Make function that deletes a user using user-del """
+        """ Make function that deletes a user using user-del
+
+        Arguments 'preserve' and 'no_preserve' represent implemented
+        options --preserve and --no-preserve of user-del command,
+        which are mutually exclusive.
+        If --preserve=True and --no-preserve=False, the user is moved
+        to deleted container.
+        If --preserve=True and --no-preserve=True, an error is raised.
+        If --preserve=False and --no-preserver=True, user is deleted.
+        """
 
         if preserve and not no_preserve:
-            # necessary to change some user attributes due to moving
-            # to different container
+            # --preserve=True and --no-preserve=False - user is moved to
+            # another container, hence it is necessary to change some user
+            # attributes
             self.attrs[u'dn'] = DN(
                 ('uid', self.uid),
                 api.env.container_deleteuser,
@@ -500,3 +531,10 @@ class UserTracker(KerberosAliasMixin, Tracker):
 
     def _make_remove_alias_cmd(self):
         return self.make_command('user_remove_principal', self.name)
+
+    # Certificate identity mapping methods
+    def _make_add_certmap(self):
+        return self.make_command('user_add_certmapdata', self.name)
+
+    def _make_remove_certmap(self):
+        return self.make_command('user_remove_certmapdata', self.name)

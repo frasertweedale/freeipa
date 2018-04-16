@@ -5,9 +5,9 @@
 import time
 
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.test_integration import tasks
+from ipatests.pytest_plugins.integration import tasks
 
-WAIT_AFTER_ARCHIVE = 30  # give some time to replication
+WAIT_AFTER_ARCHIVE = 45  # give some time to replication
 
 
 class TestInstallKRA(IntegrationTest):
@@ -139,62 +139,4 @@ class TestInstallKRA(IntegrationTest):
         self._retrieve_secret([
             self.vault_name_master,
             self.vault_name_replica_without_KRA,
-        ])
-
-
-    def test_create_and_retrieve_vault_after_kra_uninstall_on_replica(self):
-        # uninstall KRA on replica
-        self.replicas[0].run_command([
-            "ipa-kra-install",
-            "-U",
-            "--uninstall",
-        ])
-
-        # create vault
-        self.replicas[0].run_command([
-            "ipa", "vault-add",
-            self.vault_name_replica_KRA_uninstalled,
-            "--password", self.vault_password,
-            "--type", "symmetric",
-        ])
-
-        # archive secret
-        self.replicas[0].run_command([
-            "ipa", "vault-archive",
-            self.vault_name_replica_KRA_uninstalled,
-            "--password", self.vault_password,
-            "--data", self.vault_data,
-        ])
-        time.sleep(WAIT_AFTER_ARCHIVE)
-
-        self._retrieve_secret([self.vault_name_replica_KRA_uninstalled])
-
-        ################# master #################
-        # test master again after KRA was uninstalled on replica
-        # create vault
-        self.master.run_command([
-            "ipa", "vault-add",
-            self.vault_name_master3,
-            "--password", self.vault_password,
-            "--type", "symmetric",
-        ])
-
-        # archive secret
-        self.master.run_command([
-            "ipa", "vault-archive",
-            self.vault_name_master3,
-            "--password", self.vault_password,
-            "--data", self.vault_data,
-        ])
-        time.sleep(WAIT_AFTER_ARCHIVE)
-
-        self._retrieve_secret([self.vault_name_master3,])
-
-        ################ old vaults ###############
-        # test if old vaults are still accessible
-        self._retrieve_secret([
-            self.vault_name_master,
-            self.vault_name_master2,
-            self.vault_name_replica_without_KRA,
-            self.vault_name_replica_with_KRA,
         ])

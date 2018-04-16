@@ -116,7 +116,7 @@ IPA.serial_associator = function(spec) {
 
             batch.add_command(command);
         }
-        //alert(JSON.stringify(command.to_json()));
+        //window.alert(JSON.stringify(command.to_json()));
 
         batch.execute();
     };
@@ -154,7 +154,7 @@ IPA.bulk_associator = function(spec) {
 
         command.set_option(that.other_entity.name, that.values);
 
-        //alert(JSON.stringify(command.to_json()));
+        //window.alert(JSON.stringify(command.to_json()));
 
         command.execute();
     };
@@ -421,6 +421,30 @@ IPA.association_table_widget = function (spec) {
 
     var that = IPA.table_widget(spec);
 
+    /**
+     * The value should be name of the field, which will be added to *_add_*,
+     * *_del_* commands as option: {fieldname: fieldvalue}.
+     *
+     * @property {String} fieldname
+     */
+    that.additional_add_del_field = spec.additional_add_del_field;
+
+    /**
+     * Can be used in situations when the *_add_member command needs entity
+     * as a parameter, but parameter has different name than entity.
+     * i.e. vault_add_member --services=[values] ... this needs values from service
+     * entity, but option is called services, that we can set by setting
+     * this option in spec to other_option_name: 'services'
+     *
+     * @property {String} other_option_name
+     */
+    that.other_option_name = spec.other_option_name;
+
+    /**
+     * Entity which is added into member table.
+     *
+     * @property {String} other_entity
+     */
     that.other_entity = IPA.get_entity(spec.other_entity);
     that.attribute_member = spec.attribute_member;
 
@@ -675,9 +699,30 @@ IPA.association_table_widget = function (spec) {
             on_success: on_success,
             on_error: on_error
         });
-        command.set_option(that.other_entity.name, values);
+
+        that.join_additional_option(command);
+        that.handle_entity_option(command, values);
 
         command.execute();
+    };
+
+    that.join_additional_option = function(command) {
+        var add_opt = that.additional_add_del_field;
+        if (add_opt && typeof add_opt === 'string') {
+            var opt_field = that.entity.facet.get_field(add_opt);
+            var value;
+            if (opt_field) value = opt_field.get_value()[0];
+
+            command.set_option(add_opt, value);
+        }
+    };
+
+    that.handle_entity_option = function(command, values) {
+        var option_name = that.other_option_name;
+        if (!option_name) {
+            option_name = that.other_entity.name;
+        }
+        command.set_option(option_name, values);
     };
 
     that.show_remove_dialog = function() {
@@ -686,7 +731,7 @@ IPA.association_table_widget = function (spec) {
 
         if (!selected_values.length) {
             var message = text.get('@i18n:dialogs.remove_empty');
-            alert(message);
+            window.alert(message);
             return;
         }
 
@@ -724,7 +769,6 @@ IPA.association_table_widget = function (spec) {
             );
         };
 
-
         dialog.open();
     };
 
@@ -740,7 +784,8 @@ IPA.association_table_widget = function (spec) {
             on_error: on_error
         });
 
-        command.set_option(that.other_entity.name, values);
+        that.join_additional_option(command);
+        that.handle_entity_option(command, values);
 
         command.execute();
     };
@@ -782,12 +827,40 @@ IPA.association_table_field = function (spec) {
 
     spec = spec || {};
 
+    /**
+     * Turn off decision whether the field is writable according to metadata.
+     * The source of rights will be only ACLs.
+     *
+     * @property {Boolean}
+     */
+    spec.check_writable_from_metadata = spec.check_writable_from_metadata === undefined ?
+                        false : spec.check_writable_from_metadata;
+
     var that = IPA.field(spec);
+
+    /**
+     * In case that facet has a state attribute set this is the way how to user
+     * that attribute in refresh command as option in format:
+     * {attributename: attributevalue}.
+     *
+     * @property {String}
+     */
+    that.refresh_attribute = spec.refresh_attribute || '';
 
     that.load = function(data) {
         that.values = that.adapter.load(data);
         that.widget.update(that.values);
         that.widget.unselect_all();
+
+        if (!!that.acl_param) {
+            var record = that.adapter.get_record(data);
+            that.load_writable(record);
+            that.handle_acl();
+        }
+    };
+
+    that.handle_acl = function() {
+        if (!that.writable) that.widget.set_enabled(false);
     };
 
     that.refresh = function() {
@@ -801,14 +874,19 @@ IPA.association_table_field = function (spec) {
         }
 
         var pkey = that.facet.get_pkey();
-        rpc.command({
+        var command = rpc.command({
             entity: that.entity.name,
             method: 'show',
             args: [pkey],
             options: { all: true, rights: true },
             on_success: on_success,
             on_error: on_error
-        }).execute();
+        });
+
+        var additional_option = that.facet.state[that.refresh_attribute];
+        if (additional_option) command.set_option(that.refresh_attribute, additional_option);
+
+        command.execute();
     };
 
     that.widgets_created = function() {
@@ -964,6 +1042,7 @@ exp.association_facet = IPA.association_facet = function (spec, no_init) {
     that.facet_group = spec.facet_group;
 
     that.read_only = spec.read_only;
+    that.show_values_with_dup_key = spec.show_values_with_dup_key || false;
 
     that.associator = spec.associator || IPA.bulk_associator;
     that.add_method = spec.add_method || 'add_member';
@@ -1024,7 +1103,7 @@ exp.association_facet = IPA.association_facet = function (spec, no_init) {
         var columns = that.columns.values;
         for (i=0; i<columns.length; i++) {
             column = columns[i];
-            column.link = spec.link;
+            if (column.primary_key) column.link = spec.link;
         }
 
         that.init_table(that.other_entity);
@@ -1189,7 +1268,7 @@ exp.association_facet = IPA.association_facet = function (spec, no_init) {
 
         if (!values.length) {
             var message = text.get('@i18n:dialogs.remove_empty');
-            alert(message);
+            window.alert(message);
             return;
         }
 
@@ -1240,6 +1319,7 @@ exp.association_facet = IPA.association_facet = function (spec, no_init) {
     that.get_records_map = function(data) {
 
         var records_map = $.ordered_map();
+        var pkeys_map = $.ordered_map();
         var association_name = that.get_attribute_name();
         var pkey_name = that.managed_entity.metadata.primary_key;
 
@@ -1248,10 +1328,18 @@ exp.association_facet = IPA.association_facet = function (spec, no_init) {
             var pkey = pkeys[i];
             var record = {};
             record[pkey_name] = pkey;
-            records_map.put(pkey, record);
+            var compound_pkey = pkey;
+            if (that.show_values_with_dup_key) {
+                compound_pkey = pkey + i;
+            }
+            records_map.put(compound_pkey, record);
+            pkeys_map.put(compound_pkey, pkey);
         }
 
-        return records_map;
+        return {
+            records_map: records_map,
+            pkeys_map: pkeys_map
+        };
     };
 
     that.refresh = function() {
@@ -1410,16 +1498,22 @@ exp.attribute_facet = IPA.attribute_facet = function(spec, no_init) {
     that.get_records_map = function(data) {
 
         var records_map = $.ordered_map();
+        var pkeys_map = $.ordered_map();
         var pkeys = data.result.result[that.attribute];
 
         for (var i=0; pkeys && i<pkeys.length; i++) {
             var pkey = pkeys[i];
             var record = {};
             record[that.attribute] = pkey;
-            records_map.put(pkey, record);
+            var compound_pkey = pkey + i;
+            records_map.put(compound_pkey, record);
+            pkeys_map.put(compound_pkey, pkey);
         }
 
-        return records_map;
+        return {
+            records_map: records_map,
+            pkeys_map: pkeys_map
+        };
     };
 
     that.refresh = function() {
@@ -1485,7 +1579,7 @@ exp.attribute_facet = IPA.attribute_facet = function(spec, no_init) {
 
         if (!selected_values.length) {
             var message = text.get('@i18n:dialogs.remove_empty');
-            alert(message);
+            window.alert(message);
             return;
         }
 

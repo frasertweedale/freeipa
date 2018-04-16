@@ -20,20 +20,24 @@
 import abc
 import base64
 import datetime
-import hashlib
-import hmac
+import logging
 import os
 import uuid
-import struct
 
 from lxml import etree
 import dateutil.parser
 import dateutil.tz
-import nss.nss as nss
 import gssapi
 import six
-from six.moves import xrange
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, hmac
+from cryptography.hazmat.primitives.padding import PKCS7
+from cryptography.hazmat.primitives.kdf import pbkdf2
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
+from ipaplatform.paths import paths
 from ipapython import admintool
 from ipalib import api, errors
 from ipaserver.plugins.ldap2 import AUTOBIND_DISABLED
@@ -42,6 +46,8 @@ if six.PY3:
     unicode = str
     long = int
 
+logger = logging.getLogger(__name__)
+
 
 class ValidationError(Exception):
     pass
@@ -49,6 +55,7 @@ class ValidationError(Exception):
 
 def fetchAll(element, xpath, conv=lambda x: x):
     return [conv(e) for e in element.xpath(xpath, namespaces={
+        "pkcs5": "http://www.rsasecurity.com/rsalabs/pkcs/schemas/pkcs-5v2-0#",
         "pskc": "urn:ietf:params:xml:ns:keyprov:pskc",
         "xenc11": "http://www.w3.org/2009/xmlenc11#",
         "xenc": "http://www.w3.org/2001/04/xmlenc#",
@@ -88,7 +95,9 @@ def convertTokenType(value):
 def convertHashName(value):
     "Converts hash names to their canonical names."
 
-    return {
+    default_hash = u"sha1"
+    known_prefixes = ("", "hmac-",)
+    known_hashes = {
         "sha1":    u"sha1",
         "sha224":  u"sha224",
         "sha256":  u"sha256",
@@ -99,32 +108,56 @@ def convertHashName(value):
         "sha-256": u"sha256",
         "sha-384": u"sha384",
         "sha-512": u"sha512",
-    }.get(value.lower(), u"sha1")
+    }
+
+    if value is None:
+        return default_hash
+
+    v = value.lower()
+    for prefix in known_prefixes:
+        if prefix:
+            w = v[len(prefix):]
+        else:
+            w = v
+        result = known_hashes.get(w)
+        if result is not None:
+            break
+    else:
+        result = default_hash
+
+    return result
 
 
 def convertHMACType(value):
     "Converts HMAC URI to hashlib object."
 
     return {
-        "http://www.w3.org/2000/09/xmldsig#hmac-sha1":        hashlib.sha1,
-        "http://www.w3.org/2001/04/xmldsig-more#hmac-sha224": hashlib.sha224,
-        "http://www.w3.org/2001/04/xmldsig-more#hmac-sha256": hashlib.sha256,
-        "http://www.w3.org/2001/04/xmldsig-more#hmac-sha384": hashlib.sha384,
-        "http://www.w3.org/2001/04/xmldsig-more#hmac-sha512": hashlib.sha512,
-    }.get(value.lower(), hashlib.sha1)
+        "http://www.w3.org/2000/09/xmldsig#hmac-sha1":        hashes.SHA1,
+        "http://www.w3.org/2001/04/xmldsig-more#hmac-sha224": hashes.SHA224,
+        "http://www.w3.org/2001/04/xmldsig-more#hmac-sha256": hashes.SHA256,
+        "http://www.w3.org/2001/04/xmldsig-more#hmac-sha384": hashes.SHA384,
+        "http://www.w3.org/2001/04/xmldsig-more#hmac-sha512": hashes.SHA512,
+    }.get(value.lower(), hashes.SHA1)
 
 
 def convertAlgorithm(value):
     "Converts encryption URI to (mech, ivlen)."
 
     return {
-        "http://www.w3.org/2001/04/xmlenc#aes128-cbc":        (nss.CKM_AES_CBC_PAD, 128),
-        "http://www.w3.org/2001/04/xmlenc#aes192-cbc":        (nss.CKM_AES_CBC_PAD, 192),
-        "http://www.w3.org/2001/04/xmlenc#aes256-cbc":        (nss.CKM_AES_CBC_PAD, 256),
-        "http://www.w3.org/2001/04/xmlenc#tripledes-cbc":     (nss.CKM_DES3_CBC_PAD, 64),
-        "http://www.w3.org/2001/04/xmldsig-more#camellia128": (nss.CKM_CAMELLIA_CBC_PAD, 128),
-        "http://www.w3.org/2001/04/xmldsig-more#camellia192": (nss.CKM_CAMELLIA_CBC_PAD, 192),
-        "http://www.w3.org/2001/04/xmldsig-more#camellia256": (nss.CKM_CAMELLIA_CBC_PAD, 256),
+        "http://www.w3.org/2001/04/xmlenc#aes128-cbc": (
+            algorithms.AES, modes.CBC, 128),
+        "http://www.w3.org/2001/04/xmlenc#aes192-cbc": (
+            algorithms.AES, modes.CBC, 192),
+        "http://www.w3.org/2001/04/xmlenc#aes256-cbc": (
+            algorithms.AES, modes.CBC, 256),
+        "http://www.w3.org/2001/04/xmlenc#tripledes-cbc": (
+            algorithms.TripleDES, modes.CBC, 64),
+        "http://www.w3.org/2001/04/xmldsig-more#camellia128": (
+            algorithms.Camellia, modes.CBC, 128),
+        "http://www.w3.org/2001/04/xmldsig-more#camellia192": (
+            algorithms.Camellia, modes.CBC, 192),
+        "http://www.w3.org/2001/04/xmldsig-more#camellia256": (
+            algorithms.Camellia, modes.CBC, 256),
 
         # TODO: add support for these formats.
         # "http://www.w3.org/2001/04/xmlenc#kw-aes128": "kw-aes128",
@@ -134,7 +167,7 @@ def convertAlgorithm(value):
         # "http://www.w3.org/2001/04/xmldsig-more#kw-camellia128": "kw-camellia128",
         # "http://www.w3.org/2001/04/xmldsig-more#kw-camellia192": "kw-camellia192",
         # "http://www.w3.org/2001/04/xmldsig-more#kw-camellia256": "kw-camellia256",
-    }.get(value.lower(), (None, None))
+    }.get(value.lower(), (None, None, None))
 
 
 def convertEncrypted(value, decryptor=None, pconv=base64.b64decode, econv=lambda x: x):
@@ -165,54 +198,34 @@ class XMLKeyDerivation(six.with_metaclass(abc.ABCMeta, object)):
 
 class PBKDF2KeyDerivation(XMLKeyDerivation):
     def __init__(self, enckey):
-        params = fetch(enckey, "./xenc11:DerivedKey/xenc11:KeyDerivationMethod/xenc11:PBKDF2-params")
+        params = fetch(enckey, "./xenc11:DerivedKey/xenc11:KeyDerivationMethod/pkcs5:PBKDF2-params")
         if params is None:
             raise ValueError("XML file is missing PBKDF2 parameters!")
 
-        self.salt = fetch(params, "./xenc11:Salt/xenc11:Specified/text()", base64.b64decode)
-        self.iter = fetch(params, "./xenc11:IterationCount/text()", int)
-        self.klen = fetch(params, "./xenc11:KeyLength/text()", int)
-        self.hmod = fetch(params, "./xenc11:PRF/@Algorithm", convertHMACType, hashlib.sha1)
+        salt = fetch(params, "./Salt/Specified/text()", base64.b64decode)
+        itrs = fetch(params, "./IterationCount/text()", int)
+        klen = fetch(params, "./KeyLength/text()", int)
+        hmod = fetch(params, "./PRF/@Algorithm", convertHMACType, hashes.SHA1)
 
-        if self.salt is None:
+        if salt is None:
             raise ValueError("XML file is missing PBKDF2 salt!")
 
-        if self.iter is None:
+        if itrs is None:
             raise ValueError("XML file is missing PBKDF2 iteration count!")
 
-        if self.klen is None:
+        if klen is None:
             raise ValueError("XML file is missing PBKDF2 key length!")
 
+        self.kdf = pbkdf2.PBKDF2HMAC(
+            algorithm=hmod(),
+            length=klen,
+            salt=salt,
+            iterations=itrs,
+            backend=default_backend()
+        )
+
     def derive(self, masterkey):
-        mac = hmac.HMAC(masterkey, None, self.hmod)
-
-        # Figure out how many blocks we will have to combine
-        # to expand the master key to the desired length.
-        blocks = self.klen // mac.digest_size
-        if self.klen % mac.digest_size != 0:
-            blocks += 1
-
-        # Loop through each block adding it to the derived key.
-        dk = []
-        for i in range(1, blocks + 1):
-            # Set initial values.
-            last = self.salt + struct.pack('>I', i)
-            hash = [0] * mac.digest_size
-
-            # Perform n iterations.
-            for _j in xrange(self.iter):
-                tmp = mac.copy()
-                tmp.update(last)
-                last = tmp.digest()
-
-                # XOR the previous hash with the new hash.
-                for k in range(mac.digest_size):
-                    hash[k] ^= ord(last[k])
-
-            # Add block to derived key.
-            dk.extend(hash)
-
-        return ''.join([chr(c) for c in dk])[:self.klen]
+        return self.kdf.derive(masterkey)
 
 
 def convertKeyDerivation(value):
@@ -229,27 +242,44 @@ class XMLDecryptor(object):
         * RFC 6931"""
 
     def __init__(self, key, hmac=None):
-        self.__key = nss.SecItem(key)
+        self.__key = key
         self.__hmac = hmac
 
     def __call__(self, element, mac=None):
-        (mech, ivlen) = fetch(element, "./xenc:EncryptionMethod/@Algorithm", convertAlgorithm)
-        data = fetch(element, "./xenc:CipherData/xenc:CipherValue/text()", base64.b64decode)
+        algo, mode, klen = fetch(
+            element, "./xenc:EncryptionMethod/@Algorithm", convertAlgorithm)
+        data = fetch(
+            element,
+            "./xenc:CipherData/xenc:CipherValue/text()",
+            base64.b64decode
+        )
+
+        # Make sure the key is the right length.
+        if len(self.__key) * 8 != klen:
+            raise ValidationError("Invalid key length!")
 
         # If a MAC is present, perform validation.
         if mac:
             tmp = self.__hmac.copy()
             tmp.update(data)
-            if tmp.digest() != mac:
-                raise ValidationError("MAC validation failed!")
+            try:
+                tmp.verify(mac)
+            except InvalidSignature as e:
+                raise ValidationError("MAC validation failed!", e)
 
-        # Decrypt the data.
-        slot = nss.get_best_slot(mech)
-        key = nss.import_sym_key(slot, mech, nss.PK11_OriginUnwrap, nss.CKA_ENCRYPT, self.__key)
-        iv = nss.param_from_iv(mech, nss.SecItem(data[0:ivlen//8]))
-        ctx = nss.create_context_by_sym_key(mech, nss.CKA_DECRYPT, key, iv)
-        out = ctx.cipher_op(data[ivlen // 8:])
-        out += ctx.digest_final()
+        iv = data[:algo.block_size // 8]
+        data = data[len(iv):]
+
+        algorithm = algo(self.__key)
+        cipher = Cipher(algorithm, mode(iv), default_backend())
+        decryptor = cipher.decryptor()
+        padded = decryptor.update(data)
+        padded += decryptor.finalize()
+
+        unpadder = PKCS7(algorithm.block_size).unpadder()
+        out = unpadder.update(padded)
+        out += unpadder.finalize()
+
         return out
 
 
@@ -304,7 +334,11 @@ class PSKCKeyPackage(object):
         ('model',       'ipatokenmodel',           lambda v, o: v.strip()),
         ('serial',      'ipatokenserial',          lambda v, o: v.strip()),
         ('issueno',     'ipatokenserial',          lambda v, o: o.get('ipatokenserial', '') + '-' + v.strip()),
-        ('key',         'ipatokenotpkey',          lambda v, o: unicode(base64.b32encode(v))),
+        (
+            'key',
+            'ipatokenotpkey',
+            lambda v, o: base64.b32encode(v).decode('ascii')
+        ),
         ('digits',      'ipatokenotpdigits',       lambda v, o: v),
         ('algorithm',   'ipatokenotpalgorithm',    lambda v, o: v),
         ('counter',     'ipatokenhotpcounter',     lambda v, o: v),
@@ -367,7 +401,10 @@ class PSKCKeyPackage(object):
 
             result = fetch(element, path)
             if result is not None:
-                if getattr(getattr(v[1], "func_code", None), "co_argcount", 0) > 1:
+                lambda_code_attr = "__code__" if six.PY3 else "func_code"
+                if getattr(
+                        getattr(v[1], lambda_code_attr, None),
+                        "co_argcount", 0) > 1:
                     data[v[0]] = v[1](result, decryptor)
                 else:
                     data[v[0]] = v[1](result)
@@ -452,7 +489,11 @@ class PSKCDocument(object):
         # Load the decryptor.
         self.__decryptor = XMLDecryptor(key)
         if self.__mkey is not None and self.__algo is not None:
-            tmp = hmac.HMAC(self.__decryptor(self.__mkey), digestmod=self.__algo)
+            tmp = hmac.HMAC(
+                self.__decryptor(self.__mkey),
+                self.__algo(),
+                backend=default_backend()
+            )
             self.__decryptor = XMLDecryptor(key, tmp)
 
     def getKeyPackages(self):
@@ -467,14 +508,6 @@ class OTPTokenImport(admintool.AdminTool):
     command_name = 'ipa-otptoken-import'
     description = "Import OTP tokens."
     usage = "%prog [options] <PSKC file> <output file>"
-
-    @classmethod
-    def main(cls, argv):
-        nss.nss_init_nodb()
-        try:
-            super(OTPTokenImport, cls).main(argv)
-        finally:
-            nss.nss_shutdown()
 
     @classmethod
     def add_options(cls, parser):
@@ -509,7 +542,7 @@ class OTPTokenImport(admintool.AdminTool):
                 self.doc.setKey(f.read())
 
     def run(self):
-        api.bootstrap(in_server=True)
+        api.bootstrap(in_server=True, confdir=paths.ETC_IPA)
         api.finalize()
 
         try:
@@ -524,9 +557,9 @@ class OTPTokenImport(admintool.AdminTool):
                 try:
                     api.Command.otptoken_add(keypkg.id, no_qrcode=True, **keypkg.options)
                 except Exception as e:
-                    self.log.warning("Error adding token: %s", e)
+                    logger.warning("Error adding token: %s", e)
                 else:
-                    self.log.info("Added token: %s", keypkg.id)
+                    logger.info("Added token: %s", keypkg.id)
                     keypkg.remove()
         finally:
             api.Backend.ldap2.disconnect()

@@ -22,17 +22,17 @@
 Contains Red Hat OS family-specific service class implementations.
 """
 
+import logging
 import os
 import time
 import contextlib
 
-from ipaplatform.tasks import tasks
 from ipaplatform.base import services as base_services
 
 from ipapython import ipautil, dogtag
-from ipapython.ipa_log_manager import root_logger
-from ipalib import api
 from ipaplatform.paths import paths
+
+logger = logging.getLogger(__name__)
 
 # Mappings from service names as FreeIPA code references to these services
 # to their actual systemd service names
@@ -69,6 +69,7 @@ redhat_system_units['ods-enforcerd'] = 'ods-enforcerd.service'
 redhat_system_units['ods_enforcerd'] = redhat_system_units['ods-enforcerd']
 redhat_system_units['ods-signerd'] = 'ods-signerd.service'
 redhat_system_units['ods_signerd'] = redhat_system_units['ods-signerd']
+redhat_system_units['gssproxy'] = 'gssproxy.service'
 
 
 # Service classes that implement Red Hat OS family-specific behaviour
@@ -76,7 +77,7 @@ redhat_system_units['ods_signerd'] = redhat_system_units['ods-signerd']
 class RedHatService(base_services.SystemdService):
     system_units = redhat_system_units
 
-    def __init__(self, service_name):
+    def __init__(self, service_name, api=None):
         systemd_name = service_name
         if service_name in self.system_units:
             systemd_name = self.system_units[service_name]
@@ -86,38 +87,14 @@ class RedHatService(base_services.SystemdService):
                 # and not a foo.target. Thus, not correct service name for
                 # systemd, default to foo.service style then
                 systemd_name = "%s.service" % (service_name)
-        super(RedHatService, self).__init__(service_name, systemd_name)
+        super(RedHatService, self).__init__(service_name, systemd_name, api)
 
 
 class RedHatDirectoryService(RedHatService):
 
-    def tune_nofile_platform(self, num=8192, fstore=None):
-        """
-        Increase the number of files descriptors available to directory server
-        from the default 1024 to 8192. This will allow to support a greater
-        number of clients out of the box.
-
-        This is a part of the implementation that is systemd-specific.
-
-        Returns False if the setting of the nofile limit needs to be skipped.
-        """
-
-        if os.path.exists(paths.SYSCONFIG_DIRSRV_SYSTEMD):
-            # We need to enable LimitNOFILE=8192 in the dirsrv@.service
-            # Since 389-ds-base-1.2.10-0.8.a7 the configuration of the
-            # service parameters is performed via
-            # /etc/sysconfig/dirsrv.systemd file which is imported by systemd
-            # into dirsrv@.service unit
-
-            replacevars = {'LimitNOFILE': str(num)}
-            ipautil.inifile_replace_variables(paths.SYSCONFIG_DIRSRV_SYSTEMD,
-                                              'service',
-                                              replacevars=replacevars)
-            tasks.restore_context(paths.SYSCONFIG_DIRSRV_SYSTEMD)
-            ipautil.run(["/bin/systemctl", "--system", "daemon-reload"],
-                        raiseonerr=False)
-
-        return True
+    def is_installed(self, instance_name):
+        file_path = "{}/{}-{}".format(paths.ETC_DIRSRV, "slapd", instance_name)
+        return os.path.exists(file_path)
 
     def restart(self, instance_name="", capture_output=True, wait=True,
                 ldapi=False):
@@ -187,26 +164,21 @@ class RedHatIPAService(RedHatService):
         self.restart(instance_name)
 
 
-class RedHatSSHService(RedHatService):
-    def get_config_dir(self, instance_name=""):
-        return '/etc/ssh'
-
-
 class RedHatCAService(RedHatService):
     def wait_until_running(self):
-        root_logger.debug('Waiting until the CA is running')
-        timeout = float(api.env.startup_timeout)
+        logger.debug('Waiting until the CA is running')
+        timeout = float(self.api.env.startup_timeout)
         op_timeout = time.time() + timeout
         while time.time() < op_timeout:
             try:
                 # check status of CA instance on this host, not remote ca_host
-                status = dogtag.ca_status(api.env.host)
+                status = dogtag.ca_status(self.api.env.host)
             except Exception as e:
                 status = 'check interrupted due to error: %s' % e
-            root_logger.debug('The CA status is: %s' % status)
+            logger.debug('The CA status is: %s', status)
             if status == 'running':
                 break
-            root_logger.debug('Waiting for CA to start...')
+            logger.debug('Waiting for CA to start...')
             time.sleep(1)
         else:
             raise RuntimeError('CA did not start in %ss' % timeout)
@@ -235,8 +207,8 @@ class RedHatCAService(RedHatService):
                 self.wait_until_running()
                 return True
         except Exception as e:
-            root_logger.debug(
-                'Failed to check CA status: {err}'.format(err=e)
+            logger.debug(
+                'Failed to check CA status: %s', e
             )
         return False
 
@@ -244,31 +216,31 @@ class RedHatCAService(RedHatService):
 # Function that constructs proper Red Hat OS family-specific server classes for
 # services of specified name
 
-def redhat_service_class_factory(name):
+def redhat_service_class_factory(name, api=None):
     if name == 'dirsrv':
-        return RedHatDirectoryService(name)
+        return RedHatDirectoryService(name, api)
     if name == 'ipa':
-        return RedHatIPAService(name)
-    if name == 'sshd':
-        return RedHatSSHService(name)
+        return RedHatIPAService(name, api)
     if name in ('pki-tomcatd', 'pki_tomcatd'):
-        return RedHatCAService(name)
-    return RedHatService(name)
+        return RedHatCAService(name, api)
+    return RedHatService(name, api)
 
 
 # Magicdict containing RedHatService instances.
 
 class RedHatServices(base_services.KnownServices):
-    def service_class_factory(self, name):
-        return redhat_service_class_factory(name)
-
     def __init__(self):
+        # pylint: disable=ipa-forbidden-import
+        import ipalib  # FixMe: break import cycle
+        # pylint: enable=ipa-forbidden-import
         services = dict()
         for s in base_services.wellknownservices:
-            services[s] = self.service_class_factory(s)
+            services[s] = self.service_class_factory(s, ipalib.api)
         # Call base class constructor. This will lock services to read-only
         super(RedHatServices, self).__init__(services)
 
+    def service_class_factory(self, name, api=None):
+        return redhat_service_class_factory(name, api)
 
 # Objects below are expected to be exported by platform module
 

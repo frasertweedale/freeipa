@@ -2,6 +2,8 @@
 # Copyright (C) 2015  FreeIPA Contributors see COPYING for license
 #
 
+import logging
+
 import dbus
 import dbus.mainloop.glib
 import ldap
@@ -40,6 +42,8 @@ EXAMPLES:
   Show specific server:
     ipa server-show ipa.example.com
 """)
+
+logger = logging.getLogger(__name__)
 
 register = Registry()
 
@@ -223,7 +227,7 @@ class server_mod(LDAPUpdate):
 
         if entry_attrs.get('ipalocation'):
             if not ldap.entry_exists(entry_attrs['ipalocation'][0]):
-                self.api.Object.location.handle_not_found(
+                raise self.api.Object.location.handle_not_found(
                     options['ipalocation_location'])
 
         if 'ipalocation' in entry_attrs or 'ipaserviceweight' in entry_attrs:
@@ -262,7 +266,7 @@ class server_mod(LDAPUpdate):
 
         if 'ipalocation_location' or 'ipaserviceweight' in options:
             self.add_message(messages.ServiceRestartRequired(
-                service=services.service('named').systemd_name,
+                service=services.service('named', api).systemd_name,
                 server=keys[0], ))
 
             result = self.api.Command.dns_update_system_records()
@@ -473,7 +477,7 @@ class server_del(LDAPDelete):
         ipa_masters = ipa_config['ipa_master_server']
 
         # skip these checks if the last master is being removed
-        if ipa_masters == [hostname]:
+        if len(ipa_masters) <= 1:
             return
 
         if self.api.Command.dns_is_enabled()['result']:
@@ -494,6 +498,19 @@ class server_del(LDAPDelete):
                       "without a DNS."), ignore_last_of_role)
 
         if self.api.Command.ca_is_enabled()['result']:
+            try:
+                vault_config = self.api.Command.vaultconfig_show()['result']
+                kra_servers = vault_config.get('kra_server_server', [])
+            except errors.InvocationError:
+                # KRA is not configured
+                pass
+            else:
+                if kra_servers == [hostname]:
+                    handler(
+                        _("Deleting this server is not allowed as it would "
+                          "leave your installation without a KRA."),
+                        ignore_last_of_role)
+
             ca_servers = ipa_config.get('ca_server_server', [])
             ca_renewal_master = ipa_config.get(
                 'ca_renewal_master_server', [])
@@ -541,19 +558,19 @@ class server_del(LDAPDelete):
         conn = self.Backend.ldap2
         env = self.api.env
 
-        master_principal = "{}@{}".format(master, env.realm)
+        master_principal = "{}@{}".format(master, env.realm).encode('utf-8')
 
         # remove replica memberPrincipal from s4u2proxy configuration
         s4u2proxy_subtree = DN(env.container_s4u2proxy,
                                env.basedn)
         dn1 = DN(('cn', 'ipa-http-delegation'), s4u2proxy_subtree)
-        member_principal1 = "HTTP/{}".format(master_principal)
+        member_principal1 = b"HTTP/%s" % master_principal
 
         dn2 = DN(('cn', 'ipa-ldap-delegation-targets'), s4u2proxy_subtree)
-        member_principal2 = "ldap/{}".format(master_principal)
+        member_principal2 = b"ldap/%s" % master_principal
 
         dn3 = DN(('cn', 'ipa-cifs-delegation-targets'), s4u2proxy_subtree)
-        member_principal3 = "cifs/{}".format(master_principal)
+        member_principal3 = b"cifs/%s" % master_principal
 
         for (dn, member_principal) in ((dn1, member_principal1),
                                        (dn2, member_principal2),
@@ -562,16 +579,17 @@ class server_del(LDAPDelete):
                 mod = [(ldap.MOD_DELETE, 'memberPrincipal', member_principal)]
                 conn.conn.modify_s(str(dn), mod)
             except (ldap.NO_SUCH_OBJECT, ldap.NO_SUCH_ATTRIBUTE):
-                self.log.debug(
-                    "Replica (%s) memberPrincipal (%s) not found in %s" %
-                    (master, member_principal, dn))
+                logger.debug(
+                    "Replica (%s) memberPrincipal (%s) not found in %s",
+                    master, member_principal.decode('utf-8'), dn)
             except Exception as e:
                 self.add_message(
                     messages.ServerRemovalWarning(
                         message=_("Failed to clean memberPrincipal "
                                   "%(principal)s from s4u2proxy entry %(dn)s: "
                                   "%(err)s") % dict(
-                                      principal=member_principal,
+                                      principal=(member_principal
+                                                 .decode('utf-8')),
                                       dn=dn, err=e)))
 
         try:
@@ -595,14 +613,14 @@ class server_del(LDAPDelete):
             dn = DN(('cn', 'default'), ('ou', 'profile'), env.basedn)
             ret = conn.get_entry(dn)
             srvlist = ret.single_value.get('defaultServerList', '')
-            srvlist = srvlist[0].split()
+            srvlist = srvlist.split()
             if master in srvlist:
                 srvlist.remove(master)
                 attr = ' '.join(srvlist)
-                mod = [(ldap.MOD_REPLACE, 'defaultServerList', attr)]
-                conn.conn.modify_s(str(dn), mod)
-        except (errors.NotFound, ldap.NO_SUCH_ATTRIBUTE,
-                ldap.TYPE_OR_VALUE_EXISTS):
+                ret['defaultServerList'] = attr
+                conn.update_entry(ret)
+        except (errors.NotFound, errors.MidairCollision,
+                errors.EmptyModlist):
             pass
         except Exception as e:
             self.add_message(
@@ -641,10 +659,26 @@ class server_del(LDAPDelete):
         delete server kerberos key and all its svc principals
         """
         try:
+            # do not delete ldap principal if server-del command
+            # has been called on a machine which is being deleted
+            # since this will break replication.
+            # ldap principal to be cleaned later by topology plugin
+            # necessary changes to a topology plugin are tracked
+            # under https://pagure.io/freeipa/issue/7359
+            if master == self.api.env.host:
+                filter = (
+                    '(&(krbprincipalname=*/{}@{})'
+                    '(!(krbprincipalname=ldap/*)))'
+                    .format(master, self.api.env.realm)
+                )
+            else:
+                filter = '(krbprincipalname=*/{}@{})'.format(
+                    master, self.api.env.realm
+                )
+
             entries = ldap.get_entries(
-                self.api.env.basedn, ldap.SCOPE_SUBTREE,
-                filter='(krbprincipalname=*/{}@{})'.format(
-                    master, self.api.env.realm))
+                self.api.env.basedn, ldap.SCOPE_SUBTREE, filter=filter
+            )
 
             if entries:
                 entries.sort(key=lambda x: len(x.dn), reverse=True)
@@ -678,6 +712,12 @@ class server_del(LDAPDelete):
                 messages.ServerRemovalWarning(
                     message=_("You may need to manually remove them from the "
                               "tree")))
+
+    def _cleanup_server_dns_config(self, hostname):
+        try:
+            self.api.Command.dnsserver_del(hostname)
+        except errors.NotFound:
+            pass
 
     def pre_callback(self, ldap, dn, *keys, **options):
         pkey = self.obj.get_primary_key_from_dn(dn)
@@ -717,6 +757,9 @@ class server_del(LDAPDelete):
 
         # try to clean up the leftover DNS entries
         self._cleanup_server_dns_records(pkey)
+
+        # try to clean up the DNS config from ldap
+        self._cleanup_server_dns_config(pkey)
 
         return dn
 
@@ -781,11 +824,11 @@ class server_del(LDAPDelete):
                     return
                 time.sleep(2)
                 if i == 2:  # taking too long, something is wrong, report
-                    self.log.info(
+                    logger.info(
                         "Waiting for removal of replication agreements")
                 if i > 90:
-                    self.log.info("Taking too long, skipping")
-                    self.log.info("Following segments were not deleted:")
+                    logger.info("Taking too long, skipping")
+                    logger.info("Following segments were not deleted:")
                     self.add_message(messages.ServerRemovalWarning(
                         message=_("Following segments were not deleted:")))
                     for s in left:
@@ -811,14 +854,14 @@ class server_del(LDAPDelete):
                 # If the server was already deleted, we can expect that all
                 # removals had been done in previous run and dangling segments
                 # were not deleted.
-                self.log.info(
+                logger.info(
                     "Skipping replication agreement deletion check for "
-                    "suffix '{0}'".format(suffix_name))
+                    "suffix '%s'", suffix_name)
                 continue
 
-            self.log.info(
-                "Checking for deleted segments in suffix '{0}'".format(
-                    suffix_name))
+            logger.info(
+                "Checking for deleted segments in suffix '%s",
+                suffix_name)
 
             wait_for_segment_removal(
                 hostname,
@@ -866,7 +909,7 @@ class server_conncheck(crud.PKQuery):
         try:
             self.obj.get_dn_if_exists(*keys[:-1])
         except errors.NotFound:
-            self.obj.handle_not_found(keys[-2])
+            raise self.obj.handle_not_found(keys[-2])
 
         # the user must have the Replication Administrators privilege
         privilege = u'Replication Administrators'

@@ -23,29 +23,38 @@
 """
 WSGI appliction for IPA server.
 """
+import logging
+import os
+import sys
+
+# Some dependencies like Dogtag's pki.client library and custodia use
+# python-requsts to make HTTPS connection. python-requests prefers
+# PyOpenSSL over Python's stdlib ssl module. PyOpenSSL is build on top
+# of python-cryptography which trigger a execmem SELinux violation
+# in the context of Apache HTTPD (httpd_execmem).
+# When requests is imported, it always tries to import pyopenssl glue
+# code from urllib3's contrib directory. The import of PyOpenSSL is
+# enough to trigger the SELinux denial.
+# Block any import of PyOpenSSL's SSL module by raising an ImportError
+sys.modules['OpenSSL.SSL'] = None
+
+from ipaplatform.paths import paths
 from ipalib import api
-from ipalib.config import Env
-from ipalib.constants import DEFAULT_CONFIG
 
-# Determine what debug level is configured. We can only do this
-# by reading in the configuration file(s). The server always reads
-# default.conf and will also read in `context'.conf.
-env = Env()
-env._bootstrap(context='server', log=None)
-env._finalize_core(**dict(DEFAULT_CONFIG))
+logger = logging.getLogger(os.path.basename(__file__))
 
-# Initialize the API with the proper debug level
-api.bootstrap(context='server', debug=env.debug, log=None)
+api.bootstrap(context='server', confdir=paths.ETC_IPA, log=None)
 try:
     api.finalize()
 except Exception as e:
-    api.log.error('Failed to start IPA: %s' % e)
+    logger.error('Failed to start IPA: %s', e)
 else:
-    api.log.info('*** PROCESS START ***')
+    logger.info('*** PROCESS START ***')
 
     # This is the WSGI callable:
     def application(environ, start_response):
         if not environ['wsgi.multithread']:
             return api.Backend.wsgi_dispatch(environ, start_response)
         else:
-            api.log.error("IPA does not work with the threaded MPM, use the pre-fork MPM")
+            logger.error("IPA does not work with the threaded MPM, "
+                         "use the pre-fork MPM")

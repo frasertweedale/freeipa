@@ -20,17 +20,16 @@
 Test the `ipaserver/install/ldapupdate.py` module.
 """
 
-import unittest
 import os
+import unittest
 
-import nose
 import pytest
 
 from ipalib import api
 from ipalib import errors
 from ipaserver.install.ldapupdate import LDAPUpdate, BadSyntax
 from ipaserver.install import installutils
-from ipapython import ipautil, ipaldap
+from ipapython import ipaldap
 from ipaplatform.paths import paths
 from ipapython.dn import DN
 
@@ -48,6 +47,7 @@ The DM password needs to be set in ~/.ipa/.dmpw
 
 
 @pytest.mark.tier0
+@pytest.mark.needs_ipaapi
 class test_update(unittest.TestCase):
     """
     Test the LDAP updater.
@@ -56,19 +56,21 @@ class test_update(unittest.TestCase):
     def setUp(self):
         fqdn = installutils.get_fqdn()
         pwfile = api.env.dot_ipa + os.sep + ".dmpw"
-        if ipautil.file_exists(pwfile):
+        if os.path.isfile(pwfile):
             fp = open(pwfile, "r")
             self.dm_password = fp.read().rstrip()
             fp.close()
         else:
-            raise nose.SkipTest("No directory manager password")
+            raise unittest.SkipTest("No directory manager password")
         self.updater = LDAPUpdate(dm_password=self.dm_password, sub_dict={})
-        self.ld = ipaldap.IPAdmin(fqdn)
-        self.ld.do_simple_bind(bindpw=self.dm_password)
+        ldap_uri = ipaldap.get_ldap_uri(fqdn)
+        self.ld = ipaldap.LDAPClient(ldap_uri)
+        self.ld.simple_bind(bind_dn=ipaldap.DIRMAN_DN,
+                            bind_password=self.dm_password)
         self.testdir = os.path.abspath(os.path.dirname(__file__))
-        if not ipautil.file_exists(os.path.join(self.testdir,
+        if not os.path.isfile(os.path.join(self.testdir,
                                                 "0_reset.update")):
-            raise nose.SkipTest("Unable to find test update files")
+            raise unittest.SkipTest("Unable to find test update files")
 
         self.container_dn = DN(self.updater._template_str('cn=test, cn=accounts, $SUFFIX'))
         self.user_dn = DN(self.updater._template_str('uid=tuser, cn=test, cn=accounts, $SUFFIX'))

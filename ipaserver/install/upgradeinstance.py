@@ -17,18 +17,22 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import logging
+
 import ldif
 import shutil
 import random
 import traceback
+from ipalib import api
 from ipaplatform.paths import paths
 from ipaplatform import services
-from ipapython.ipa_log_manager import root_logger
 
 from ipaserver.install import installutils
 from ipaserver.install import schemaupdate
 from ipaserver.install import ldapupdate
 from ipaserver.install import service
+
+logger = logging.getLogger(__name__)
 
 DSE = 'dse.ldif'
 
@@ -80,7 +84,7 @@ class IPAUpgrade(service.Service):
         for _i in range(8):
             h = "%02x" % rand.randint(0,255)
             ext += h
-        service.Service.__init__(self, "dirsrv")
+        super(IPAUpgrade, self).__init__("dirsrv", realm_name=realm_name)
         serverid = installutils.realm_to_serverid(realm_name)
         self.filename = '%s/%s' % (paths.ETC_DIRSRV_SLAPD_INSTANCE_TEMPLATE % serverid, DSE)
         self.savefilename = '%s/%s.ipa.%s' % (paths.ETC_DIRSRV_SLAPD_INSTANCE_TEMPLATE % serverid, DSE, ext)
@@ -88,13 +92,16 @@ class IPAUpgrade(service.Service):
         self.modified = False
         self.serverid = serverid
         self.schema_files = schema_files
-        self.realm = realm_name
 
     def __start(self):
-        services.service(self.service_name).start(self.serverid, ldapi=True)
+        srv = services.service(self.service_name, api)
+        srv.start(self.serverid, ldapi=True)
+        api.Backend.ldap2.connect()
 
     def __stop_instance(self):
         """Stop only the main DS instance"""
+        if api.Backend.ldap2.isconnected():
+            api.Backend.ldap2.disconnect()
         super(IPAUpgrade, self).stop(self.serverid)
 
     def create_instance(self):
@@ -114,13 +121,14 @@ class IPAUpgrade(service.Service):
         self.step("restoring configuration", self.__restore_config,
                   run_after_failure=True)
         if ds_running:
-            self.step("starting directory server", self.start)
+            self.step("starting directory server", self.__start)
         self.start_creation(start_message="Upgrading IPA:",
-                            show_service_name=False)
+                            show_service_name=False,
+                            runtime=90)
 
     def __save_config(self):
         shutil.copy2(self.filename, self.savefilename)
-        with open(self.filename, "rb") as in_file:
+        with open(self.filename, "r") as in_file:
             parser = GetEntryFromLDIF(in_file, entries_dn=["cn=config"])
             parser.parse()
             try:
@@ -130,21 +138,22 @@ class IPAUpgrade(service.Service):
                                    self.filename)
 
             try:
-                port = config_entry['nsslapd-port'][0]
+                port = config_entry['nsslapd-port'][0].decode('utf-8')
             except KeyError:
                 pass
             else:
                 self.backup_state('nsslapd-port', port)
 
             try:
-                security = config_entry['nsslapd-security'][0]
+                security = config_entry['nsslapd-security'][0].decode('utf-8')
             except KeyError:
                 pass
             else:
                 self.backup_state('nsslapd-security', security)
 
             try:
-                global_lock = config_entry['nsslapd-global-backend-lock'][0]
+                global_lock = config_entry[
+                    'nsslapd-global-backend-lock'][0].decode('utf-8')
             except KeyError:
                 pass
             else:
@@ -152,12 +161,12 @@ class IPAUpgrade(service.Service):
 
     def __enable_ds_global_write_lock(self):
         ldif_outfile = "%s.modified.out" % self.filename
-        with open(ldif_outfile, "wb") as out_file:
-            with open(self.filename, "rb") as in_file:
+        with open(ldif_outfile, "w") as out_file:
+            with open(self.filename, "r") as in_file:
                 parser = installutils.ModifyLDIF(in_file, out_file)
 
                 parser.replace_value(
-                    "cn=config", "nsslapd-global-backend-lock", ["on"])
+                    "cn=config", "nsslapd-global-backend-lock", [b"on"])
                 parser.parse()
 
         shutil.copy2(ldif_outfile, self.filename)
@@ -168,21 +177,22 @@ class IPAUpgrade(service.Service):
         global_lock = self.restore_state('nsslapd-global-backend-lock')
 
         ldif_outfile = "%s.modified.out" % self.filename
-        with open(ldif_outfile, "wb") as out_file:
-            with open(self.filename, "rb") as in_file:
+        with open(ldif_outfile, "w") as out_file:
+            with open(self.filename, "r") as in_file:
                 parser = installutils.ModifyLDIF(in_file, out_file)
 
                 if port is not None:
-                    parser.replace_value("cn=config", "nsslapd-port", [port])
+                    parser.replace_value(
+                        "cn=config", "nsslapd-port", [port.encode('utf-8')])
                 if security is not None:
                     parser.replace_value("cn=config", "nsslapd-security",
-                                         [security])
+                                         [security.encode('utf-8')])
 
                 # disable global lock by default
                 parser.remove_value("cn=config", "nsslapd-global-backend-lock")
                 if global_lock is not None:
                     parser.add_value("cn=config", "nsslapd-global-backend-lock",
-                                     [global_lock])
+                                     [global_lock.encode('utf-8')])
 
                 parser.parse()
 
@@ -190,11 +200,11 @@ class IPAUpgrade(service.Service):
 
     def __disable_listeners(self):
         ldif_outfile = "%s.modified.out" % self.filename
-        with open(ldif_outfile, "wb") as out_file:
-            with open(self.filename, "rb") as in_file:
+        with open(ldif_outfile, "w") as out_file:
+            with open(self.filename, "r") as in_file:
                 parser = installutils.ModifyLDIF(in_file, out_file)
-                parser.replace_value("cn=config", "nsslapd-port", ["0"])
-                parser.replace_value("cn=config", "nsslapd-security", ["off"])
+                parser.replace_value("cn=config", "nsslapd-port", [b"0"])
+                parser.replace_value("cn=config", "nsslapd-security", [b"off"])
                 parser.remove_value("cn=config", "nsslapd-ldapientrysearchbase")
                 parser.parse()
 
@@ -212,10 +222,10 @@ class IPAUpgrade(service.Service):
                 self.files = ld.get_all_files(ldapupdate.UPDATES_DIR)
             self.modified = (ld.update(self.files) or self.modified)
         except ldapupdate.BadSyntax as e:
-            root_logger.error('Bad syntax in upgrade %s', e)
+            logger.error('Bad syntax in upgrade %s', e)
             raise
         except Exception as e:
             # Bad things happened, return gracefully
-            root_logger.error('Upgrade failed with %s', e)
-            root_logger.debug('%s', traceback.format_exc())
+            logger.error('Upgrade failed with %s', e)
+            logger.debug('%s', traceback.format_exc())
             raise RuntimeError(e)

@@ -35,19 +35,21 @@ from ipalib import errors
 import os
 from ipaplatform.paths import paths
 
+
 class rabase(Backend):
     """
     Request Authority backend plugin.
     """
     def __init__(self, api):
+        self.ca_cert = api.env.tls_ca_cert
         if api.env.in_tree:
-            self.sec_dir = api.env.dot_ipa + os.sep + 'alias'
-            self.pwd_file = self.sec_dir + os.sep + '.pwd'
+            self.client_certfile = os.path.join(
+                api.env.dot_ipa, 'ra-agent.pem')
+            self.client_keyfile = os.path.join(api.env.dot_ipa, 'ra-agent.key')
         else:
-            self.sec_dir = paths.HTTPD_ALIAS_DIR
-            self.pwd_file = paths.ALIAS_PWDFILE_TXT
+            self.client_certfile = paths.RA_AGENT_PEM
+            self.client_keyfile = paths.RA_AGENT_KEY
         super(rabase, self).__init__(api)
-
 
     def check_request_status(self, request_id):
         """
@@ -57,7 +59,7 @@ class rabase(Backend):
         """
         raise errors.NotImplementedError(name='%s.check_request_status' % self.name)
 
-    def get_certificate(self, serial_number=None):
+    def get_certificate(self, serial_number):
         """
         Retrieve an existing certificate.
 

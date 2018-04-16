@@ -27,10 +27,10 @@ import os
 import json
 import time
 import collections
+import warnings
 
 import six
 
-import ipalib
 from ipapython import ipautil
 from ipaplatform.paths import paths
 
@@ -42,7 +42,7 @@ wellknownservices = ['certmonger', 'dirsrv', 'httpd', 'ipa', 'krb5kdc',
                      'messagebus', 'nslcd', 'nscd', 'ntpd', 'portmap',
                      'rpcbind', 'kadmin', 'sshd', 'autofs', 'rpcgssd',
                      'rpcidmapd', 'pki_tomcatd', 'chronyd', 'domainname',
-                     'named', 'ods_enforcerd', 'ods_signerd']
+                     'named', 'ods_enforcerd', 'ods_signerd', 'gssproxy']
 
 # The common ports for these services. This is used to wait for the
 # service to become available.
@@ -63,7 +63,6 @@ class KnownServices(collections.Mapping):
     instances as its own attributes on first access (or instance creation)
     and cache them.
     """
-
     def __init__(self, d):
         self.__d = d
 
@@ -93,9 +92,19 @@ class PlatformService(object):
 
     """
 
-    def __init__(self, service_name, api=ipalib.api):
+    def __init__(self, service_name, api=None):
+        # pylint: disable=ipa-forbidden-import
+        import ipalib  # FixMe: break import cycle
+        # pylint: enable=ipa-forbidden-import
         self.service_name = service_name
-        self.api = api
+        if api is not None:
+            self.api = api
+        else:
+            self.api = ipalib.api
+            warnings.warn(
+                "{s.__class__.__name__}('{s.service_name}', api=None) "
+                "is deprecated.".format(s=self),
+                RuntimeWarning, stacklevel=2)
 
     def start(self, instance_name="", capture_output=True, wait=True,
         update_service_list=True):
@@ -145,6 +154,10 @@ class PlatformService(object):
 
         return
 
+    def reload_or_restart(self, instance_name="", capture_output=True,
+                          wait=True):
+        return
+
     def restart(self, instance_name="", capture_output=True, wait=True):
         return
 
@@ -178,17 +191,15 @@ class PlatformService(object):
     def remove(self, instance_name=""):
         return
 
-    def get_config_dir(self, instance_name=""):
-        return
-
 
 class SystemdService(PlatformService):
     SYSTEMD_SRV_TARGET = "%s.target.wants"
 
-    def __init__(self, service_name, systemd_name, **kwargs):
-        super(SystemdService, self).__init__(service_name, **kwargs)
+    def __init__(self, service_name, systemd_name, api=None):
+        super(SystemdService, self).__init__(service_name, api=api)
         self.systemd_name = systemd_name
-        self.lib_path = os.path.join(paths.LIB_SYSTEMD_SYSTEMD_DIR, self.systemd_name)
+        self.lib_path = os.path.join(paths.LIB_SYSTEMD_SYSTEMD_DIR,
+                                     self.systemd_name)
         self.lib_path_exists = None
 
     def service_instance(self, instance_name, operation=None):
@@ -291,13 +302,24 @@ class SystemdService(PlatformService):
             instance_name,
             update_service_list=update_service_list)
 
-    def restart(self, instance_name="", capture_output=True, wait=True):
-        ipautil.run([paths.SYSTEMCTL, "restart",
-                     self.service_instance(instance_name)],
+    def _restart_base(self, instance_name, operation, capture_output=True,
+                      wait=False):
+
+        ipautil.run([paths.SYSTEMCTL, operation,
+                    self.service_instance(instance_name)],
                     skip_output=not capture_output)
 
         if wait and self.is_running(instance_name):
             self.wait_for_open_ports(self.service_instance(instance_name))
+
+    def reload_or_restart(self, instance_name="", capture_output=True,
+                          wait=True):
+        self._restart_base(instance_name, "reload-or-restart",
+                           capture_output, wait)
+
+    def restart(self, instance_name="", capture_output=True, wait=True):
+        self._restart_base(instance_name, "restart",
+                           capture_output, wait)
 
     def is_running(self, instance_name="", wait=True):
         instance = self.service_instance(instance_name, 'is-active')
@@ -402,7 +424,7 @@ class SystemdService(PlatformService):
                                    self.service_instance(instance_name))
 
             try:
-                if not ipautil.dir_exists(srv_tgt):
+                if not os.path.isdir(srv_tgt):
                     os.mkdir(srv_tgt)
                     os.chmod(srv_tgt, 0o755)
                 if os.path.exists(srv_lnk):
@@ -437,7 +459,7 @@ class SystemdService(PlatformService):
                                    self.service_instance(instance_name))
 
             try:
-                if ipautil.dir_exists(srv_tgt):
+                if os.path.isdir(srv_tgt):
                     if os.path.islink(srv_lnk):
                         os.unlink(srv_lnk)
                 ipautil.run([paths.SYSTEMCTL, "--system", "daemon-reload"])
@@ -483,9 +505,13 @@ class SystemdService(PlatformService):
 
 # Objects below are expected to be exported by platform module
 
-service = None
-knownservices = None
+def base_service_class_factory(name, api=None):
+    raise NotImplementedError
 
-# System may support more time&date services. FreeIPA supports ntpd only, other
-# services will be disabled during IPA installation
+
+service = base_service_class_factory
+knownservices = KnownServices({})
+
+# System may support more time&date services. FreeIPA supports chrony only.
+# Other services will be disabled during IPA installation
 timedate_services = ['ntpd', 'chronyd']

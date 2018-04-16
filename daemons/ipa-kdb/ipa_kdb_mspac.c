@@ -2117,9 +2117,11 @@ krb5_error_code ipadb_sign_authdata(krb5_context context,
     struct ipadb_context *ipactx;
     bool with_pac;
     bool with_pad;
+    bool make_ad = false;
     int result;
     krb5_db_entry *client_entry = NULL;
     krb5_boolean is_equal;
+    bool force_reinit_mspac = false;
 
 
     is_as_req = ((flags & KRB5_KDB_FLAG_CLIENT_REFERRALS_ONLY) != 0);
@@ -2165,32 +2167,43 @@ krb5_error_code ipadb_sign_authdata(krb5_context context,
                                   "currently not supported.");
     }
 
-    if (is_as_req && with_pac && (flags & KRB5_KDB_FLAG_INCLUDE_PAC)) {
+    /* we need to create a PAC if we are requested one and this is an AS REQ,
+     * or we are doing protocol transition (s4u2self) */
+    if ((is_as_req && (flags & KRB5_KDB_FLAG_INCLUDE_PAC)) ||
+        (flags & KRB5_KDB_FLAG_PROTOCOL_TRANSITION)) {
+        make_ad = true;
+    }
+
+    if (with_pac && make_ad) {
+
+        ipactx = ipadb_get_context(context);
+        if (!ipactx) {
+            kerr = ENOMEM;
+            goto done;
+        }
+
         /* Be aggressive here: special case for discovering range type
-         * immediately after establishing the trust by IPA framework */
+         * immediately after establishing the trust by IPA framework. For all
+         * other cases call ipadb_reinit_mspac() with force_reinit_mspac set
+         * to 'false' to make sure the information about trusted domains is
+         * updated on a regular basis for all worker processes. */
         if ((krb5_princ_size(context, ks_client_princ) == 2) &&
             (strncmp(krb5_princ_component(context, ks_client_princ, 0)->data, "HTTP",
-                     krb5_princ_component(context, ks_client_princ, 0)->length) == 0)) {
-            ipactx = ipadb_get_context(context);
-            if (!ipactx) {
-                kerr = ENOMEM;
-                goto done;
-            }
-            if (ulc_casecmp(krb5_princ_component(context, ks_client_princ, 1)->data,
-                            krb5_princ_component(context, ks_client_princ, 1)->length,
-                            ipactx->kdc_hostname, strlen(ipactx->kdc_hostname),
-                            NULL, NULL, &result) == 0) {
-                (void)ipadb_reinit_mspac(ipactx, true);
-            }
+                     krb5_princ_component(context, ks_client_princ, 0)->length) == 0) &&
+            (ulc_casecmp(krb5_princ_component(context, ks_client_princ, 1)->data,
+                         krb5_princ_component(context, ks_client_princ, 1)->length,
+                         ipactx->kdc_hostname, strlen(ipactx->kdc_hostname),
+                         NULL, NULL, &result) == 0)) {
+            force_reinit_mspac = true;
         }
+
+        (void)ipadb_reinit_mspac(ipactx, force_reinit_mspac);
 
         kerr = ipadb_get_pac(context, client, &pac);
         if (kerr != 0 && kerr != ENOENT) {
             goto done;
         }
-    }
-
-    if (!is_as_req && with_pac) {
+    } else if (with_pac && !is_as_req) {
         /* find the existing PAC, if present */
         kerr = krb5_find_authdata(context, tgt_auth_data, NULL,
                                   KRB5_AUTHDATA_WIN2K_PAC, &pac_auth_data);

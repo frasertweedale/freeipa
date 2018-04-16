@@ -17,26 +17,27 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
+from __future__ import print_function
 
 import os
 import os.path
-import pwd
-import optparse
+import tempfile
+import optparse  # pylint: disable=deprecated-module
 
-from ipaplatform.constants import constants
+from ipalib import x509
+from ipalib.install import certmonger
 from ipaplatform.paths import paths
-from ipapython import admintool, ipautil
-from ipapython.certdb import get_ca_nickname, NSSDatabase
+from ipapython import admintool
+from ipapython.certdb import NSSDatabase, get_ca_nickname
 from ipapython.dn import DN
 from ipalib import api, errors
-from ipalib.constants import CACERT
-from ipaserver.install import certs, dsinstance, installutils
+from ipaserver.install import certs, dsinstance, installutils, krbinstance
 
 
 class ServerCertInstall(admintool.AdminTool):
     command_name = 'ipa-server-certinstall'
 
-    usage = "%prog <-d|-w> [options] <file> ..."
+    usage = "%prog <-d|-w|-k> [options] <file> ..."
 
     description = "Install new SSL server certificates."
 
@@ -52,6 +53,10 @@ class ServerCertInstall(admintool.AdminTool):
             "-w", "--http",
             dest="http", action="store_true", default=False,
             help="install certificate for the http server")
+        parser.add_option(
+            "-k", "--kdc",
+            dest="kdc", action="store_true", default=False,
+            help="install PKINIT certificate for the KDC")
         parser.add_option(
             "--pin",
             dest="pin", metavar="PIN", sensitive=True,
@@ -74,8 +79,9 @@ class ServerCertInstall(admintool.AdminTool):
 
         installutils.check_server_configuration()
 
-        if not self.options.dirsrv and not self.options.http:
-            self.option_parser.error("you must specify dirsrv and/or http")
+        if not any((self.options.dirsrv, self.options.http, self.options.kdc)):
+            self.option_parser.error(
+                "you must specify dirsrv, http and/or kdc")
 
         if not self.args:
             self.option_parser.error("you must provide certificate filename")
@@ -99,20 +105,24 @@ class ServerCertInstall(admintool.AdminTool):
                     "Private key unlock password required")
 
     def run(self):
-        api.bootstrap(in_server=True)
+        api.bootstrap(in_server=True, confdir=paths.ETC_IPA)
         api.finalize()
-
-        conn = api.Backend.ldap2
-        conn.connect(bind_dn=DN(('cn', 'directory manager')),
-                     bind_pw=self.options.dirman_password)
+        api.Backend.ldap2.connect(bind_pw=self.options.dirman_password)
 
         if self.options.dirsrv:
             self.install_dirsrv_cert()
 
         if self.options.http:
-            self.install_http_cert()
+            self.replace_http_cert()
 
-        conn.disconnect()
+        if self.options.kdc:
+            self.replace_kdc_cert()
+
+        print(
+            "Please restart ipa services after installing certificate "
+            "(ipactl restart)")
+
+        api.Backend.ldap2.disconnect()
 
     def install_dirsrv_cert(self):
         serverid = installutils.realm_to_serverid(api.env.realm)
@@ -134,48 +144,125 @@ class ServerCertInstall(admintool.AdminTool):
         except errors.EmptyModlist:
             pass
 
-    def install_http_cert(self):
-        dirname = certs.NSS_DIR
+    def replace_http_cert(self):
+        """
+        Replace the current HTTP cert-key pair with another one
+        from a PKCS#12 file
+        """
+        # pass in `host_name` to perform
+        # `NSSDatabase.verify_server_cert_validity()``
+        cert, key, ca_cert = self.load_pkcs12(
+            ca_chain_fname=paths.IPA_CA_CRT,
+            host_name=api.env.host
+        )
 
-        old_cert = installutils.get_directive(paths.HTTPD_NSS_CONF,
-                                              'NSSNickname')
+        key_passwd_path = paths.HTTPD_PASSWD_FILE_FMT.format(host=api.env.host)
 
-        server_cert = self.import_cert(dirname, self.options.pin,
-                                       old_cert, 'HTTP/%s' % api.env.host,
-                                       'restart_httpd')
+        req_id = self.replace_key_cert_files(
+            cert, key,
+            cert_fname=paths.HTTPD_CERT_FILE,
+            key_fname=paths.HTTPD_KEY_FILE,
+            ca_cert=ca_cert,
+            passwd_fname=key_passwd_path,
+            cmgr_post_command='restart_httpd')
 
-        installutils.set_directive(paths.HTTPD_NSS_CONF,
-                                   'NSSNickname', server_cert)
+        if req_id is not None:
+            certmonger.add_principal(
+                req_id, 'HTTP/{host}'.format(host=api.env.host))
+            certmonger.add_subject(req_id, cert.subject)
 
-        # Fix the database permissions
-        os.chmod(os.path.join(dirname, 'cert8.db'), 0o640)
-        os.chmod(os.path.join(dirname, 'key3.db'), 0o640)
-        os.chmod(os.path.join(dirname, 'secmod.db'), 0o640)
+    def replace_kdc_cert(self):
+        # pass in `realm` to perform `NSSDatabase.verify_kdc_cert_validity()`
+        cert, key, ca_cert = self.load_pkcs12(
+            ca_chain_fname=paths.CA_BUNDLE_PEM, realm=api.env.realm)
 
-        pent = pwd.getpwnam(constants.HTTPD_USER)
-        os.chown(os.path.join(dirname, 'cert8.db'), 0, pent.pw_gid)
-        os.chown(os.path.join(dirname, 'key3.db'), 0, pent.pw_gid)
-        os.chown(os.path.join(dirname, 'secmod.db'), 0, pent.pw_gid)
+        self.replace_key_cert_files(
+            cert, key, paths.KDC_CERT, paths.KDC_KEY, ca_cert,
+            profile="KDCs_PKINIT_Certs"
+        )
+
+        krb = krbinstance.KrbInstance()
+        krb.init_info(
+            realm_name=api.env.realm,
+            host_name=api.env.host,
+        )
+        krb.pkinit_enable()
+
+    def load_pkcs12(self, ca_chain_fname=paths.IPA_CA_CRT, **kwargs):
+        # Note that the "installutils.load_pkcs12" is quite a complex function
+        # which performs some checking based on its kwargs:
+        #       host_name performs NSSDatabase.verify_server_cert_validity()
+        #       realm performs NSSDatabase.verify_kdc_cert_validity()
+        pkcs12_file, pin, ca_cert = installutils.load_pkcs12(
+            cert_files=self.args,
+            key_password=self.options.pin,
+            key_nickname=self.options.cert_name,
+            ca_cert_files=[ca_chain_fname],
+            **kwargs)
+
+        # Check that the ca_cert is known and trusted
+        with tempfile.NamedTemporaryFile() as temp:
+            certs.install_pem_from_p12(pkcs12_file.name, pin, temp.name)
+            cert = x509.load_certificate_from_file(temp.name)
+
+        with tempfile.NamedTemporaryFile("rb") as temp:
+            certs.install_key_from_p12(pkcs12_file.name, pin, temp.name)
+            key = x509.load_pem_private_key(
+                temp.read(), None, backend=x509.default_backend())
+
+        return cert, key, ca_cert
+
+    def replace_key_cert_files(
+        self, cert, key, cert_fname, key_fname, ca_cert, passwd_fname=None,
+        profile=None, cmgr_post_command=None
+    ):
+        try:
+            ca_enabled = api.Command.ca_is_enabled()['result']
+            if ca_enabled:
+                certmonger.stop_tracking(certfile=cert_fname)
+
+            pkey_passwd = None
+            if passwd_fname is not None:
+                with open(passwd_fname, 'rb') as f:
+                    pkey_passwd = f.read()
+
+            x509.write_certificate(cert, cert_fname)
+            x509.write_pem_private_key(key, key_fname, pkey_passwd)
+
+            if ca_enabled:
+                # Start tracking only if the cert was issued by IPA CA
+                # Retrieve IPA CA
+                cdb = certs.CertDB(api.env.realm, nssdir=paths.IPA_NSSDB_DIR)
+                ipa_ca_cert = cdb.get_cert_from_db(
+                    get_ca_nickname(api.env.realm))
+                # And compare with the CA which signed this certificate
+                if ca_cert == ipa_ca_cert:
+                    req_id = certmonger.start_tracking(
+                        (cert_fname, key_fname),
+                        pinfile=passwd_fname,
+                        storage='FILE',
+                        post_command=cmgr_post_command
+                    )
+                    return req_id
+        except RuntimeError as e:
+            raise admintool.ScriptError(str(e))
 
     def check_chain(self, pkcs12_filename, pkcs12_pin, nssdb):
         # create a temp nssdb
         with NSSDatabase() as tempnssdb:
-            db_password = ipautil.ipa_generate_password()
-            db_pwdfile = ipautil.write_tmp_file(db_password)
-            tempnssdb.create_db(db_pwdfile.name)
+            tempnssdb.create_db()
 
             # import the PKCS12 file, then delete all CA certificates
             # this leaves only the server certs in the temp db
-            tempnssdb.import_pkcs12(
-                pkcs12_filename, db_pwdfile.name, pkcs12_pin)
+            tempnssdb.import_pkcs12(pkcs12_filename, pkcs12_pin)
             for nickname, flags in tempnssdb.list_certs():
-                if 'u' not in flags:
+                if not flags.has_key:
                     while tempnssdb.has_nickname(nickname):
                         tempnssdb.delete_cert(nickname)
 
             # import all the CA certs from nssdb into the temp db
             for nickname, flags in nssdb.list_certs():
-                if 'u' not in flags:
+                if not flags.has_key:
                     cert = nssdb.get_cert_from_db(nickname)
                     tempnssdb.add_cert(cert, nickname, flags)
 
@@ -194,7 +281,7 @@ class ServerCertInstall(admintool.AdminTool):
             cert_files=self.args,
             key_password=pkcs12_passwd,
             key_nickname=self.options.cert_name,
-            ca_cert_files=[CACERT],
+            ca_cert_files=[paths.IPA_CA_CRT],
             host_name=api.env.host)
 
         dirname = os.path.normpath(dirname)
@@ -219,8 +306,7 @@ class ServerCertInstall(admintool.AdminTool):
                 # Start tracking only if the cert was issued by IPA CA
                 # Retrieve IPA CA
                 ipa_ca_cert = cdb.get_cert_from_db(
-                    get_ca_nickname(api.env.realm),
-                    pem=False)
+                    get_ca_nickname(api.env.realm))
                 # And compare with the CA which signed this certificate
                 if ca_cert == ipa_ca_cert:
                     cdb.track_server_cert(server_cert,

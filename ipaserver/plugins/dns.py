@@ -20,6 +20,8 @@
 
 from __future__ import absolute_import
 
+import logging
+
 import netaddr
 import time
 import re
@@ -259,7 +261,7 @@ EXAMPLES:
    queries, which cannot be answered from its local cache, to configured
    forwarders.
 """) + _("""
- Semantics of the --forwarder-policy option:
+ Semantics of the --forward-policy option:
    * none - disable forwarding for the given zone.
    * first - forward all queries to configured forwarders. If they fail,
    do resolution using DNS root servers.
@@ -310,6 +312,8 @@ server:
  Modify global DNS configuration and set a list of global forwarders:
    ipa dnsconfig-mod --forwarder=203.0.113.113
 """)
+
+logger = logging.getLogger(__name__)
 
 register = Registry()
 
@@ -535,7 +539,14 @@ def get_reverse_zone(ipaddr):
     """
     ip = netaddr.IPAddress(str(ipaddr))
     revdns = DNSName(unicode(ip.reverse_dns))
-    revzone = DNSName(dns.resolver.zone_for_name(revdns))
+    try:
+        revzone = DNSName(dns.resolver.zone_for_name(revdns))
+    except dns.resolver.NoNameservers:
+        raise errors.NotFound(
+            reason=_(
+                'All nameservers failed to answer the query '
+                'for DNS reverse zone %(revdns)s') % dict(revdns=revdns)
+        )
 
     try:
         api.Command['dnszone_show'](revzone)
@@ -567,7 +578,7 @@ def add_records_for_host_validation(option_name, host, domain, ip_addresses, che
     for ip_address in ip_addresses:
         try:
             ip = CheckedIPAddress(
-                ip_address, match_local=False, allow_multicast=True)
+                ip_address, allow_multicast=True)
         except Exception as e:
             raise errors.ValidationError(name=option_name, error=unicode(e))
 
@@ -599,7 +610,7 @@ def add_records_for_host(host, domain, ip_addresses, add_forward=True, add_rever
 
     for ip_address in ip_addresses:
         ip = CheckedIPAddress(
-            ip_address, match_local=False, allow_multicast=True)
+            ip_address, allow_multicast=True)
 
         if add_forward:
             add_forward_record(domain, host, unicode(ip))
@@ -1542,7 +1553,7 @@ def __dns_record_options_iter():
 _dns_record_options = tuple(__dns_record_options_iter())
 
 
-def check_ns_rec_resolvable(zone, name, log):
+def check_ns_rec_resolvable(zone, name):
     assert isinstance(zone, DNSName)
     assert isinstance(name, DNSName)
 
@@ -1620,8 +1631,9 @@ def _convert_to_idna(value):
         idna_val = encodings.idna.nameprep(idna_val)
         idna_val = re.split(r'(?<!\\)\.', idna_val)
         idna_val = u'%s%s%s' % (start_dot,
-                                u'.'.join(encodings.idna.ToASCII(x)
-                                          for x in idna_val),
+                                u'.'.join(
+                                    encodings.idna.ToASCII(x).decode('ascii')
+                                    for x in idna_val),
                                 end_dot)
         return idna_val
     except Exception:
@@ -2149,7 +2161,7 @@ class DNSZoneBase_add(LDAPCreate):
             try:
                 check_zone_overlap(keys[-1], raise_on_error=False)
             except ValueError as e:
-                raise errors.InvocationError(e.message)
+                raise errors.InvocationError(six.text_type(e))
 
         return dn
 
@@ -2159,7 +2171,7 @@ class DNSZoneBase_del(LDAPDelete):
     def pre_callback(self, ldap, dn, *nkeys, **options):
         assert isinstance(dn, DN)
         if not _check_DN_objectclass(ldap, dn, self.obj.object_class):
-            self.obj.handle_not_found(*nkeys)
+            raise self.obj.handle_not_found(*nkeys)
         return dn
 
     def post_callback(self, ldap, dn, *keys, **options):
@@ -2222,7 +2234,7 @@ class DNSZoneBase_show(LDAPRetrieve):
     def pre_callback(self, ldap, dn, attrs_list, *keys, **options):
         assert isinstance(dn, DN)
         if not _check_DN_objectclass(ldap, dn, self.obj.object_class):
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
         return dn
 
     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
@@ -2241,10 +2253,10 @@ class DNSZoneBase_disable(LDAPQuery):
         try:
             entry = ldap.get_entry(dn, ['idnszoneactive', 'objectclass'])
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         if not _check_entry_objectclass(entry, self.obj.object_class):
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         entry['idnszoneactive'] = ['FALSE']
 
@@ -2266,10 +2278,10 @@ class DNSZoneBase_enable(LDAPQuery):
         try:
             entry = ldap.get_entry(dn, ['idnszoneactive', 'objectclass'])
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         if not _check_entry_objectclass(entry, self.obj.object_class):
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         entry['idnszoneactive'] = ['TRUE']
 
@@ -2292,10 +2304,11 @@ class DNSZoneBase_add_permission(LDAPQuery):
         try:
             entry_attrs = ldap.get_entry(dn, ['objectclass'])
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
         else:
-            if not _check_entry_objectclass(entry_attrs, self.obj.object_class):
-                self.obj.handle_not_found(*keys)
+            if not _check_entry_objectclass(
+                    entry_attrs, self.obj.object_class):
+                raise self.obj.handle_not_found(*keys)
 
         permission_name = self.obj.permission_name(keys[-1])
 
@@ -2348,10 +2361,10 @@ class DNSZoneBase_remove_permission(LDAPQuery):
         try:
             entry = ldap.get_entry(dn, ['managedby', 'objectclass'])
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
         else:
             if not _check_entry_objectclass(entry, self.obj.object_class):
-                self.obj.handle_not_found(*keys)
+                raise self.obj.handle_not_found(*keys)
 
         entry['managedby'] = None
 
@@ -2710,7 +2723,7 @@ class dnszone(DNSZoneBase):
                 options['version'],
                 result,
                 messages.ServiceRestartRequired(
-                    service=services.service('named').systemd_name,
+                    service=services.service('named', api).systemd_name,
                     server=_('<all IPA DNS servers>'), )
                 )
 
@@ -2771,8 +2784,7 @@ class dnszone_add(DNSZoneBase_add):
 
             # verify if user specified server is resolvable
             if not options['skip_nameserver_check']:
-                check_ns_rec_resolvable(keys[0], entry_attrs['idnssoamname'],
-                                        self.log)
+                check_ns_rec_resolvable(keys[0], entry_attrs['idnssoamname'])
             # show warning about --name-server option
             context.show_warning_nameserver_option = True
         else:
@@ -2859,18 +2871,18 @@ class dnszone_mod(DNSZoneBase_mod):
     takes_options = DNSZoneBase_mod.takes_options + (
         Flag('force',
              label=_('Force'),
-             doc=_('Force nameserver change even if nameserver not in DNS'),
-        ),
+             doc=_('Force nameserver change even if nameserver not in DNS')),
     )
 
-    def pre_callback(self, ldap, dn, entry_attrs, attrs_list,  *keys, **options):
+    def pre_callback(self, ldap, dn, entry_attrs, attrs_list,
+                     *keys, **options):
         if not _check_DN_objectclass(ldap, dn, self.obj.object_class):
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
         if 'idnssoamname' in entry_attrs:
             nameserver = entry_attrs['idnssoamname']
             if nameserver:
                 if not nameserver.is_empty() and not options['force']:
-                    check_ns_rec_resolvable(keys[0], nameserver, self.log)
+                    check_ns_rec_resolvable(keys[0], nameserver)
                 context.show_warning_nameserver_option = True
             else:
                 # empty value, this option is required by ldap
@@ -2916,7 +2928,7 @@ class dnszone_find(DNSZoneBase_find):
         if options.get('forward_only', False):
             search_kw = {}
             search_kw['idnsname'] = [revzone.ToASCII() for revzone in
-                                     REVERSE_DNS_ZONES.keys()]
+                                     REVERSE_DNS_ZONES]
             rev_zone_filter = ldap.make_filter(search_kw,
                                                rules=ldap.MATCH_NONE,
                                                exact=False,
@@ -2999,7 +3011,7 @@ class dnsrecord(LDAPObject):
     possible_objectclasses = ['idnsTemplateObject']
     permission_filter_objectclasses = ['idnsrecord']
     default_attributes = ['idnsname'] + _record_attributes
-    rdn_is_primary_key = True
+    allow_rename = True
 
     label = _('DNS Resource Records')
     label_singular = _('DNS Resource Record')
@@ -3043,7 +3055,7 @@ class dnsrecord(LDAPObject):
         if options.get('force', False) or nsrecords is None:
             return
         for nsrecord in nsrecords:
-            check_ns_rec_resolvable(keys[0], DNSName(nsrecord), self.log)
+            check_ns_rec_resolvable(keys[0], DNSName(nsrecord))
 
     def _idnsname_pre_callback(self, ldap, dn, entry_attrs, *keys, **options):
         assert isinstance(dn, DN)
@@ -3090,7 +3102,7 @@ class dnsrecord(LDAPObject):
 
         if not zone_len:
             allowed_zones = ', '.join([unicode(revzone) for revzone in
-                                       REVERSE_DNS_ZONES.keys()])
+                                       REVERSE_DNS_ZONES])
             raise errors.ValidationError(name='ptrrecord',
                     error=unicode(_('Reverse zone for PTR record should be a sub-zone of one the following fully qualified domains: %s') % allowed_zones))
 
@@ -3098,7 +3110,7 @@ class dnsrecord(LDAPObject):
 
         # Classless zones (0/25.0.0.10.in-addr.arpa.) -> skip check
         # zone has to be checked without reverse domain suffix (in-addr.arpa.)
-        for sign in ('/', '-'):
+        for sign in (b'/', b'-'):
             for name in (zone, addr):
                 for label in name.labels:
                     if sign in label:
@@ -3142,10 +3154,11 @@ class dnsrecord(LDAPObject):
         try:
             entry = ldap.get_entry(dn, ['objectclass'])
         except errors.NotFound:
-            parent_object.handle_not_found(zone)
+            raise parent_object.handle_not_found(zone)
         else:
             # only master zones can contain records
-            if 'idnszone' not in [x.lower() for x in entry.get('objectclass', [])]:
+            if 'idnszone' not in [x.lower()
+                                  for x in entry.get('objectclass', [])]:
                 raise errors.ValidationError(
                     name='dnszoneidnsname',
                     error=_(u'only master zones can contain records')
@@ -3195,14 +3208,14 @@ class dnsrecord(LDAPObject):
 
     def get_record_entry_attrs(self, entry_attrs):
         entry_attrs = entry_attrs.copy()
-        for attr in entry_attrs.keys():
+        for attr in tuple(entry_attrs.keys()):
             if attr not in self.params or self.params[attr].primary_key:
                 del entry_attrs[attr]
         return entry_attrs
 
     def postprocess_record(self, record, **options):
         if options.get('structured', False):
-            for attr in record.keys():
+            for attr in tuple(record.keys()):
                 # attributes in LDAPEntry may not be normalized
                 attr = attr.lower()
                 try:
@@ -3349,8 +3362,8 @@ class dnsrecord(LDAPObject):
                 ldap_rrsets[rdtype] = ldap_rrset
 
             except dns.exception.SyntaxError as e:
-                self.log.error('DNS syntax error: %s %s %s: %s', dns_name,
-                               dns.rdatatype.to_text(rdtype), value, e)
+                logger.error('DNS syntax error: %s %s %s: %s', dns_name,
+                             dns.rdatatype.to_text(rdtype), value, e)
                 raise
 
         return ldap_rrsets
@@ -3375,14 +3388,14 @@ class dnsrecord(LDAPObject):
         warn_attempts = max_attempts // 2
         period = 1  # second
         attempt = 0
-        log_fn = self.log.debug
+        log_fn = logger.debug
         log_fn('querying DNS server: expecting answer {%s}', ldap_rrset)
         wait_template = 'waiting for DNS answer {%s}: got {%s} (attempt %s); '\
                         'waiting %s seconds before next try'
 
         while attempt < max_attempts:
             if attempt >= warn_attempts:
-                log_fn = self.log.warning
+                log_fn = logger.warning
             attempt += 1
             try:
                 dns_answer = resolver.query(dns_name, rdtype,
@@ -3420,8 +3433,7 @@ class dnsrecord(LDAPObject):
             time.sleep(period)
 
         # Maximum number of attempts was reached
-        else:
-            raise errors.DNSDataMismatch(expected=ldap_rrset, got=dns_rrset)
+        raise errors.DNSDataMismatch(expected=ldap_rrset, got=dns_rrset)
 
     def wait_for_modified_attrs(self, entry_attrs, dns_name, dns_domain):
         '''Wait until DNS resolver returns up-to-date answer for given entry
@@ -3452,14 +3464,14 @@ class dnsrecord(LDAPObject):
                 else:
                     e = errors.DNSDataMismatch(expected=ldap_rrset,
                                                got="NXDOMAIN")
-                    self.log.error(e)
+                    logger.error('%s', e)
                     raise e
 
             except dns.resolver.NoNameservers as e:
                 # Do not raise exception if we have got SERVFAILs.
                 # Maybe the user has created an invalid zone intentionally.
-                self.log.warning('waiting for DNS answer {%s}: got {%s}; '
-                              'ignoring', ldap_rrset, type(e))
+                logger.warning('waiting for DNS answer {%s}: got {%s}; '
+                               'ignoring', ldap_rrset, type(e))
                 continue
 
             except dns.exception.DNSException as e:
@@ -3468,7 +3480,7 @@ class dnsrecord(LDAPObject):
                 if err_str:
                     err_desc += ": %s" % err_str
                 e = errors.DNSDataMismatch(expected=ldap_rrset, got=err_desc)
-                self.log.error(e)
+                logger.error('%s', e)
                 raise e
 
     def wait_for_modified_entries(self, entries):
@@ -3530,7 +3542,7 @@ for param in _dns_records:
             'dns{}record'.format(param.rrtype.lower()),
             (Object,),
             dict(
-                takes_params=(param.parts or ()) + (param.extra or ()),
+                takes_params=param.parts or (),
             )
         )
     )
@@ -3747,7 +3759,7 @@ class dnsrecord_mod(LDAPUpdate):
         try:
             old_entry = ldap.get_entry(dn, _record_attributes)
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         if updated_attrs:
             for attr in updated_attrs:
@@ -3872,7 +3884,7 @@ class dnsrecord_del(LDAPUpdate):
         try:
             old_entry = ldap.get_entry(dn, _record_attributes)
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         for attr in entry_attrs.keys():
             if attr not in _record_attributes:
@@ -4183,16 +4195,6 @@ class dnsconfig(LDAPObject):
         if is_config_empty:
             result['summary'] = unicode(_('Global DNS configuration is empty'))
 
-    def show_servroles_attributes(self, entry_attrs, **options):
-        if options.get('raw', False):
-            return
-
-        backend = self.api.Backend.serverroles
-        entry_attrs.update(
-            backend.config_retrieve("DNS server")
-        )
-
-
 @register()
 class dnsconfig_mod(LDAPUpdate):
     __doc__ = _('Modify global DNS configuration.')
@@ -4220,7 +4222,7 @@ class dnsconfig_mod(LDAPUpdate):
             # forwarders were changed
             for forwarder in forwarders:
                 try:
-                    validate_dnssec_global_forwarder(forwarder, log=self.log)
+                    validate_dnssec_global_forwarder(forwarder)
                 except DNSSECSignatureMissingError as e:
                     messages.add_message(
                         options['version'],
@@ -4246,7 +4248,8 @@ class dnsconfig_mod(LDAPUpdate):
         return result
 
     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
-        self.obj.show_servroles_attributes(entry_attrs, **options)
+        self.api.Object.config.show_servroles_attributes(
+            entry_attrs, "DNS server", **options)
         return dn
 
 
@@ -4260,7 +4263,8 @@ class dnsconfig_show(LDAPRetrieve):
         return result
 
     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
-        self.obj.show_servroles_attributes(entry_attrs, **options)
+        self.api.Object.config.show_servroles_attributes(
+            entry_attrs, "DNS server", **options)
         return dn
 
 
@@ -4293,8 +4297,7 @@ class dnsforwardzone(DNSZoneBase):
 
         for forwarder in forwarders:
             try:
-                validate_dnssec_zone_forwarder_step1(forwarder, fwzone,
-                                                     log=self.log)
+                validate_dnssec_zone_forwarder_step1(forwarder, fwzone)
             except UnresolvableRecordError as e:
                 messages.add_message(
                     options['version'],
@@ -4327,8 +4330,8 @@ class dnsforwardzone(DNSZoneBase):
         if not ipa_dns_masters:
             # something very bad happened, DNS is installed, but no IPA DNS
             # servers available
-            self.log.error("No IPA DNS server can be found, but integrated DNS "
-                           "is installed")
+            logger.error("No IPA DNS server can be found, but integrated DNS "
+                         "is installed")
             return
 
         ipa_dns_ip = None
@@ -4342,7 +4345,7 @@ class dnsforwardzone(DNSZoneBase):
                 break
 
         if not ipa_dns_ip:
-            self.log.error("Cannot resolve %s hostname", ipa_dns_masters[0])
+            logger.error("Cannot resolve %s hostname", ipa_dns_masters[0])
             return
 
         # sleep a bit, adding new zone to BIND from LDAP may take a while
@@ -4351,8 +4354,7 @@ class dnsforwardzone(DNSZoneBase):
 
         # Test if IPA is able to receive replies from forwarders
         try:
-            validate_dnssec_zone_forwarder_step2(ipa_dns_ip, fwzone,
-                                                 log=self.log)
+            validate_dnssec_zone_forwarder_step2(ipa_dns_ip, fwzone)
         except DNSSECValidationError as e:
             messages.add_message(
                 options['version'],
@@ -4413,10 +4415,10 @@ class dnsforwardzone_mod(DNSZoneBase_mod):
         try:
             entry = ldap.get_entry(dn)
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         if not _check_entry_objectclass(entry, self.obj.object_class):
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         policy = self.obj.default_forward_policy
         forwarders = []

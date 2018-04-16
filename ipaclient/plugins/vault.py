@@ -20,30 +20,35 @@
 from __future__ import print_function
 
 import base64
-import getpass
+import errno
 import io
 import json
+import logging
 import os
-import sys
+import tempfile
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.serialization import load_pem_public_key,\
-    load_pem_private_key
-
-import nss.nss as nss
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.padding import PKCS7
+from cryptography.hazmat.primitives.serialization import (
+    load_pem_public_key, load_pem_private_key)
 
 from ipaclient.frontend import MethodOverride
+from ipalib import x509
+from ipalib.constants import USER_CACHE_PATH
 from ipalib.frontend import Local, Method, Object
 from ipalib.util import classproperty
 from ipalib import api, errors
 from ipalib import Bytes, Flag, Str
 from ipalib.plugable import Registry
 from ipalib import _
-from ipaplatform.paths import paths
+from ipapython.dnsutil import DNSName
+
+logger = logging.getLogger(__name__)
 
 
 def validated_read(argname, filename, mode='r', encoding=None):
@@ -77,29 +82,6 @@ register = Registry()
 MAX_VAULT_DATA_SIZE = 2**20  # = 1 MB
 
 
-def get_new_password():
-    """
-    Gets new password from user and verify it.
-    """
-    while True:
-        password = getpass.getpass('New password: ').decode(
-            sys.stdin.encoding)
-        password2 = getpass.getpass('Verify password: ').decode(
-            sys.stdin.encoding)
-
-        if password == password2:
-            return password
-
-        print('  ** Passwords do not match! **')
-
-
-def get_existing_password():
-    """
-    Gets existing password from user.
-    """
-    return getpass.getpass('Password: ').decode(sys.stdin.encoding)
-
-
 def generate_symmetric_key(password, salt):
     """
     Generates symmetric key from password and salt.
@@ -119,11 +101,15 @@ def encrypt(data, symmetric_key=None, public_key=None):
     """
     Encrypts data with symmetric key or public key.
     """
-    if symmetric_key:
+    if symmetric_key is not None:
+        if public_key is not None:
+            raise ValueError(
+                "Either a symmetric or a public key is required, not both."
+            )
         fernet = Fernet(symmetric_key)
         return fernet.encrypt(data)
 
-    elif public_key:
+    elif public_key is not None:
         public_key_obj = load_pem_public_key(
             data=public_key,
             backend=default_backend()
@@ -136,13 +122,19 @@ def encrypt(data, symmetric_key=None, public_key=None):
                 label=None
             )
         )
+    else:
+        raise ValueError("Either a symmetric or a public key is required.")
 
 
 def decrypt(data, symmetric_key=None, private_key=None):
     """
     Decrypts data with symmetric key or public key.
     """
-    if symmetric_key:
+    if symmetric_key is not None:
+        if private_key is not None:
+            raise ValueError(
+                "Either a symmetric or a private key is required, not both."
+            )
         try:
             fernet = Fernet(symmetric_key)
             return fernet.decrypt(data)
@@ -150,7 +142,7 @@ def decrypt(data, symmetric_key=None, private_key=None):
             raise errors.AuthenticationError(
                 message=_('Invalid credentials'))
 
-    elif private_key:
+    elif private_key is not None:
         try:
             private_key_obj = load_pem_private_key(
                 data=private_key,
@@ -168,6 +160,8 @@ def decrypt(data, symmetric_key=None, private_key=None):
         except ValueError:
             raise errors.AuthenticationError(
                 message=_('Invalid credentials'))
+    else:
+        raise ValueError("Either a symmetric or a private key is required.")
 
 
 @register(no_fail=True)
@@ -209,6 +203,10 @@ class vault_add(Local):
                 _fake_vault_add_internal)
 
     NO_CLI = classproperty(__NO_CLI_getter)
+
+    @property
+    def api_version(self):
+        return self.api.Command.vault_add_internal.api_version
 
     def get_args(self):
         for arg in self.api.Command.vault_add_internal.args():
@@ -293,7 +291,8 @@ class vault_add(Local):
                 password = password.rstrip('\n')
 
             else:
-                password = get_new_password()
+                password = self.api.Backend.textui.prompt_password(
+                    'New password')
 
             # generate vault salt
             options['ipavaultsalt'] = os.urandom(16)
@@ -415,6 +414,10 @@ class vault_mod(Local):
                 _fake_vault_mod_internal)
 
     NO_CLI = classproperty(__NO_CLI_getter)
+
+    @property
+    def api_version(self):
+        return self.api.Command.vault_mod_internal.api_version
 
     def get_args(self):
         for arg in self.api.Command.vault_mod_internal.args():
@@ -542,6 +545,84 @@ class vault_mod(Local):
         return response
 
 
+class _TransportCertCache(object):
+    def __init__(self):
+        self._dirname = os.path.join(
+                USER_CACHE_PATH, 'ipa', 'kra-transport-certs'
+        )
+
+    def _get_filename(self, domain):
+        basename = DNSName(domain).ToASCII() + '.pem'
+        return os.path.join(self._dirname, basename)
+
+    def load_cert(self, domain):
+        """Load cert from cache
+
+        :param domain: IPA domain
+        :return: cryptography.x509.Certificate or None
+        """
+        filename = self._get_filename(domain)
+        try:
+            try:
+                return x509.load_certificate_from_file(filename)
+            except EnvironmentError as e:
+                if e.errno != errno.ENOENT:
+                    raise
+        except Exception:
+            logger.warning("Failed to load %s", filename, exc_info=True)
+
+    def store_cert(self, domain, transport_cert):
+        """Store a new cert or override existing cert
+
+        :param domain: IPA domain
+        :param transport_cert: cryptography.x509.Certificate
+        :return: True if cert was stored successfully
+        """
+        filename = self._get_filename(domain)
+        pem = transport_cert.public_bytes(serialization.Encoding.PEM)
+        try:
+            try:
+                os.makedirs(self._dirname)
+            except EnvironmentError as e:
+                if e.errno != errno.EEXIST:
+                    raise
+            with tempfile.NamedTemporaryFile(dir=self._dirname, delete=False,
+                                             mode='wb') as f:
+                try:
+                    f.write(pem)
+                    f.flush()
+                    os.fsync(f.fileno())
+                    f.close()
+                    os.rename(f.name, filename)
+                except Exception:
+                    os.unlink(f.name)
+                    raise
+        except Exception:
+            logger.warning("Failed to save %s", filename, exc_info=True)
+            return False
+        else:
+            return True
+
+    def remove_cert(self, domain):
+        """Remove a cert from cache, ignores errors
+
+        :param domain: IPA domain
+        :return: True if cert was found and removed
+        """
+        filename = self._get_filename(domain)
+        try:
+            os.unlink(filename)
+        except EnvironmentError as e:
+            if e.errno != errno.ENOENT:
+                logger.warning("Failed to remove %s", filename, exc_info=True)
+            return False
+        else:
+            return True
+
+
+_transport_cert_cache = _TransportCertCache()
+
+
 @register(override=True, no_fail=True)
 class vaultconfig_show(MethodOverride):
     def forward(self, *args, **options):
@@ -554,11 +635,71 @@ class vaultconfig_show(MethodOverride):
 
         response = super(vaultconfig_show, self).forward(*args, **options)
 
+        # cache transport certificate
+        transport_cert = x509.load_der_x509_certificate(
+                response['result']['transport_cert'])
+
+        _transport_cert_cache.store_cert(
+            self.api.env.domain, transport_cert
+        )
+
         if file:
-            with open(file, 'w') as f:
+            with open(file, 'wb') as f:
                 f.write(response['result']['transport_cert'])
 
         return response
+
+
+class ModVaultData(Local):
+    def _generate_session_key(self):
+        key_length = max(algorithms.TripleDES.key_sizes)
+        algo = algorithms.TripleDES(os.urandom(key_length // 8))
+        return algo
+
+    def _do_internal(self, algo, transport_cert, raise_unexpected,
+                     *args, **options):
+        public_key = transport_cert.public_key()
+
+        # wrap session key with transport certificate
+        wrapped_session_key = public_key.encrypt(
+            algo.key,
+            padding.PKCS1v15()
+        )
+        options['session_key'] = wrapped_session_key
+
+        name = self.name + '_internal'
+        try:
+            return self.api.Command[name](*args, **options)
+        except errors.NotFound:
+            raise
+        except (errors.InternalError,
+                errors.ExecutionError,
+                errors.GenericError):
+            _transport_cert_cache.remove_cert(self.api.env.domain)
+            if raise_unexpected:
+                raise
+
+    def internal(self, algo, *args, **options):
+        """
+        Calls the internal counterpart of the command.
+        """
+        domain = self.api.env.domain
+
+        # try call with cached transport certificate
+        transport_cert = _transport_cert_cache.load_cert(domain)
+        if transport_cert is not None:
+            result = self._do_internal(algo, transport_cert, False,
+                                       *args, **options)
+            if result is not None:
+                return result
+
+        # retrieve transport certificate (cached by vaultconfig_show)
+        response = self.api.Command.vaultconfig_show()
+        transport_cert = x509.load_der_x509_certificate(
+            response['result']['transport_cert'])
+        # call with the retrieved transport certificate
+        return self._do_internal(algo, transport_cert, True,
+                                 *args, **options)
 
 
 @register(no_fail=True)
@@ -568,7 +709,7 @@ class _fake_vault_archive_internal(Method):
 
 
 @register()
-class vault_archive(Local):
+class vault_archive(ModVaultData):
     __doc__ = _('Archive data into a vault.')
 
     takes_options = (
@@ -603,6 +744,10 @@ class vault_archive(Local):
 
     NO_CLI = classproperty(__NO_CLI_getter)
 
+    @property
+    def api_version(self):
+        return self.api.Command.vault_archive_internal.api_version
+
     def get_args(self):
         for arg in self.api.Command.vault_archive_internal.args():
             yield arg
@@ -627,6 +772,26 @@ class vault_archive(Local):
 
     def _iter_output(self):
         return self.api.Command.vault_archive_internal.output()
+
+    def _wrap_data(self, algo, json_vault_data):
+        """Encrypt data with wrapped session key and transport cert
+
+        :param bytes algo: wrapping algorithm instance
+        :param bytes json_vault_data: dumped vault data
+        :return:
+        """
+        nonce = os.urandom(algo.block_size // 8)
+
+        # wrap vault_data with session key
+        padder = PKCS7(algo.block_size).padder()
+        padded_data = padder.update(json_vault_data)
+        padded_data += padder.finalize()
+
+        cipher = Cipher(algo, modes.CBC(nonce), backend=default_backend())
+        encryptor = cipher.encryptor()
+        wrapped_vault_data = encryptor.update(padded_data) + encryptor.finalize()
+
+        return nonce, wrapped_vault_data
 
     def forward(self, *args, **options):
         data = options.get('data')
@@ -674,7 +839,7 @@ class vault_archive(Local):
             data = validated_read('in', input_file, mode='rb')
 
         else:
-            data = ''
+            data = b''
 
         if self.api.env.in_server:
             backend = self.api.Backend.ldap2
@@ -710,9 +875,11 @@ class vault_archive(Local):
 
             else:
                 if override_password:
-                    password = get_new_password()
+                    password = self.api.Backend.textui.prompt_password(
+                        'New password')
                 else:
-                    password = get_existing_password()
+                    password = self.api.Backend.textui.prompt_password(
+                        'Password', confirm=False)
 
             if not override_password:
                 # verify password by retrieving existing data
@@ -735,7 +902,7 @@ class vault_archive(Local):
 
         elif vault_type == u'asymmetric':
 
-            public_key = vault['ipavaultpublickey'][0].encode('utf-8')
+            public_key = vault['ipavaultpublickey'][0]
 
             # generate encryption key
             encryption_key = base64.b64encode(os.urandom(32))
@@ -751,59 +918,25 @@ class vault_archive(Local):
                 name='vault_type',
                 error=_('Invalid vault type'))
 
-        # initialize NSS database
-        current_dbdir = paths.IPA_NSSDB_DIR
-        nss.nss_init(current_dbdir)
 
-        # retrieve transport certificate
-        config = self.api.Command.vaultconfig_show()['result']
-        transport_cert_der = config['transport_cert']
-        nss_transport_cert = nss.Certificate(transport_cert_der)
-
-        # generate session key
-        mechanism = nss.CKM_DES3_CBC_PAD
-        slot = nss.get_best_slot(mechanism)
-        key_length = slot.get_best_key_length(mechanism)
-        session_key = slot.key_gen(mechanism, None, key_length)
-
-        # wrap session key with transport certificate
-        # pylint: disable=no-member
-        public_key = nss_transport_cert.subject_public_key_info.public_key
-        # pylint: enable=no-member
-        wrapped_session_key = nss.pub_wrap_sym_key(mechanism,
-                                                   public_key,
-                                                   session_key)
-
-        options['session_key'] = wrapped_session_key.data
-
-        nonce_length = nss.get_iv_length(mechanism)
-        nonce = nss.generate_random(nonce_length)
-        options['nonce'] = nonce
-
-        vault_data = {}
-        vault_data[u'data'] = base64.b64encode(data).decode('utf-8')
-
+        vault_data = {
+            'data': base64.b64encode(data).decode('utf-8')
+        }
         if encrypted_key:
             vault_data[u'encrypted_key'] = base64.b64encode(encrypted_key)\
                 .decode('utf-8')
 
-        json_vault_data = json.dumps(vault_data)
+        json_vault_data = json.dumps(vault_data).encode('utf-8')
 
-        # wrap vault_data with session key
-        iv_si = nss.SecItem(nonce)
-        iv_param = nss.param_from_iv(mechanism, iv_si)
-
-        encoding_ctx = nss.create_context_by_sym_key(mechanism,
-                                                     nss.CKA_ENCRYPT,
-                                                     session_key,
-                                                     iv_param)
-
-        wrapped_vault_data = encoding_ctx.cipher_op(json_vault_data)\
-            + encoding_ctx.digest_final()
-
-        options['vault_data'] = wrapped_vault_data
-
-        return self.api.Command.vault_archive_internal(*args, **options)
+        # generate session key
+        algo = self._generate_session_key()
+        # wrap vault data
+        nonce, wrapped_vault_data = self._wrap_data(algo, json_vault_data)
+        options.update(
+            nonce=nonce,
+            vault_data=wrapped_vault_data
+        )
+        return self.internal(algo, *args, **options)
 
 
 @register(no_fail=True)
@@ -813,7 +946,7 @@ class _fake_vault_retrieve_internal(Method):
 
 
 @register()
-class vault_retrieve(Local):
+class vault_retrieve(ModVaultData):
     __doc__ = _('Retrieve a data from a vault.')
 
     takes_options = (
@@ -857,6 +990,10 @@ class vault_retrieve(Local):
 
     NO_CLI = classproperty(__NO_CLI_getter)
 
+    @property
+    def api_version(self):
+        return self.api.Command.vault_retrieve_internal.api_version
+
     def get_args(self):
         for arg in self.api.Command.vault_retrieve_internal.args():
             yield arg
@@ -878,6 +1015,19 @@ class vault_retrieve(Local):
 
     def _iter_output(self):
         return self.api.Command.vault_retrieve_internal.output()
+
+    def _unwrap_response(self, algo, nonce, vault_data):
+        cipher = Cipher(algo, modes.CBC(nonce), backend=default_backend())
+        # decrypt
+        decryptor = cipher.decryptor()
+        padded_data = decryptor.update(vault_data)
+        padded_data += decryptor.finalize()
+        # remove padding
+        unpadder = PKCS7(algo.block_size).unpadder()
+        json_vault_data = unpadder.update(padded_data)
+        json_vault_data += unpadder.finalize()
+        # load JSON
+        return json.loads(json_vault_data.decode('utf-8'))
 
     def forward(self, *args, **options):
         output_file = options.get('out')
@@ -908,57 +1058,21 @@ class vault_retrieve(Local):
 
         # retrieve vault info
         vault = self.api.Command.vault_show(*args, **options)['result']
-
         vault_type = vault['ipavaulttype'][0]
 
-        # initialize NSS database
-        current_dbdir = paths.IPA_NSSDB_DIR
-        nss.nss_init(current_dbdir)
-
-        # retrieve transport certificate
-        config = self.api.Command.vaultconfig_show()['result']
-        transport_cert_der = config['transport_cert']
-        nss_transport_cert = nss.Certificate(transport_cert_der)
-
         # generate session key
-        mechanism = nss.CKM_DES3_CBC_PAD
-        slot = nss.get_best_slot(mechanism)
-        key_length = slot.get_best_key_length(mechanism)
-        session_key = slot.key_gen(mechanism, None, key_length)
-
-        # wrap session key with transport certificate
-        # pylint: disable=no-member
-        public_key = nss_transport_cert.subject_public_key_info.public_key
-        # pylint: enable=no-member
-        wrapped_session_key = nss.pub_wrap_sym_key(mechanism,
-                                                   public_key,
-                                                   session_key)
-
+        algo = self._generate_session_key()
         # send retrieval request to server
-        options['session_key'] = wrapped_session_key.data
-
-        response = self.api.Command.vault_retrieve_internal(*args, **options)
-
-        result = response['result']
-        nonce = result['nonce']
-
+        response = self.internal(algo, *args, **options)
         # unwrap data with session key
-        wrapped_vault_data = result['vault_data']
+        vault_data = self._unwrap_response(
+            algo,
+            response['result']['nonce'],
+            response['result']['vault_data']
+        )
+        del algo
 
-        iv_si = nss.SecItem(nonce)
-        iv_param = nss.param_from_iv(mechanism, iv_si)
-
-        decoding_ctx = nss.create_context_by_sym_key(mechanism,
-                                                     nss.CKA_DECRYPT,
-                                                     session_key,
-                                                     iv_param)
-
-        json_vault_data = decoding_ctx.cipher_op(wrapped_vault_data)\
-            + decoding_ctx.digest_final()
-
-        vault_data = json.loads(json_vault_data)
         data = base64.b64decode(vault_data[u'data'].encode('utf-8'))
-
         encrypted_key = None
 
         if 'encrypted_key' in vault_data:
@@ -988,7 +1102,8 @@ class vault_retrieve(Local):
                 password = password.rstrip('\n')
 
             else:
-                password = get_existing_password()
+                password = self.api.Backend.textui.prompt_password(
+                    'Password', confirm=False)
 
             # generate encryption key from password
             encryption_key = generate_symmetric_key(password, salt)
@@ -1028,7 +1143,7 @@ class vault_retrieve(Local):
                 error=_('Invalid vault type'))
 
         if output_file:
-            with open(output_file, 'w') as f:
+            with open(output_file, 'wb') as f:
                 f.write(data)
 
         else:

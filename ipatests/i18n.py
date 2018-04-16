@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 # Authors:
 #   John Dennis <jdennis@redhat.com>
 #
@@ -23,7 +23,7 @@ from __future__ import print_function
 
 # WARNING: Do not import ipa modules, this is also used as a
 # stand-alone script (invoked from po Makefile).
-import optparse
+import optparse  # pylint: disable=deprecated-module
 import sys
 import gettext
 import re
@@ -31,6 +31,8 @@ import os
 import traceback
 import polib
 from collections import namedtuple
+
+import six
 
 '''
 We test our translations by taking the original untranslated string
@@ -64,14 +66,19 @@ page_width = 80
 section_seperator = '=' * page_width
 entry_seperator = '-' * page_width
 
-#-------------------------------------------------------------------------------
+# Python 3: Enforce ASCII mode so \w matches only ASCII chars. This avoids
+# false positives in Chinese translation.
+ASCII = getattr(re, "ASCII", 0)
+
+# --------------------------------------------------------------------------
 # For efficiency compile these regexps just once
-_substitution_regexps = [re.compile(r'%[srduoxf]\b'),        # e.g. %s
-                         re.compile(r'%\(\w+\)[srduoxf]\b'), # e.g. %(foo)s
-                         re.compile(r'\$\w+'),               # e.g. $foo
-                         re.compile(r'\${\w+}'),             # e.g. ${foo}
-                         re.compile(r'\$\(\w+\)')            # e.g. $(foo)
-                         ]
+_substitution_regexps = [
+    re.compile(r'%[srduoxf]'),                 # e.g. %s
+    re.compile(r'%\(\w+\)[srduoxf]', ASCII),   # e.g. %(foo)s
+    re.compile(r'\$\w+', ASCII),               # e.g. $foo
+    re.compile(r'\${\w+}', ASCII),             # e.g. ${foo}
+    re.compile(r'\$\(\w+\)', ASCII)            # e.g. $(foo)
+]
 # Python style substitution, e.g. %(foo)s
 # where foo is the key and s is the format char
 # group 1: whitespace between % and (
@@ -79,11 +86,15 @@ _substitution_regexps = [re.compile(r'%[srduoxf]\b'),        # e.g. %s
 # group 3: whitespace between key and )
 # group 4: whitespace between ) and format char
 # group 5: format char
-_python_substitution_regexp = re.compile(r'%(\s*)\((\s*)\w+(\s*)\)(\s*)([srduoxf]\b)?')
+_python_substitution_regexp = re.compile(
+    r'%(\s*)\((\s*)\w+(\s*)\)(\s*)([srduoxf])?', ASCII
+)
 
 # Shell style substitution, e.g. $foo $(foo) ${foo}
 # where foo is the variable
-_shell_substitution_regexp = re.compile(r'\$(\s*)([({]?)(\s*)\w+(\s*)([)}]?)')
+_shell_substitution_regexp = re.compile(
+    r'\$(\s*)([({]?)(\s*)\w+(\s*)([)}]?)', ASCII
+)
 # group 1: whitespace between $ and delimiter
 # group 2: begining delimiter
 # group 3: whitespace between beginning delmiter and variable
@@ -546,7 +557,10 @@ def create_po(pot_file, po_file, mo_file):
     for k in po.metadata:
         if k.lower() == 'plural-forms':
             po.metadata[k] = 'nplurals=2; plural=(n != 1)'
-            break
+        # the auto-generated PO file should have charset set to UTF-8
+        # because we are using UTF-8 prefix and suffix below
+        elif k.lower() == 'content-type':
+            po.metadata[k] = 'Content-Type: text/plain; charset=UTF-8'
 
 
     # Iterate over all msgid's and form a msgstr by prepending
@@ -597,8 +611,11 @@ def test_translations(po_file, lang, domain, locale_dir):
     # use a dummy language not associated with any real language,
     # but the setlocale function demands the locale be a valid
     # known locale, Zambia Xhosa is a reasonable choice :)
+    locale_envs = ('LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG')
 
-    os.environ['LANG'] = lang
+    os.environ.update(
+        {locale_env: lang for locale_env in locale_envs}
+    )
 
     # Create a gettext translation object specifying our domain as
     # 'ipa' and the locale_dir as 'test_locale' (i.e. where to
@@ -607,8 +624,14 @@ def test_translations(po_file, lang, domain, locale_dir):
 
     t = gettext.translation(domain, locale_dir)
 
-    get_msgstr = t.ugettext
-    get_msgstr_plural = t.ungettext
+    if six.PY2:
+        # pylint: disable=no-member
+        get_msgstr = t.ugettext
+        get_msgstr_plural = t.ungettext
+        # pylint: enable=no-member
+    else:
+        get_msgstr = t.gettext
+        get_msgstr_plural = t.ngettext
 
     return po_file_iterate(po_file, get_msgstr, get_msgstr_plural)
 

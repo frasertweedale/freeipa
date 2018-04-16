@@ -4,7 +4,7 @@ AUTOMAKE_OPTIONS = 1.7
 
 NULL=
 
-man1_MANS = 				\
+dist_man1_MANS = 			\
 	ipa-replica-conncheck.1		\
 	ipa-replica-install.1		\
 	ipa-replica-manage.1		\
@@ -27,17 +27,9 @@ man1_MANS = 				\
 	ipa-otptoken-import.1		\
 	ipa-cacert-manage.1		\
 	ipa-winsync-migrate.1		\
+	ipa-pkinit-manage.1		\
         $(NULL)
 
-man8_MANS =				\
+dist_man8_MANS =			\
 	ipactl.8			\
-	ipa-upgradeconfig.8		\
-        $(NULL)
-
-install-data-hook:
-	@for i in $(man1_MANS) ; do gzip -f $(DESTDIR)$(man1dir)/$$i ; done
-	@for i in $(man8_MANS) ; do gzip -f $(DESTDIR)$(man8dir)/$$i ; done
-
-MAINTAINERCLEANFILES =          \
-        Makefile.in             \
         $(NULL)

@@ -7,6 +7,7 @@ import six
 from ipalib import api, errors
 
 from ipatests.test_xmlrpc.tracker.base import Tracker
+from ipatests.test_xmlrpc.tracker.kerberos_aliases import KerberosAliasMixin
 from ipatests.test_xmlrpc import objectclasses
 from ipatests.test_xmlrpc.xmlrpc_test import (
     Fuzzy, fuzzy_string, fuzzy_dergeneralizedtime, raises_exact)
@@ -24,11 +25,11 @@ sshpubkey = (u'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDGAX3xAeLeaJggwTqMjxNwa6X'
              'cSIn3JrXynlvui4MixvrtX6zx+O/bBo68o8/eZD26QrahVbA09fivrn/4h3TM01'
              '9Eu/c2jOdckfU3cHUV/3Tno5d6JicibyaoDDK7S/yjdn5jhaz8MSEayQvFkZkiF'
              '0L public key test')
-sshpubkeyfp = (u'13:67:6B:BF:4E:A2:05:8E:AE:25:8B:A1:31:DE:6F:1B '
+sshpubkeyfp = (u'SHA256:cStA9o5TRSARbeketEOooMUMSWRSsArIAXloBZ4vNsE '
                'public key test (ssh-rsa)')
 
 
-class StageUserTracker(Tracker):
+class StageUserTracker(KerberosAliasMixin, Tracker):
     """ Tracker class for staged user LDAP object
 
         Implements helper functions for host plugin.
@@ -61,23 +62,45 @@ class StageUserTracker(Tracker):
     find_keys = retrieve_keys - {u'has_keytab', u'has_password'}
     find_all_keys = retrieve_all_keys - {u'has_keytab', u'has_password'}
 
-    def __init__(self, name, givenname, sn, **kwargs):
+    def __init__(self, name=None, givenname=None, sn=None, **kwargs):
+        """ Check for non-empty unicode string for the required attributes
+        in the init method """
+
+        if not (isinstance(givenname, six.string_types) and givenname):
+            raise ValueError(
+                "Invalid first name provided: {!r}".format(givenname)
+                )
+        if not (isinstance(sn, six.string_types) and sn):
+            raise ValueError("Invalid second name provided: {!r}".format(sn))
+
         super(StageUserTracker, self).__init__(default_version=None)
-        self.uid = name
-        self.givenname = givenname
-        self.sn = sn
+        self.uid = unicode(name)
+        self.givenname = unicode(givenname)
+        self.sn = unicode(sn)
         self.dn = DN(
             ('uid', self.uid), api.env.container_stageuser, api.env.basedn)
 
         self.kwargs = kwargs
 
     def make_create_command(self, options=None):
-        """ Make function that creates a staged user using stageuser-add """
+        """ Make function that creates a staged user using stageuser-add
+            with all set of attributes and with minimal values,
+            where uid is not specified  """
+
         if options is not None:
             self.kwargs = options
-        return self.make_command('stageuser_add', self.uid,
-                                 givenname=self.givenname,
-                                 sn=self.sn, **self.kwargs)
+        if self.uid is not None:
+            return self.make_command(
+                'stageuser_add', self.uid,
+                givenname=self.givenname,
+                sn=self.sn, **self.kwargs
+                )
+        else:
+            return self.make_command(
+                'stageuser_add',
+                givenname=self.givenname,
+                sn=self.sn, **self.kwargs
+                )
 
     def make_delete_command(self):
         """ Make function that deletes a staged user using stageuser-del """
@@ -270,3 +293,9 @@ class StageUserTracker(Tracker):
         self.dn = DN(
             ('uid', self.uid), api.env.container_stageuser, api.env.basedn)
         self.attrs[u'dn'] = self.dn
+
+    def _make_add_alias_cmd(self):
+        return self.make_command('stageuser_add_principal', self.name)
+
+    def _make_remove_alias_cmd(self):
+        return self.make_command('stageuser_remove_principal', self.name)

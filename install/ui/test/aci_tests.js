@@ -39,8 +39,8 @@ var target_facet;
 var entity = IPA.entity({ name: 'bogus', redirect_facet: 'details' });
 var group_entity = IPA.entity({ name: 'group' });
 
-module('aci', {
-        setup: function() {
+QUnit.module('aci', {
+        beforeEach: function(assert) {
 
             fields.register();
             widgets.register();
@@ -52,7 +52,7 @@ module('aci', {
             IPA.init({
                 url: 'data',
                 on_error: function(xhr, text_status, error_thrown) {
-                    ok(false, "ipa_init() failed: "+error_thrown);
+                    assert.ok(false, "ipa_init() failed: "+error_thrown);
                 }
             });
 
@@ -130,13 +130,13 @@ module('aci', {
             target_facet.create();
             target_widget = target_facet.widgets.get_widget('target');
         },
-        teardown: function() {
+        afterEach: function() {
             target_container.remove();
         }}
 );
 
 
-test("aci.attributes_widget", function() {
+QUnit.test("aci.attributes_widget", function(assert) {
 
     var aciattrs = md.source.objects.user.aciattrs;
 
@@ -152,17 +152,19 @@ test("aci.attributes_widget", function() {
 
     widget.create(container);
 
-    var table = $('table', container);
+    var list = $('ul', container);
 
-    ok(
-        table,
-        'Widget contains table');
+    assert.ok(
+        list,
+        'Widget contains list');
 
-    widget.update({});
-    var tr = $('tbody tr', table);
+    widget.update([]);
 
-    same(
-        tr.length, aciattrs.length,
+    list = $('ul', container); // reload the DOM node which contains options
+    var li = $('li', list);
+
+    assert.deepEqual(
+        li.length, aciattrs.length,
         'Widget contains all user ACI attributes');
 
     var record = {
@@ -173,24 +175,25 @@ test("aci.attributes_widget", function() {
         ]
     };
 
-    same(
+    assert.deepEqual(
         widget.save(), [],
-        'Widget has no initial values');
+        'Widget has no initialy checked values');
 
     widget.update(record.attrs);
 
-    tr = $('tbody tr', table);
+    list = $('ul', container); // reload the DOM node which contains options
+    li = $('li', list);
 
-    same(
-        tr.length, aciattrs.length+1,
+    assert.deepEqual(
+        li.length, aciattrs.length+1,
         'Widget contains all user ACI attributes plus 1 unmatched attribute');
 
-    same(
+    assert.deepEqual(
         widget.save(), record.attrs.sort(),
         'All loaded values are saved and sorted');
 });
 
-test("aci.rights_widget.", function() {
+QUnit.test("aci.rights_widget.", function(assert) {
 
     var container = $('<span/>', {
         name: 'permissions'
@@ -205,7 +208,7 @@ test("aci.rights_widget.", function() {
 
     var inputs = $('input', container);
 
-    same(
+    assert.deepEqual(
         inputs.length, widget.rights.length,
         'Widget displays all permissions');
 });
@@ -228,7 +231,7 @@ var get_visible_rows = function(section) {
 };
 
 
-test("Testing type target.", function() {
+QUnit.test("Testing type target.", function(assert) {
     var data = {
         id: null,
         error: null,
@@ -237,11 +240,11 @@ test("Testing type target.", function() {
 
     target_facet.load(data);
 
-    same(target_widget.target, 'type', 'type selected');
+    assert.deepEqual(target_widget.target, 'type', 'type selected');
 
     var attrs_w = target_widget.widgets.get_widget('attrs');
     var options = attrs_w.options;
-    ok(options.length > 0, "Attrs has some options");
+    assert.ok(options.length > 0, "Attrs has some options");
     // check them all
     var values = [];
     for (var i=0,l=options.length; i<l; i++) {
@@ -253,18 +256,18 @@ test("Testing type target.", function() {
     var record = {};
     target_facet.save(record);
 
-    same(record.type[0], data.result.result.type,
+    assert.deepEqual(record.type[0], data.result.result.type,
          "saved type matches sample data");
 
-    same(get_visible_rows(target_widget), ['type', 'extratargetfilter',
+    assert.deepEqual(get_visible_rows(target_widget), ['type', 'extratargetfilter',
         'ipapermtarget', 'memberof', 'attrs'],
         'type and attrs rows visible');
 
-    same(record.attrs.length, options.length, "response contains all checked attrs");
+    assert.deepEqual(record.attrs.length, options.length, "response contains all checked attrs");
 });
 
 
-test("Testing general target.", function() {
+QUnit.test("Testing general target.", function(assert) {
 
     var data = {
         id: null,
@@ -277,13 +280,13 @@ test("Testing general target.", function() {
     var record = {};
     target_facet.save(record);
 
-    same(target_widget.target, 'general', 'general selected');
+    assert.deepEqual(target_widget.target, 'general', 'general selected');
 
-    same(get_visible_rows(target_widget), ['type', 'ipapermlocation',
+    assert.deepEqual(get_visible_rows(target_widget), ['type', 'ipapermlocation',
         'extratargetfilter', 'ipapermtarget', 'memberof',
         'attrs_multi'], 'general target fields visible');
 
-    same(record.extratargetfilter[0], data.result.result.extratargetfilter, 'filter set correctly');
+    assert.deepEqual(record.extratargetfilter[0], data.result.result.extratargetfilter, 'filter set correctly');
 });
 
 };});

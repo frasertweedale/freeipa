@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 # Authors:
 #   Rob Crittenden <rcritten@redhat.com>
 #   John Dennis <jdennis@redhat.com>
@@ -32,8 +32,6 @@ import os
 import re
 import inspect
 import operator
-
-import ignore_import_errors     # pylint: disable=unused-import
 
 from ipalib import api
 from ipalib.parameters import Param
@@ -86,7 +84,7 @@ OUTPUT_IGNORED_ATTRIBUTES = (
 )
 
 def parse_options():
-    from optparse import OptionParser
+    from optparse import OptionParser  # pylint: disable=deprecated-module
 
     parser = OptionParser()
     parser.add_option("--validate", dest="validate", action="store_true",
@@ -513,6 +511,8 @@ def main():
         enable_ra=True,
         mode='developer',
         plugins_on_demand=False,
+        realm="EXAMPLE.COM",
+        domain="example.com",
     )
 
     api.bootstrap(**cfg)

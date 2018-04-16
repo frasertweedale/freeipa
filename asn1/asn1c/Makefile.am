@@ -1,95 +1,80 @@
-NULL =
-
-ASN1C_SOURCES =			\
-	INTEGER.c		\
-	NativeEnumerated.c	\
-	NativeInteger.c		\
-	asn_SEQUENCE_OF.c	\
-	asn_SET_OF.c		\
-	constr_CHOICE.c		\
-	constr_SEQUENCE.c	\
-	constr_SEQUENCE_OF.c	\
-	constr_SET_OF.c		\
-	OCTET_STRING.c		\
-	BIT_STRING.c		\
-	asn_codecs_prim.c	\
-	ber_tlv_length.c	\
-	ber_tlv_tag.c		\
-	ber_decoder.c		\
-	der_encoder.c		\
-	constr_TYPE.c		\
-	constraints.c		\
-	xer_support.c		\
-	xer_decoder.c		\
-	xer_encoder.c		\
-	per_support.c		\
-	per_decoder.c		\
-	per_encoder.c		\
-	per_opentype.c		\
-	$(NULL)
-
-ASN1C_HEADERS =
-	INTEGER.h		\
-	NativeEnumerated.h	\
-	NativeInteger.h		\
-	asn_SEQUENCE_OF.h	\
-	asn_SET_OF.h		\
-	constr_CHOICE.h		\
-	constr_SEQUENCE.h	\
-	constr_SEQUENCE_OF.h	\
-	constr_SET_OF.h		\
+libasn1c_la_SOURCES =		\
 	asn_application.h	\
-	asn_system.h		\
 	asn_codecs.h		\
-	asn_internal.h		\
-	OCTET_STRING.h		\
-	BIT_STRING.h		\
+	asn_codecs_prim.c	\
 	asn_codecs_prim.h	\
-	ber_tlv_length.h	\
-	ber_tlv_tag.h		\
+	asn_internal.h		\
+	asn_SEQUENCE_OF.c	\
+	asn_SEQUENCE_OF.h	\
+	asn_SET_OF.c		\
+	asn_SET_OF.h		\
+	asn_system.h		\
+	ber_decoder.c		\
 	ber_decoder.h		\
-	der_encoder.h		\
-	constr_TYPE.h		\
+	ber_tlv_length.c	\
+	ber_tlv_length.h	\
+	ber_tlv_tag.c		\
+	ber_tlv_tag.h		\
+	BIT_STRING.c		\
+	BIT_STRING.h		\
+	constraints.c		\
 	constraints.h		\
-	xer_support.h		\
-	xer_decoder.h		\
-	xer_encoder.h		\
-	per_support.h		\
-	per_decoder.h		\
-	per_encoder.h		\
-	per_opentype.h		\
-	$(NULL)
-
-ASN1Cdir = .
-
-IPAASN1_SOURCES=		\
-	Int32.c			\
+	constr_CHOICE.c		\
+	constr_CHOICE.h		\
+	constr_SEQUENCE.c	\
+	constr_SEQUENCE.h	\
+	constr_SEQUENCE_OF.c	\
+	constr_SEQUENCE_OF.h	\
+	constr_SET_OF.c		\
+	constr_SET_OF.h		\
+	constr_TYPE.c		\
+	constr_TYPE.h		\
+	der_encoder.c		\
+	der_encoder.h		\
 	GetKeytabControl.c	\
-	GKNewKeys.c		\
-	GKCurrentKeys.c		\
-	GKReply.c		\
-	KrbKey.c		\
-	TypeValuePair.c		\
-	$(NULL)
-
-IPAASN1_HEADERS=		\
-	Int32.h			\
 	GetKeytabControl.h	\
-	GKNewKeys.h		\
+	GKCurrentKeys.c		\
 	GKCurrentKeys.h		\
+	GKNewKeys.c		\
+	GKNewKeys.h		\
+	GKReply.c		\
 	GKReply.h		\
+	Int32.c			\
+	Int32.h			\
+	INTEGER.c		\
+	INTEGER.h		\
+	KrbKey.c		\
 	KrbKey.h		\
+	NativeEnumerated.c	\
+	NativeEnumerated.h	\
+	NativeInteger.c		\
+	NativeInteger.h		\
+	OCTET_STRING.c		\
+	OCTET_STRING.h		\
+	per_decoder.c		\
+	per_decoder.h		\
+	per_encoder.c		\
+	per_encoder.h		\
+	per_opentype.c		\
+	per_opentype.h		\
+	per_support.c		\
+	per_support.h		\
+	TypeValuePair.c		\
 	TypeValuePair.h		\
-	$(NULL)
+	xer_decoder.c		\
+	xer_decoder.h		\
+	xer_encoder.c		\
+	xer_encoder.h		\
+	xer_support.c		\
+	xer_support.h
 
-IPAASN1dir = .
+EXTRA_DIST = ipa.asn1
 
-AM_CPPFLAGS = -I../../util
+AM_CPPFLAGS = -I$(top_srcdir)/util
 
 noinst_LTLIBRARIES=libasn1c.la
-noinst_HEADERS=$(ASN1C_HEADERS) $(IPAASN1_HEADERS)
-libasn1c_la_SOURCES=$(ASN1C_SOURCES) $(IPAASN1_SOURCES)
 
 regenerate:
 	asn1c -fskeletons-copy -fnative-types ipa.asn1
+	$(SED) -i s/_BSD_SOURCE/_DEFAULT_SOURCE/g asn_system.h
 	rm -f converter-sample.c Makefile.am.sample

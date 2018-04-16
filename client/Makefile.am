@@ -12,15 +12,12 @@ if HAVE_GCC
 endif
 export AM_CFLAGS
 
-KRB5_UTIL_DIR=../util
-ASN1_UTIL_DIR=../asn1
 IPA_CONF_FILE=$(sysconfdir)/ipa/default.conf
 
 AM_CPPFLAGS =							\
-	-I.							\
 	-I$(srcdir)						\
-	-I$(KRB5_UTIL_DIR)					\
-	-I$(ASN1_UTIL_DIR)					\
+	-I$(top_srcdir)/util					\
+	-I$(top_srcdir)/asn1					\
 	-DPREFIX=\""$(prefix)"\" 				\
 	-DBINDIR=\""$(bindir)"\"				\
 	-DLIBDIR=\""$(libdir)"\" 				\
@@ -55,8 +52,8 @@ ipa_getkeytab_SOURCES =		\
 	$(NULL)
 
 ipa_getkeytab_LDADD = 		\
-	../asn1/libipaasn1.la	\
-	$(KRB5_UTIL_DIR)/libutil.la	\
+	$(top_builddir)/asn1/libipaasn1.la	\
+	$(top_builddir)/util/libutil.la	\
 	$(KRB5_LIBS)		\
 	$(LDAP_LIBS)		\
 	$(SASL_LIBS)		\
@@ -95,30 +92,14 @@ SUBDIRS =			\
 	man			\
 	$(NULL)
 
+noinst_HEADERS =		\
+	ipa-client-common.h
+
 EXTRA_DIST =			\
 	$(sbin_SCRIPTS)		\
 	$(NULL)
 
-DISTCLEANFILES =		\
-	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	intltool-*.in		\
-	compile			\
-	configure		\
-	COPYING			\
-	INSTALL			\
-	install-sh		\
-	missing			\
-	mkinstalldirs		\
-	config.guess		\
-	ltmain.sh		\
-	config.sub		\
-	depcomp			\
-	Makefile.in		\
-	config.h.*		\
-	aclocal.m4		\
-	version.m4		\
-	$(NULL)
-
+install-data-hook:
+	$(INSTALL) -d -m 755 $(DESTDIR)$(IPA_SYSCONF_DIR)/nssdb
+	$(INSTALL) -d -m 755 $(DESTDIR)$(localstatedir)/lib/ipa-client/pki
+	$(INSTALL) -d -m 755 $(DESTDIR)$(localstatedir)/lib/ipa-client/sysrestore

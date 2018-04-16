@@ -43,11 +43,12 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <sys/param.h>
 
 #include "ipa_extdom.h"
+#include "back_extdom.h"
 #include "util.h"
 
-#define MAX(a,b) (((a)>(b))?(a):(b))
 #define SSSD_DOMAIN_SEPARATOR '@'
 
 int get_buffer(size_t *_buf_len, char **_buf)
@@ -97,134 +98,137 @@ static int inc_buffer(size_t buf_max, size_t *_buf_len, char **_buf)
     return 0;
 }
 
-int getpwnam_r_wrapper(size_t buf_max, const char *name,
-                       struct passwd *pwd, char **_buf, size_t *_buf_len)
+int __nss_to_err(enum nss_status errcode)
 {
-    char *buf = NULL;
-    size_t buf_len = 0;
-    int ret;
+    switch(errcode) {
+    case NSS_STATUS_SUCCESS:
+        return 0;
+    case NSS_STATUS_NOTFOUND:
+        return ENOENT;
+    case NSS_STATUS_TRYAGAIN:
+        return ERANGE;
+    case NSS_STATUS_UNAVAIL:
+        return ETIMEDOUT;
+    default:
+        return -1;
+    }
+}
+
+int getpwnam_r_wrapper(struct ipa_extdom_ctx *ctx, const char *name,
+                       struct passwd *pwd, char **buf, size_t *buf_len)
+{
+    int ret, lerrno = 0;
     struct passwd *result = NULL;
+    enum nss_status rc;
 
-    buf = *_buf;
-    buf_len = *_buf_len;
-
-    while (buf != NULL
-            && (ret = getpwnam_r(name, pwd, buf, buf_len, &result)) == ERANGE) {
-        ret = inc_buffer(buf_max, &buf_len, &buf);
-        if (ret != 0) {
-            if (ret == ERANGE) {
-                LOG("Buffer too small, increase ipaExtdomMaxNssBufSize.\n");
-            }
-            goto done;
+    for(rc = NSS_STATUS_TRYAGAIN; rc == NSS_STATUS_TRYAGAIN;) {
+        rc = back_extdom_getpwnam(ctx->nss_ctx, name, pwd, *buf, *buf_len, &result, &lerrno);
+        ret = __nss_to_err(rc);
+        if (ret == ERANGE) {
+            ret = inc_buffer(ctx->max_nss_buf_size, buf_len, buf);
+            if (ret != 0) goto done;
         }
     }
 
-    if (ret == 0 && result == NULL) {
-        ret = ENOENT;
-    }
-
 done:
-    *_buf = buf;
-    *_buf_len = buf_len;
-
+    switch(ret) {
+    case 0:
+        if (result == NULL) ret = ENOENT;
+        break;
+    case ERANGE:
+        LOG("Buffer too small, increase ipaExtdomMaxNssBufSize.\n");
+    default:
+        break;
+    }
     return ret;
 }
 
-int getpwuid_r_wrapper(size_t buf_max, uid_t uid,
-                       struct passwd *pwd, char **_buf, size_t *_buf_len)
+int getpwuid_r_wrapper(struct ipa_extdom_ctx *ctx, uid_t uid,
+                       struct passwd *pwd, char **buf, size_t *buf_len)
 {
-    char *buf = NULL;
-    size_t buf_len = 0;
-    int ret;
+    int ret, lerrno;
     struct passwd *result = NULL;
+    enum nss_status rc;
 
-    buf = *_buf;
-    buf_len = *_buf_len;
-
-    while (buf != NULL
-            && (ret = getpwuid_r(uid, pwd, buf, buf_len, &result)) == ERANGE) {
-        ret = inc_buffer(buf_max, &buf_len, &buf);
-        if (ret != 0) {
-            if (ret == ERANGE) {
-                LOG("Buffer too small, increase ipaExtdomMaxNssBufSize.\n");
-            }
-            goto done;
+    for(rc = NSS_STATUS_TRYAGAIN; rc == NSS_STATUS_TRYAGAIN;) {
+        rc = back_extdom_getpwuid(ctx->nss_ctx, uid, pwd, *buf, *buf_len, &result, &lerrno);
+        ret = __nss_to_err(rc);
+        if (ret == ERANGE) {
+            ret = inc_buffer(ctx->max_nss_buf_size, buf_len, buf);
+            if (ret != 0) goto done;
         }
     }
 
-    if (ret == 0 && result == NULL) {
-        ret = ENOENT;
-    }
-
 done:
-    *_buf = buf;
-    *_buf_len = buf_len;
+    switch(ret) {
+    case 0:
+        if (result == NULL) ret = ENOENT;
+        break;
+    case ERANGE:
+        LOG("Buffer too small, increase ipaExtdomMaxNssBufSize.\n");
+    default:
+        break;
+    }
 
     return ret;
 }
 
-int getgrnam_r_wrapper(size_t buf_max, const char *name,
-                       struct group *grp, char **_buf, size_t *_buf_len)
+int getgrnam_r_wrapper(struct ipa_extdom_ctx *ctx, const char *name,
+                       struct group *grp, char **buf, size_t *buf_len)
 {
-    char *buf = NULL;
-    size_t buf_len = 0;
-    int ret;
+    int ret, lerrno;
     struct group *result = NULL;
+    enum nss_status rc;
 
-    buf = *_buf;
-    buf_len = *_buf_len;
-
-    while (buf != NULL
-            && (ret = getgrnam_r(name, grp, buf, buf_len, &result)) == ERANGE) {
-        ret = inc_buffer(buf_max, &buf_len, &buf);
-        if (ret != 0) {
-            if (ret == ERANGE) {
-                LOG("Buffer too small, increase ipaExtdomMaxNssBufSize.\n");
-            }
-            goto done;
+    for(rc = NSS_STATUS_TRYAGAIN; rc == NSS_STATUS_TRYAGAIN;) {
+        rc = back_extdom_getgrnam(ctx->nss_ctx, name, grp, *buf, *buf_len, &result, &lerrno);
+        ret = __nss_to_err(rc);
+        if (ret == ERANGE) {
+            ret = inc_buffer(ctx->max_nss_buf_size, buf_len, buf);
+            if (ret != 0) goto done;
         }
     }
 
-    if (ret == 0 && result == NULL) {
-        ret = ENOENT;
-    }
-
 done:
-    *_buf = buf;
-    *_buf_len = buf_len;
+    switch(ret) {
+    case 0:
+        if (result == NULL) ret = ENOENT;
+        break;
+    case ERANGE:
+        LOG("Buffer too small, increase ipaExtdomMaxNssBufSize.\n");
+    default:
+        break;
+    }
 
     return ret;
 }
 
-int getgrgid_r_wrapper(size_t buf_max, gid_t gid,
-                       struct group *grp, char **_buf, size_t *_buf_len)
+int getgrgid_r_wrapper(struct ipa_extdom_ctx *ctx, gid_t gid,
+                       struct group *grp, char **buf, size_t *buf_len)
 {
-    char *buf = NULL;
-    size_t buf_len = 0;
-    int ret;
+    int ret, lerrno;
     struct group *result = NULL;
+    enum nss_status rc;
 
-    buf = *_buf;
-    buf_len = *_buf_len;
-
-    while (buf != NULL
-            && (ret = getgrgid_r(gid, grp, buf, buf_len, &result)) == ERANGE) {
-        ret = inc_buffer(buf_max, &buf_len, &buf);
-        if (ret != 0) {
-            if (ret == ERANGE) {
-                LOG("Buffer too small, increase ipaExtdomMaxNssBufSize.\n");
-            }
-            goto done;
+    for(rc = NSS_STATUS_TRYAGAIN; rc == NSS_STATUS_TRYAGAIN;) {
+        rc = back_extdom_getgrgid(ctx->nss_ctx, gid, grp, *buf, *buf_len, &result, &lerrno);
+        ret = __nss_to_err(rc);
+        if (ret == ERANGE) {
+            ret = inc_buffer(ctx->max_nss_buf_size, buf_len, buf);
+            if (ret != 0) goto done;
         }
     }
 
-    if (ret == 0 && result == NULL) {
-        ret = ENOENT;
-    }
-
 done:
-    *_buf = buf;
-    *_buf_len = buf_len;
+    switch(ret) {
+    case 0:
+        if (result == NULL) ret = ENOENT;
+        break;
+    case ERANGE:
+        LOG("Buffer too small, increase ipaExtdomMaxNssBufSize.\n");
+    default:
+        break;
+    }
 
     return ret;
 }
@@ -302,7 +306,7 @@ int parse_request_data(struct berval *req_val, struct extdom_req **_req)
 
     req = calloc(sizeof(struct extdom_req), 1);
     if (req == NULL) {
-        /* Since we return req even in the case of an error we make sure is is
+        /* Since we return req even in the case of an error we make sure it is
          * always safe to call free_req_data() on the returned data. */
         *_req = NULL;
         return LDAP_OPERATIONS_ERROR;
@@ -406,13 +410,14 @@ int check_request(struct extdom_req *req, enum extdom_version version)
     return LDAP_SUCCESS;
 }
 
-int get_user_grouplist(const char *name, gid_t gid,
+int get_user_grouplist(struct ipa_extdom_ctx *ctx, const char *name, gid_t gid,
                        size_t *_ngroups, gid_t **_groups)
 {
-    int ret;
+    int lerrno;
     int ngroups;
     gid_t *groups;
     gid_t *new_groups;
+    enum nss_status rc;
 
     ngroups = 128;
     groups = malloc(ngroups * sizeof(gid_t));
@@ -420,19 +425,18 @@ int get_user_grouplist(const char *name, gid_t gid,
         return LDAP_OPERATIONS_ERROR;
     }
 
-    ret = getgrouplist(name, gid, groups, &ngroups);
-    if (ret == -1) {
-        new_groups = realloc(groups, ngroups * sizeof(gid_t));
-        if (new_groups == NULL) {
-            free(groups);
-            return LDAP_OPERATIONS_ERROR;
-        }
-        groups = new_groups;
-
-        ret = getgrouplist(name, gid, groups, &ngroups);
-        if (ret == -1) {
-            free(groups);
-            return LDAP_OPERATIONS_ERROR;
+    for(rc = NSS_STATUS_TRYAGAIN; rc == NSS_STATUS_TRYAGAIN;) {
+        rc = back_extdom_getgrouplist(ctx->nss_ctx, name, gid, groups, &ngroups, &lerrno);
+        if (rc == NSS_STATUS_TRYAGAIN) {
+            new_groups = NULL;
+            if (lerrno == ERANGE) {
+                new_groups = realloc(groups, ngroups * sizeof(gid_t));
+            }
+            if ((new_groups == NULL) || (lerrno == ENOMEM)) {
+                free(groups);
+                return LDAP_OPERATIONS_ERROR;
+            }
+            groups = new_groups;
         }
     }
 
@@ -515,7 +519,7 @@ int pack_ber_user(struct ipa_extdom_ctx *ctx,
     char *short_user_name = NULL;
 
     short_user_name = strdup(user_name);
-    if ((locat = strchr(short_user_name, SSSD_DOMAIN_SEPARATOR)) != NULL) {
+    if ((locat = strrchr(short_user_name, SSSD_DOMAIN_SEPARATOR)) != NULL) {
         if (strcasecmp(locat+1, domain_name) == 0  ) {
             locat[0] = '\0';
         } else {
@@ -538,7 +542,7 @@ int pack_ber_user(struct ipa_extdom_ctx *ctx,
     }
 
     if (response_type == RESP_USER_GROUPLIST) {
-        ret = get_user_grouplist(user_name, gid, &ngroups, &groups);
+        ret = get_user_grouplist(ctx, user_name, gid, &ngroups, &groups);
         if (ret != LDAP_SUCCESS) {
             goto done;
         }
@@ -561,7 +565,7 @@ int pack_ber_user(struct ipa_extdom_ctx *ctx,
         }
 
         for (c = 0; c < ngroups; c++) {
-            ret = getgrgid_r_wrapper(ctx->max_nss_buf_size,
+            ret = getgrgid_r_wrapper(ctx,
                                      groups[c], &grp, &buf, &buf_len);
             if (ret != 0) {
                 if (ret == ENOMEM || ret == ERANGE) {
@@ -626,7 +630,7 @@ int pack_ber_group(enum response_types response_type,
     char *short_group_name = NULL;
 
     short_group_name = strdup(group_name);
-    if ((locat = strchr(short_group_name, SSSD_DOMAIN_SEPARATOR)) != NULL) {
+    if ((locat = strrchr(short_group_name, SSSD_DOMAIN_SEPARATOR)) != NULL) {
         if (strcasecmp(locat+1, domain_name) == 0  ) {
             locat[0] = '\0';
         } else {
@@ -698,6 +702,90 @@ done:
     return ret;
 }
 
+int pack_ber_name_list(struct extdom_req *req, char **fq_name_list,
+                       struct berval **berval)
+{
+    BerElement *ber = NULL;
+    int ret;
+    char *sep;
+    size_t c;
+    size_t len;
+    size_t name_len;
+
+    /* count the names */
+    for (c = 0; fq_name_list[c] != NULL; c++);
+    if (c == 0) {
+        set_err_msg(req, "Empty name list");
+        return LDAP_NO_SUCH_OBJECT;
+    }
+
+    ber = ber_alloc_t( LBER_USE_DER );
+    if (ber == NULL) {
+        set_err_msg(req, "BER alloc failed");
+        return LDAP_OPERATIONS_ERROR;
+    }
+
+
+    ret = ber_printf(ber,"{e{", RESP_NAME_LIST);
+    if (ret == -1) {
+        set_err_msg(req, "BER start failed");
+        ber_free(ber, 1);
+        return LDAP_OPERATIONS_ERROR;
+    }
+
+    for (c = 0; fq_name_list[c] != NULL; c++) {
+        len = strlen(fq_name_list[c]);
+        if (len < 3) {
+            set_err_msg(req, "Fully qualified name too short");
+            ber_free(ber, 1);
+            return LDAP_OPERATIONS_ERROR;
+        }
+
+        sep = strrchr(fq_name_list[c], SSSD_DOMAIN_SEPARATOR);
+        if (sep == NULL) {
+            set_err_msg(req, "Failed to split fully qualified name");
+            ber_free(ber, 1);
+            return LDAP_OPERATIONS_ERROR;
+        }
+
+        name_len = sep - fq_name_list[c];
+        if (name_len == 0) {
+            set_err_msg(req, "Missing name.");
+            ber_free(ber, 1);
+            return LDAP_OPERATIONS_ERROR;
+        }
+        if (name_len + 1 == len) {
+            set_err_msg(req, "Missing domain.");
+            ber_free(ber, 1);
+            return LDAP_OPERATIONS_ERROR;
+        }
+
+        ret = ber_printf(ber,"{oo}", (sep + 1),  len - name_len -1,
+                                      fq_name_list[c], name_len);
+        if (ret == -1) {
+        set_err_msg(req, "BER list item failed");
+            ber_free(ber, 1);
+            return LDAP_OPERATIONS_ERROR;
+        }
+    }
+
+    ret = ber_printf(ber,"}}");
+    if (ret == -1) {
+        set_err_msg(req, "BER end failed");
+        ber_free(ber, 1);
+        return LDAP_OPERATIONS_ERROR;
+    }
+
+    ret = ber_flatten(ber, berval);
+    ber_free(ber, 1);
+    if (ret == -1) {
+        set_err_msg(req, "BER flatten failed");
+        return LDAP_OPERATIONS_ERROR;
+    }
+
+    return LDAP_SUCCESS;
+}
+
 int pack_ber_name(const char *domain_name, const char *name,
                   struct berval **berval)
 {
@@ -757,8 +845,7 @@ static int handle_uid_request(struct ipa_extdom_ctx *ctx,
 
         ret = pack_ber_sid(sid_str, berval);
     } else {
-        ret = getpwuid_r_wrapper(ctx->max_nss_buf_size, uid, &pwd, &buf,
-                                 &buf_len);
+        ret = getpwuid_r_wrapper(ctx, uid, &pwd, &buf, &buf_len);
         if (ret != 0) {
             if (ret == ENOMEM || ret == ERANGE) {
                 ret = LDAP_OPERATIONS_ERROR;
@@ -829,8 +916,7 @@ static int handle_gid_request(struct ipa_extdom_ctx *ctx,
 
         ret = pack_ber_sid(sid_str, berval);
     } else {
-        ret = getgrgid_r_wrapper(ctx->max_nss_buf_size, gid, &grp, &buf,
-                                 &buf_len);
+        ret = getgrgid_r_wrapper(ctx, gid, &grp, &buf, &buf_len);
         if (ret != 0) {
             if (ret == ENOMEM || ret == ERANGE) {
                 ret = LDAP_OPERATIONS_ERROR;
@@ -867,12 +953,56 @@ done:
     return ret;
 }
 
-static int handle_sid_or_cert_request(struct ipa_extdom_ctx *ctx,
-                                      struct extdom_req *req,
-                                      enum request_types request_type,
-                                      enum input_types input_type,
-                                      const char *input,
-                                      struct berval **berval)
+static int handle_cert_request(struct ipa_extdom_ctx *ctx,
+                               struct extdom_req *req,
+                               enum request_types request_type,
+                               enum input_types input_type,
+                               const char *input,
+                               struct berval **berval)
+{
+    int ret;
+    char **fq_names = NULL;
+    enum sss_id_type *id_types = NULL;
+    size_t c;
+
+    if (request_type != REQ_SIMPLE) {
+        set_err_msg(req, "Only simple request type allowed "
+                         "for lookups by certificate");
+        ret = LDAP_PROTOCOL_ERROR;
+        goto done;
+    }
+
+    ret = sss_nss_getlistbycert(input, &fq_names, &id_types);
+    if (ret != 0) {
+        if (ret == ENOENT) {
+            ret = LDAP_NO_SUCH_OBJECT;
+        } else {
+            set_err_msg(req, "Failed to lookup name by certificate");
+            ret = LDAP_OPERATIONS_ERROR;
+        }
+        goto done;
+    }
+
+    ret = pack_ber_name_list(req, fq_names, berval);
+
+done:
+    if (fq_names != NULL) {
+        for (c = 0; fq_names[c] != NULL; c++) {
+            free(fq_names[c]);
+        }
+        free(fq_names);
+    }
+    free(id_types);
+
+    return ret;
+}
+
+static int handle_sid_request(struct ipa_extdom_ctx *ctx,
+                              struct extdom_req *req,
+                              enum request_types request_type,
+                              enum input_types input_type,
+                              const char *input,
+                              struct berval **berval)
 {
     int ret;
     struct passwd pwd;
@@ -886,11 +1016,7 @@ static int handle_sid_or_cert_request(struct ipa_extdom_ctx *ctx,
     enum sss_id_type id_type;
     struct sss_nss_kv *kv_list = NULL;
 
-    if (input_type == INP_SID) {
-        ret = sss_nss_getnamebysid(input, &fq_name, &id_type);
-    } else {
-        ret = sss_nss_getnamebycert(input, &fq_name, &id_type);
-    }
+    ret = sss_nss_getnamebysid(input, &fq_name, &id_type);
     if (ret != 0) {
         if (ret == ENOENT) {
             ret = LDAP_NO_SUCH_OBJECT;
@@ -901,7 +1027,7 @@ static int handle_sid_or_cert_request(struct ipa_extdom_ctx *ctx,
         goto done;
     }
 
-    sep = strchr(fq_name, SSSD_DOMAIN_SEPARATOR);
+    sep = strrchr(fq_name, SSSD_DOMAIN_SEPARATOR);
     if (sep == NULL) {
         set_err_msg(req, "Failed to split fully qualified name");
         ret = LDAP_OPERATIONS_ERROR;
@@ -929,8 +1055,7 @@ static int handle_sid_or_cert_request(struct ipa_extdom_ctx *ctx,
     switch(id_type) {
     case SSS_ID_TYPE_UID:
     case SSS_ID_TYPE_BOTH:
-        ret = getpwnam_r_wrapper(ctx->max_nss_buf_size, fq_name, &pwd, &buf,
-                                 &buf_len);
+        ret = getpwnam_r_wrapper(ctx, fq_name, &pwd, &buf, &buf_len);
         if (ret != 0) {
             if (ret == ENOMEM || ret == ERANGE) {
                 ret = LDAP_OPERATIONS_ERROR;
@@ -962,8 +1087,7 @@ static int handle_sid_or_cert_request(struct ipa_extdom_ctx *ctx,
                             pwd.pw_shell, kv_list, berval);
         break;
     case SSS_ID_TYPE_GID:
-        ret = getgrnam_r_wrapper(ctx->max_nss_buf_size, fq_name, &grp, &buf,
-                                 &buf_len);
+        ret = getgrnam_r_wrapper(ctx, fq_name, &grp, &buf, &buf_len);
         if (ret != 0) {
             if (ret == ENOMEM || ret == ERANGE) {
                 ret = LDAP_OPERATIONS_ERROR;
@@ -1057,8 +1181,7 @@ static int handle_name_request(struct ipa_extdom_ctx *ctx,
             goto done;
         }
 
-        ret = getpwnam_r_wrapper(ctx->max_nss_buf_size, fq_name, &pwd, &buf,
-                                 &buf_len);
+        ret = getpwnam_r_wrapper(ctx, fq_name, &pwd, &buf, &buf_len);
         if (ret == 0) {
             if (request_type == REQ_FULL_WITH_GROUPS) {
                 ret = sss_nss_getorigbyname(pwd.pw_name, &kv_list, &id_type);
@@ -1087,8 +1210,7 @@ static int handle_name_request(struct ipa_extdom_ctx *ctx,
              * error codes which can indicate that the user was not found. To
              * be on the safe side we fail back to the group lookup on all
              * errors. */
-            ret = getgrnam_r_wrapper(ctx->max_nss_buf_size, fq_name, &grp, &buf,
-                                     &buf_len);
+            ret = getgrnam_r_wrapper(ctx, fq_name, &grp, &buf, &buf_len);
             if (ret != 0) {
                 if (ret == ENOMEM || ret == ERANGE) {
                     ret = LDAP_OPERATIONS_ERROR;
@@ -1147,13 +1269,12 @@ int handle_request(struct ipa_extdom_ctx *ctx, struct extdom_req *req,
 
         break;
     case INP_SID:
+        ret = handle_sid_request(ctx, req, req->request_type,
+                                 req->input_type, req->data.sid, berval);
+        break;
     case INP_CERT:
-        ret = handle_sid_or_cert_request(ctx, req, req->request_type,
-                                         req->input_type,
-                                         req->input_type == INP_SID ?
-                                                                 req->data.sid :
-                                                                 req->data.cert,
-                                         berval);
+        ret = handle_cert_request(ctx, req, req->request_type,
+                                  req->input_type, req->data.cert, berval);
         break;
     case INP_NAME:
         ret = handle_name_request(ctx, req, req->request_type,

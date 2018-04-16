@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 # Copyright (C) 2014  Red Hat
 # see file 'COPYING' for use and warranty information
 #
@@ -32,11 +32,20 @@ if __name__ == '__main__':
         name="ipaplatform",
         doc=__doc__,
         package_dir={'ipaplatform': ''},
+        namespace_packages=['ipaplatform'],
         packages=[
             "ipaplatform",
             "ipaplatform.base",
+            "ipaplatform.debian",
             "ipaplatform.fedora",
             "ipaplatform.redhat",
             "ipaplatform.rhel"
+        ],
+        install_requires=[
+            "cffi",
+            # "ipalib",  # circular dependency
+            "ipapython",
+            "pyasn1",
+            "six",
         ],
     )

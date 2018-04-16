@@ -490,30 +490,45 @@ topology.servers_search_facet = function(spec, no_init) {
 
     var that = IPA.search_facet(spec);
 
-    that.create_get_records_command = function(pkeys, on_success, on_error) {
+    that.create_get_records_command = function(records, pkeys, on_success, on_error) {
 
         var on_success_extended = function(data, text_status, xhr) {
             // Call original on_success handler
             on_success(data, text_status, xhr);
 
             var result = data.result.results;
-            var counter = 0;
+
+            // Do not show warning if there is only one master
+            if (result.length <= 1) return;
+
+            var ca_counter = 0;
+            var kra_counter = 0;
 
             for (var i=0, l=result.length; i<l; i++) {
                 var current = result[i];
                 var roles = current.result.enabled_role_servrole;
                 for (var k=0, m=roles.length; k<m; k++) {
-                    if (roles[k] === 'CA server') counter++;
+                    if (roles[k] === 'CA server') ca_counter++;
+                    if (roles[k] === 'KRA server') kra_counter++;
                 }
             }
 
-            // Create dialog and show it only when there is only one CA server
-            if (counter != 1) return;
+            // Show a dialog when there is only one CA or KRA server
+            if (ca_counter != 1 && kra_counter != 1) return;
 
-            var message = text.get('@i18n:objects.servers.ca_warning_message');
+            var message = text.get(
+                '@i18n:objects.servers.svc_warning_message') + '<ul>';
+            if (ca_counter === 1) {
+                message += '<li>CA</li>\n';
+            }
+            if (kra_counter === 1) {
+                message += '<li>KRA</li>\n';
+            }
+            message += '</ul>';
+
             var dialog = IPA.dialog({
-                name: 'ca_warning',
-                title: '@i18n:objects.servers.ca_warning_title',
+                name: 'svc_warning',
+                title: '@i18n:objects.servers.svc_warning_title',
                 sections: [
                     {
                         show_header: false,
@@ -545,7 +560,7 @@ topology.servers_search_facet = function(spec, no_init) {
             dialog.open();
         };
 
-        var batch = that.table_facet_create_get_records_command(pkeys,
+        var batch = that.table_facet_create_get_records_command(records, pkeys,
                                                 on_success_extended, on_error);
 
         return batch;

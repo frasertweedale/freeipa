@@ -1,5 +1,5 @@
 .\" A man page for ipa-ca-install
-.\" Copyright (C) 2011 Red Hat, Inc.
+.\" Copyright (C) 2011-2017 Red Hat, Inc.
 .\"
 .\" This program is free software; you can redistribute it and/or modify
 .\" it under the terms of the GNU General Public License as published by
@@ -16,17 +16,24 @@
 .\"
 .\" Author: Rob Crittenden <rcritten@redhat.com>
 .\"
-.TH "ipa-ca-install" "1" "Jun 17 2011" "FreeIPA" "FreeIPA Manual Pages"
+.TH "ipa-ca-install" "1" "Mar 30 2017" "FreeIPA" "FreeIPA Manual Pages"
 .SH "NAME"
 ipa\-ca\-install \- Install a CA on a server
 .SH "SYNOPSIS"
+.SS "DOMAIN LEVEL 0"
+.TP
 ipa\-ca\-install [\fIOPTION\fR]... [replica_file]
+.SS "DOMAIN LEVEL 1"
+.TP
+ipa\-ca\-install [\fIOPTION\fR]...
 .SH "DESCRIPTION"
 Adds a CA as an IPA\-managed service. This requires that the IPA server is already installed and configured.
 
+In a domain at domain level 0, you can run ipa\-ca\-install without replica_file to upgrade from CA-less to CA-full, or with replica_file to install the CA service on the replica.
+
 The replica_file is created using the ipa\-replica\-prepare utility and should be the same one used when originally installing the replica.
 
-Alternatively, you can run ipa\-ca\-install without replica_file to upgrade from CA-less to CA-full.
+In a domain at domain level 1, ipa\-ca\-install can be used to upgrade from CA-less to CA-full or to install the CA service on a replica, and does not require any replica file.
 .SH "OPTIONS"
 \fB\-d\fR, \fB\-\-debug\fR
 Enable debug logging when more verbose output is needed
@@ -41,10 +48,35 @@ Admin user Kerberos password used for connection check
 Generate a CSR for the IPA CA certificate to be signed by an external CA.
 .TP
 \fB\-\-external\-ca\-type\fR=\fITYPE\fR
-Type of the external CA. Possible values are "generic", "ms-cs". Default value is "generic". Use "ms-cs" to include template name required by Microsoft Certificate Services (MS CS) in the generated CSR.
+Type of the external CA. Possible values are "generic", "ms-cs". Default value is "generic". Use "ms-cs" to include the template name required by Microsoft Certificate Services (MS CS) in the generated CSR (see \fB\-\-external\-ca\-profile\fR for full details).
+
+.TP
+\fB\-\-external\-ca\-profile\fR=\fIPROFILE_SPEC\fR
+Specify the certificate profile or template to use at the external CA.
+
+When \fB\-\-external\-ca\-type\fR is "ms-cs" the following specifiers may be used:
+
+.RS
+.TP
+\fB<oid>:<majorVersion>[:<minorVersion>]\fR
+Specify a certificate template by OID and major version, optionally also specifying minor version.
+.TP
+\fB<name>\fR
+Specify a certificate template by name.  The name cannot contain any \fI:\fR characters and cannot be an OID (otherwise the OID-based template specifier syntax takes precedence).
+.TP
+\fBdefault\fR
+If no template is specified, the template name "SubCA" is used.
+.RE
+
 .TP
 \fB\-\-external\-cert\-file\fR=\fIFILE\fR
 File containing the IPA CA certificate and the external CA certificate chain. The file is accepted in PEM and DER certificate and PKCS#7 certificate chain formats. This option may be used multiple times.
+.TP
+\fB\-\-ca\-subject\fR=\fISUBJECT\fR
+The CA certificate subject DN (default CN=Certificate Authority,O=REALM.NAME).  RDNs are in LDAP order (most specific RDN first).
+.TP
+\fB\-\-subject\-base\fR=\fISUBJECT\fR
+The subject base for certificates issued by IPA (default O=REALM.NAME).  RDNs are in LDAP order (most specific RDN first).
 .TP
 \fB\-\-ca\-signing\-algorithm\fR=\fIALGORITHM\fR
 Signing algorithm of the IPA CA certificate. Possible values are SHA1withRSA, SHA256withRSA, SHA512withRSA. Default value is SHA256withRSA. Use this option with --external-ca if the external CA does not support the default signing algorithm.

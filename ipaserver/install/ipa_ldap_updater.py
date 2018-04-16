@@ -25,6 +25,7 @@
 
 from __future__ import print_function
 
+import logging
 import os
 
 import six
@@ -38,6 +39,8 @@ from ipaserver.install.upgradeinstance import IPAUpgrade
 
 if six.PY3:
     unicode = str
+
+logger = logging.getLogger(__name__)
 
 
 class LDAPUpdater(admintool.AdminTool):
@@ -69,8 +72,8 @@ class LDAPUpdater(admintool.AdminTool):
         self.files = self.args
 
         if not (self.files or options.schema_files):
-            self.log.info("To execute overall IPA upgrade please use "
-                          "'ipa-server-upgrade' command")
+            logger.info("To execute overall IPA upgrade please use "
+                        "'ipa-server-upgrade' command")
             raise admintool.ScriptError("No update files or schema file were "
                                         "specified")
 
@@ -89,7 +92,7 @@ class LDAPUpdater(admintool.AdminTool):
     def run(self):
         super(LDAPUpdater, self).run()
 
-        api.bootstrap(in_server=True, context='updates')
+        api.bootstrap(in_server=True, context='updates', confdir=paths.ETC_IPA)
         api.finalize()
 
     def handle_error(self, exception):
@@ -101,6 +104,7 @@ class LDAPUpdater_Upgrade(LDAPUpdater):
 
     def run(self):
         super(LDAPUpdater_Upgrade, self).run()
+        api.Backend.ldap2.connect()
         options = self.options
 
         realm = api.env.realm
@@ -116,9 +120,11 @@ class LDAPUpdater_Upgrade(LDAPUpdater):
             raise admintool.ScriptError('IPA upgrade failed.', 1)
         else:
             if upgrade.modified:
-                self.log.info('Update complete')
+                logger.info('Update complete')
             else:
-                self.log.info('Update complete, no data were modified')
+                logger.info('Update complete, no data were modified')
+
+        api.Backend.ldap2.disconnect()
 
 
 class LDAPUpdater_NonUpgrade(LDAPUpdater):
@@ -126,6 +132,7 @@ class LDAPUpdater_NonUpgrade(LDAPUpdater):
 
     def run(self):
         super(LDAPUpdater_NonUpgrade, self).run()
+        api.Backend.ldap2.connect()
         options = self.options
 
         modified = False
@@ -145,6 +152,8 @@ class LDAPUpdater_NonUpgrade(LDAPUpdater):
         modified = ld.update(self.files) or modified
 
         if modified:
-            self.log.info('Update complete')
+            logger.info('Update complete')
         else:
-            self.log.info('Update complete, no data were modified')
+            logger.info('Update complete, no data were modified')
+
+        api.Backend.ldap2.disconnect()

@@ -37,6 +37,17 @@
                                 "(objectclass=krbprincipal))" \
                               "(krbprincipalname=%s))"
 
+#define PRINC_TGS_SEARCH_FILTER_EXTRA "(&(|(objectclass=krbprincipalaux)" \
+                                          "(objectclass=krbprincipal)" \
+                                          "(objectclass=ipakrbprincipal))" \
+                                        "(|(ipakrbprincipalalias=%s)" \
+                                          "(krbprincipalname:caseIgnoreIA5Match:=%s))" \
+                                         "%s)"
+
+#define PRINC_SEARCH_FILTER_EXTRA "(&(|(objectclass=krbprincipalaux)" \
+                                      "(objectclass=krbprincipal))" \
+                                    "(krbprincipalname=%s)" \
+                                    "%s)"
 static char *std_principal_attrs[] = {
     "krbPrincipalName",
     "krbCanonicalName",
@@ -864,10 +875,12 @@ done:
     return kerr;
 }
 
-static krb5_error_code ipadb_fetch_principals(struct ipadb_context *ipactx,
-                                              unsigned int flags,
-                                              char *principal,
-                                              LDAPMessage **result)
+krb5_error_code
+ipadb_fetch_principals_with_extra_filter(struct ipadb_context *ipactx,
+                                         unsigned int flags,
+                                         const char *principal,
+                                         const char *filter,
+                                         LDAPMessage **result)
 {
     krb5_error_code kerr;
     char *src_filter = NULL;
@@ -890,11 +903,21 @@ static krb5_error_code ipadb_fetch_principals(struct ipadb_context *ipactx,
         goto done;
     }
 
-    if (flags & KRB5_KDB_FLAG_ALIAS_OK) {
-        ret = asprintf(&src_filter, PRINC_TGS_SEARCH_FILTER,
-                       esc_original_princ, esc_original_princ);
+    if (filter == NULL) {
+        if (flags & KRB5_KDB_FLAG_ALIAS_OK) {
+            ret = asprintf(&src_filter, PRINC_TGS_SEARCH_FILTER,
+                           esc_original_princ, esc_original_princ);
+        } else {
+            ret = asprintf(&src_filter, PRINC_SEARCH_FILTER, esc_original_princ);
+        }
     } else {
-        ret = asprintf(&src_filter, PRINC_SEARCH_FILTER, esc_original_princ);
+        if (flags & KRB5_KDB_FLAG_ALIAS_OK) {
+            ret = asprintf(&src_filter, PRINC_TGS_SEARCH_FILTER_EXTRA,
+                           esc_original_princ, esc_original_princ, filter);
+        } else {
+            ret = asprintf(&src_filter, PRINC_SEARCH_FILTER_EXTRA,
+                           esc_original_princ, filter);
+        }
     }
 
     if (ret == -1) {
@@ -913,11 +936,20 @@ done:
     return kerr;
 }
 
-static krb5_error_code ipadb_find_principal(krb5_context kcontext,
-                                            unsigned int flags,
-                                            LDAPMessage *res,
-                                            char **principal,
-                                            LDAPMessage **entry)
+static krb5_error_code ipadb_fetch_principals(struct ipadb_context *ipactx,
+                                              unsigned int flags,
+                                              char *principal,
+                                              LDAPMessage **result)
+{
+    return ipadb_fetch_principals_with_extra_filter(ipactx, flags, principal,
+                                                    NULL, result);
+}
+
+krb5_error_code ipadb_find_principal(krb5_context kcontext,
+                                     unsigned int flags,
+                                     LDAPMessage *res,
+                                     char **principal,
+                                     LDAPMessage **entry)
 {
     struct ipadb_context *ipactx;
     bool found = false;
@@ -1227,6 +1259,17 @@ krb5_error_code ipadb_get_principal(krb5_context kcontext,
                                                          realm,
                                                          upn->length - (realm - upn->data),
                                                          &trusted_realm);
+                if (kerr == KRB5_KDB_NOENTRY) {
+                    /* try to refresh trusted domain data and try again */
+                    kerr = ipadb_reinit_mspac(ipactx, false);
+                    if (kerr != 0) {
+                        kerr = KRB5_KDB_NOENTRY;
+                        goto done;
+                    }
+                    kerr = ipadb_is_princ_from_trusted_realm(kcontext, realm,
+                                              upn->length - (realm - upn->data),
+                                              &trusted_realm);
+                }
                 if (kerr == 0) {
                     kentry = calloc(1, sizeof(krb5_db_entry));
                     if (!kentry) {
@@ -1274,11 +1317,32 @@ done:
     return kerr;
 }
 
-void ipadb_free_principal(krb5_context kcontext, krb5_db_entry *entry)
+void ipadb_free_principal_e_data(krb5_context kcontext, krb5_octet *e_data)
 {
     struct ipadb_e_data *ied;
-    krb5_tl_data *prev, *next;
     int i;
+
+    ied = (struct ipadb_e_data *)e_data;
+    if (ied->magic == IPA_E_DATA_MAGIC) {
+	ldap_memfree(ied->entry_dn);
+	free(ied->passwd);
+	free(ied->pw_policy_dn);
+	for (i = 0; ied->pw_history && ied->pw_history[i]; i++) {
+	    free(ied->pw_history[i]);
+	}
+	free(ied->pw_history);
+	for (i = 0; ied->authz_data && ied->authz_data[i]; i++) {
+	    free(ied->authz_data[i]);
+	}
+	free(ied->authz_data);
+	free(ied->pol);
+	free(ied);
+    }
+}
+
+void ipadb_free_principal(krb5_context kcontext, krb5_db_entry *entry)
+{
+    krb5_tl_data *prev, *next;
 
     if (entry) {
         krb5_free_principal(kcontext, entry->princ);
@@ -1292,22 +1356,7 @@ void ipadb_free_principal(krb5_context kcontext, krb5_db_entry *entry)
         ipa_krb5_free_key_data(entry->key_data, entry->n_key_data);
 
         if (entry->e_data) {
-            ied = (struct ipadb_e_data *)entry->e_data;
-            if (ied->magic == IPA_E_DATA_MAGIC) {
-                ldap_memfree(ied->entry_dn);
-                free(ied->passwd);
-                free(ied->pw_policy_dn);
-                for (i = 0; ied->pw_history && ied->pw_history[i]; i++) {
-                    free(ied->pw_history[i]);
-                }
-                free(ied->pw_history);
-                for (i = 0; ied->authz_data && ied->authz_data[i]; i++) {
-                    free(ied->authz_data[i]);
-                }
-                free(ied->authz_data);
-                free(ied->pol);
-                free(ied);
-            }
+	    ipadb_free_principal_e_data(kcontext, entry->e_data);
         }
 
         free(entry);

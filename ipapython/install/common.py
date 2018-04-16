@@ -6,13 +6,15 @@
 Common stuff.
 """
 
-import traceback
+import logging
 
 from . import core
 from .util import from_
 
-__all__ = ['step', 'Installable', 'Interactive', 'Continuous', 'installer',
+__all__ = ['step', 'Installable', 'Interactive', 'installer',
            'uninstaller']
+
+logger = logging.getLogger(__name__)
 
 
 def step():
@@ -60,7 +62,7 @@ class Step(Installable):
         raise AttributeError('parent')
 
     def _install(self):
-        for _nothing in self._installer(self.parent):
+        for unused in self._installer(self.parent):
             yield from_(super(Step, self)._install())
 
     @staticmethod
@@ -68,7 +70,7 @@ class Step(Installable):
         yield
 
     def _uninstall(self):
-        for _nothing in self._uninstaller(self.parent):
+        for unused in self._uninstaller(self.parent):
             yield from_(super(Step, self)._uninstall())
 
     @staticmethod
@@ -85,16 +87,6 @@ class Interactive(core.Configurable):
     interactive = core.Property(False)
 
 
-class Continuous(core.Configurable):
-    def _handle_execute_exception(self, exc_info):
-        try:
-            super(Continuous, self)._handle_execute_exception(exc_info)
-        except BaseException as e:
-            self.log.debug(traceback.format_exc())
-            if isinstance(e, Exception):
-                self.log.error("%s", e)
-
-
 def installer(cls):
     class Installer(cls, Installable):
         def __init__(self, **kwargs):
@@ -106,7 +98,7 @@ def installer(cls):
 
 
 def uninstaller(cls):
-    class Uninstaller(Continuous, cls, Installable):
+    class Uninstaller(cls, Installable):
         def __init__(self, **kwargs):
             super(Uninstaller, self).__init__(uninstalling=True,
                                               **kwargs)

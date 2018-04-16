@@ -18,10 +18,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import logging
 import time
 from time import gmtime, strftime
 import posixpath
-import os
 
 import six
 
@@ -38,14 +38,17 @@ from .baseuser import (
     NO_UPG_MAGIC,
     UPG_DEFINITION_DN,
     baseuser_output_params,
-    baseuser_pwdchars,
     validate_nsaccountlock,
     convert_nsaccountlock,
     fix_addressbook_permission_bindrule,
     baseuser_add_manager,
     baseuser_remove_manager,
+    baseuser_add_cert,
+    baseuser_remove_cert,
     baseuser_add_principal,
-    baseuser_remove_principal)
+    baseuser_remove_principal,
+    baseuser_add_certmapdata,
+    baseuser_remove_certmapdata)
 from .idviews import remove_ipaobject_overrides
 from ipalib.plugable import Registry
 from .baseldap import (
@@ -54,20 +57,16 @@ from .baseldap import (
     LDAPCreate,
     LDAPSearch,
     LDAPQuery,
-    LDAPMultiQuery,
-    LDAPAddAttributeViaOption,
-    LDAPRemoveAttributeViaOption)
+    LDAPMultiQuery)
 from . import baseldap
 from ipalib.request import context
 from ipalib import _, ngettext
 from ipalib import output
 from ipaplatform.paths import paths
 from ipapython.dn import DN
-from ipapython.ipautil import ipa_generate_password, GEN_TMP_PWD_LEN
+from ipapython.ipaldap import LDAPClient
+from ipapython.ipautil import ipa_generate_password, TMP_PWD_ENTROPY_BITS
 from ipalib.capabilities import client_has_capability
-
-if api.env.in_server:
-    from ipaserver.plugins.ldap2 import ldap2
 
 if six.PY3:
     unicode = str
@@ -114,6 +113,8 @@ EXAMPLES:
  Delete a user:
    ipa user-del tuser1
 """)
+
+logger = logging.getLogger(__name__)
 
 register = Registry()
 
@@ -180,6 +181,7 @@ class user(baseuser):
                 'secretary', 'usercertificate',
                 'usersmimecertificate', 'x500uniqueidentifier',
                 'inetuserhttpurl', 'inetuserstatus',
+                'ipacertmapdata',
             },
             'fixup_function': fix_addressbook_permission_bindrule,
         },
@@ -260,7 +262,7 @@ class user(baseuser):
             ],
             'ipapermdefaultattr': {
                 'krbprincipalkey', 'passwordhistory', 'sambalmpassword',
-                'sambantpassword', 'userpassword'
+                'sambantpassword', 'userpassword', 'krbpasswordexpiration'
             },
             'replaces': [
                 '(target = "ldap:///uid=*,cn=users,cn=accounts,$SUFFIX")(targetattr = "userpassword || krbprincipalkey || sambalmpassword || sambantpassword || passwordhistory")(version 3.0;acl "permission:Change a user password";allow (write) groupdn = "ldap:///cn=Change a user password,cn=permissions,cn=pbac,$SUFFIX";)',
@@ -367,12 +369,20 @@ class user(baseuser):
             },
             'default_privileges': {'PassSync Service'},
         },
+        'System: Manage User Certificate Mappings': {
+            'ipapermright': {'write'},
+            'ipapermdefaultattr': {'ipacertmapdata', 'objectclass'},
+            'default_privileges': {
+                'Certificate Identity Mapping Administrators'
+            },
+        },
     }
 
     takes_params = baseuser.takes_params + (
         Bool('nsaccountlock?',
+            cli_name=('disabled'),
+            default=False,
             label=_('Account disabled'),
-            flags=['no_option'],
         ),
         Bool('preserved?',
             label=_('Preserved user'),
@@ -443,6 +453,14 @@ class user_add(baseuser_add):
             doc=_('Don\'t create user private group'),
         ),
     )
+
+    def get_options(self):
+        for option in super(user_add, self).get_options():
+            if option.name == "nsaccountlock":
+                flags = set(option.flags)
+                flags.add("no_option")
+                option = option.clone(flags=flags)
+            yield option
 
     def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
         delete_dn = self.obj.get_delete_dn(*keys, **options)
@@ -529,7 +547,7 @@ class user_add(baseuser_add):
 
         if 'userpassword' not in entry_attrs and options.get('random'):
             entry_attrs['userpassword'] = ipa_generate_password(
-                baseuser_pwdchars, pwd_len=GEN_TMP_PWD_LEN)
+                entropy_bits=TMP_PWD_ENTROPY_BITS)
             # save the password so it can be displayed in post_callback
             setattr(context, 'randompassword', entry_attrs['userpassword'])
 
@@ -581,22 +599,16 @@ class user_add(baseuser_add):
         except errors.AlreadyGroupMember:
             pass
 
-        # delete description attribute NO_UPG_MAGIC if present
-        if options.get('noprivate', False):
-            if not options.get('all', False):
-                desc_attr = ldap.get_entry(dn, ['description'])
-                entry_attrs.update(desc_attr)
-            if 'description' in entry_attrs and NO_UPG_MAGIC in entry_attrs['description']:
-                entry_attrs['description'].remove(NO_UPG_MAGIC)
-                kw = {'setattr': unicode('description=%s' % ','.join(entry_attrs['description']))}
-                try:
-                    self.api.Command['user_mod'](keys[-1], **kw)
-                except (errors.EmptyModlist, errors.NotFound):
-                    pass
-
         # Fetch the entry again to update memberof, mep data, etc updated
         # at the end of the transaction.
         newentry = ldap.get_entry(dn, ['*'])
+
+        # delete description attribute NO_UPG_MAGIC if present
+        if options.get('noprivate', False) and 'description' in newentry and \
+                NO_UPG_MAGIC in newentry['description']:
+            newentry['description'].remove(NO_UPG_MAGIC)
+            ldap.update_entry(newentry)
+
         entry_attrs.update(newentry)
 
         if options.get('random', False):
@@ -631,7 +643,7 @@ class user_del(baseuser_del):
         dn = self.obj.get_either_dn(pkey, **options)
         delete_dn = DN(dn[0], delete_container)
         ldap = self.obj.backend
-        self.log.debug("preserve move %s -> %s" % (dn, delete_dn))
+        logger.debug("preserve move %s -> %s", dn, delete_dn)
 
         if dn.endswith(delete_container):
             raise errors.ExecutionError(
@@ -642,7 +654,7 @@ class user_del(baseuser_del):
             original_entry_attrs = self._exc_wrapper(
                 pkey, options, ldap.get_entry)(dn, ['dn'])
         except errors.NotFound:
-            self.obj.handle_not_found(pkey)
+            raise self.obj.handle_not_found(pkey)
 
         for callback in self.get_callbacks('pre'):
             dn = callback(self, ldap, dn, pkey, **options)
@@ -698,7 +710,7 @@ class user_del(baseuser_del):
             try:
                 remove_ipaobject_overrides(self.obj.backend, self.obj.api, dn)
             except errors.NotFound:
-                self.obj.handle_not_found(*keys)
+                raise self.obj.handle_not_found(*keys)
 
         if dn.endswith(DN(self.obj.delete_container_dn, api.env.basedn)):
             return dn
@@ -749,6 +761,14 @@ class user_mod(baseuser_mod):
     msg_summary = _('Modified user "%(value)s"')
 
     has_output_params = baseuser_mod.has_output_params + user_output_params
+
+    def get_options(self):
+        for option in super(user_mod, self).get_options():
+            if option.name == "nsaccountlock":
+                flags = set(option.flags)
+                flags.add("no_option")
+                option = option.clone(flags=flags)
+            yield option
 
     def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
         dn = self.obj.get_either_dn(*keys, **options)
@@ -858,7 +878,7 @@ class user_undel(LDAPQuery):
         try:
             self._exc_wrapper(keys, options, ldap.get_entry)(delete_dn)
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
         if delete_dn.endswith(DN(self.obj.active_container_dn,
                                  api.env.basedn)):
             raise errors.InvocationError(
@@ -1091,7 +1111,7 @@ class user_status(LDAPQuery):
             )
         except errors.NotFound:
             # If this happens we have some pretty serious problems
-            self.error('No IPA masters found!')
+            logger.error('No IPA masters found!')
 
         entries = []
         count = 0
@@ -1100,11 +1120,12 @@ class user_status(LDAPQuery):
             if host == api.env.host:
                 other_ldap = self.obj.backend
             else:
-                other_ldap = ldap2(self.api, ldap_uri='ldap://%s' % host)
                 try:
-                    other_ldap.connect(ccache=os.environ['KRB5CCNAME'])
+                    other_ldap = LDAPClient(ldap_uri='ldap://%s' % host)
+                    other_ldap.gssapi_bind()
                 except Exception as e:
-                    self.error("user_status: Connecting to %s failed with %s" % (host, str(e)))
+                    logger.error("user_status: Connecting to %s failed with "
+                                 "%s", host, str(e))
                     newresult = {'dn': dn}
                     newresult['server'] = _("%(host)s failed: %(error)s") % dict(host=host, error=str(e))
                     entries.append(newresult)
@@ -1124,7 +1145,8 @@ class user_status(LDAPQuery):
                             newtime = time.strptime(newresult[attr][0], '%Y%m%d%H%M%SZ')
                             newresult[attr][0] = unicode(time.strftime('%Y-%m-%dT%H:%M:%SZ', newtime))
                         except Exception as e:
-                            self.debug("time conversion failed with %s" % str(e))
+                            logger.debug("time conversion failed with %s",
+                                         str(e))
                 newresult['server'] = host
                 if options.get('raw', False):
                     time_format = '%Y%m%d%H%M%SZ'
@@ -1138,16 +1160,17 @@ class user_status(LDAPQuery):
                 entries.append(newresult)
                 count += 1
             except errors.NotFound:
-                self.api.Object.user.handle_not_found(*keys)
+                raise self.api.Object.user.handle_not_found(*keys)
             except Exception as e:
-                self.error("user_status: Retrieving status for %s failed with %s" % (dn, str(e)))
+                logger.error("user_status: Retrieving status for %s failed "
+                             "with %s", dn, str(e))
                 newresult = {'dn': dn}
                 newresult['server'] = _("%(host)s failed") % dict(host=host)
                 entries.append(newresult)
                 count += 1
 
             if host != api.env.host:
-                other_ldap.disconnect()
+                other_ldap.close()
 
         return dict(result=entries,
                     count=count,
@@ -1158,47 +1181,25 @@ class user_status(LDAPQuery):
 
 
 @register()
-class user_add_cert(LDAPAddAttributeViaOption):
+class user_add_cert(baseuser_add_cert):
     __doc__ = _('Add one or more certificates to the user entry')
     msg_summary = _('Added certificates to user "%(value)s"')
-    attribute = 'usercertificate'
-
-    def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys,
-                     **options):
-        dn = self.obj.get_either_dn(*keys, **options)
-
-        self.obj.convert_usercertificate_pre(entry_attrs)
-
-        return dn
-
-    def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
-        assert isinstance(dn, DN)
-
-        self.obj.convert_usercertificate_post(entry_attrs, **options)
-
-        return dn
 
 
 @register()
-class user_remove_cert(LDAPRemoveAttributeViaOption):
+class user_remove_cert(baseuser_remove_cert):
     __doc__ = _('Remove one or more certificates to the user entry')
     msg_summary = _('Removed certificates from user "%(value)s"')
-    attribute = 'usercertificate'
 
-    def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys,
-                     **options):
-        dn = self.obj.get_either_dn(*keys, **options)
 
-        self.obj.convert_usercertificate_pre(entry_attrs)
+@register()
+class user_add_certmapdata(baseuser_add_certmapdata):
+    __doc__ = _("Add one or more certificate mappings to the user entry.")
 
-        return dn
 
-    def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
-        assert isinstance(dn, DN)
-
-        self.obj.convert_usercertificate_post(entry_attrs, **options)
-
-        return dn
+@register()
+class user_remove_certmapdata(baseuser_remove_certmapdata):
+    __doc__ = _("Remove one or more certificate mappings from the user entry.")
 
 
 @register()

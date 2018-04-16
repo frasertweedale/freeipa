@@ -46,6 +46,7 @@ from ipalib import errors, _
 from ipalib.backend import Backend
 from ipalib.plugable import Registry
 from ipaserver.servroles import (attribute_instances, ENABLED, role_instances)
+from ipaserver.servroles import SingleValuedServerAttribute
 
 
 if six.PY3:
@@ -81,13 +82,17 @@ class serverroles(Backend):
                 reason=_("{role}: role not found".format(role=role_name)))
 
     def _get_enabled_masters(self, role_name):
+        result = {}
         role = self._get_role(role_name)
 
         enabled_masters = [
             r[u'server_server'] for r in role.status(self.api, server=None) if
             r[u'status'] == ENABLED]
 
-        return {role.attr_name: enabled_masters}
+        if enabled_masters:
+            result.update({role.attr_name: enabled_masters})
+
+        return result
 
     def _get_assoc_attributes(self, role_name):
         role = self._get_role(role_name)
@@ -137,7 +142,11 @@ class serverroles(Backend):
         for name, attr in assoc_attributes.items():
             attr_value = attr.get(self.api)
 
-            if attr_value is not None:
+            if attr_value:
+                # attr can be a SingleValuedServerAttribute
+                # in this case, the API expects a value, not a list of values
+                if isinstance(attr, SingleValuedServerAttribute):
+                    attr_value = attr_value[0]
                 result.update({name: attr_value})
 
         return result
@@ -145,6 +154,13 @@ class serverroles(Backend):
     def config_update(self, **attrs_values):
         for attr, value in attrs_values.items():
             try:
+                # when the attribute is single valued, it will be stored
+                # in a SingleValuedServerAttribute. The set method expects
+                # a list containing a single value.
+                # We need to convert value to a list containing value
+                if isinstance(self.attributes[attr],
+                              SingleValuedServerAttribute):
+                    value = [value]
                 self.attributes[attr].set(self.api, value)
             except KeyError:
                 raise errors.NotFound(

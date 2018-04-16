@@ -6,7 +6,6 @@ NULL =
 
 SUBDIRS =			\
         certmonger		\
-        conf			\
         html			\
         migration		\
         share			\
@@ -19,39 +18,22 @@ SUBDIRS =			\
 	$(NULL)
 
 install-exec-local:
-	mkdir -p $(DESTDIR)$(localstatedir)/lib/ipa/sysrestore
-	chmod 700 $(DESTDIR)$(localstatedir)/lib/ipa/sysrestore
-	mkdir -p $(DESTDIR)$(localstatedir)/lib/ipa/sysupgrade
-	chmod 700 $(DESTDIR)$(localstatedir)/lib/ipa/sysupgrade
-	mkdir -p $(DESTDIR)$(localstatedir)/lib/ipa/pki-ca
-	chmod 755 $(DESTDIR)$(localstatedir)/lib/ipa/pki-ca
+	$(INSTALL) -d -m 700 $(DESTDIR)$(IPA_SYSCONF_DIR)/custodia
+	$(INSTALL) -d -m 700 $(DESTDIR)$(localstatedir)/lib/ipa/backup
+	$(INSTALL) -d -m 700 $(DESTDIR)$(localstatedir)/lib/ipa/gssproxy
+	$(INSTALL) -d -m 700 $(DESTDIR)$(localstatedir)/lib/ipa/sysrestore
+	$(INSTALL) -d -m 700 $(DESTDIR)$(localstatedir)/lib/ipa/sysupgrade
+	$(INSTALL) -d -m 755 $(DESTDIR)$(localstatedir)/lib/ipa/pki-ca
+	$(INSTALL) -d -m 755 $(DESTDIR)$(localstatedir)/lib/ipa/certs
+	$(INSTALL) -d -m 700 $(DESTDIR)$(localstatedir)/lib/ipa/private
+	$(INSTALL) -d -m 700 $(DESTDIR)$(localstatedir)/lib/ipa/passwds
 
 uninstall-local:
 	-rmdir $(DESTDIR)$(localstatedir)/lib/ipa/sysrestore
 	-rmdir $(DESTDIR)$(localstatedir)/lib/ipa/sysupgrade
+	-rmdir $(DESTDIR)$(localstatedir)/lib/ipa/certs
+	-rmdir $(DESTDIR)$(localstatedir)/lib/ipa/private
+	-rmdir $(DESTDIR)$(localstatedir)/lib/ipa/passwds
 	-rmdir $(DESTDIR)$(localstatedir)/lib/ipa
 
-DISTCLEANFILES =		\
-	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	intltool-*.in		\
-	compile			\
-	configure		\
-	COPYING			\
-	INSTALL			\
-	install-sh		\
-	missing			\
-	mkinstalldirs		\
-	config.guess		\
-	ltmain.sh		\
-	config.sub		\
-	depcomp			\
-	Makefile.in		\
-	config.h.*		\
-	aclocal.m4		\
-	version.m4		\
-	ipa-client.spec		\
-	py-compile		\
-	$(NULL)
+EXTRA_DIST = README.schema

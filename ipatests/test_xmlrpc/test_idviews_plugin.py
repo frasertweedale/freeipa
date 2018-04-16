@@ -66,7 +66,7 @@ sshpubkey = (u'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDGAX3xAeLeaJggwTqMjxNwa6X'
               'cSIn3JrXynlvui4MixvrtX6zx+O/bBo68o8/eZD26QrahVbA09fivrn/4h3TM01'
               '9Eu/c2jOdckfU3cHUV/3Tno5d6JicibyaoDDK7S/yjdn5jhaz8MSEayQvFkZkiF'
               '0L public key test')
-sshpubkeyfp = (u'13:67:6B:BF:4E:A2:05:8E:AE:25:8B:A1:31:DE:6F:1B '
+sshpubkeyfp = (u'SHA256:cStA9o5TRSARbeketEOooMUMSWRSsArIAXloBZ4vNsE '
                 'public key test (ssh-rsa)')
 
 
@@ -1029,6 +1029,11 @@ class test_idviews(Declarative):
                     serverhostname=[host3],
                     ipaassignedidview=[idview1],
                     ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Host Password Policy',
+                        api.env.container_host,
+                        api.env.basedn,
+                    )],
                 ),
             ),
         ),
@@ -1059,6 +1064,11 @@ class test_idviews(Declarative):
                     memberof_hostgroup=[hostgroup2],
                     memberofindirect_hostgroup=[hostgroup1],
                     ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Host Password Policy',
+                        api.env.container_host,
+                        api.env.basedn,
+                    )],
                 ),
             ),
         ),
@@ -1113,6 +1123,11 @@ class test_idviews(Declarative):
                     memberofindirect_hostgroup=[hostgroup1],
                     ipaassignedidview=[idview1],
                     ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Host Password Policy',
+                        api.env.container_host,
+                        api.env.basedn,
+                    )],
                 ),
             ),
         ),
@@ -1143,6 +1158,11 @@ class test_idviews(Declarative):
                     memberof_hostgroup=[hostgroup1],
                     ipaassignedidview=[idview1],
                     ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Host Password Policy',
+                        api.env.container_host,
+                        api.env.basedn,
+                    )],
                 ),
             ),
         ),
@@ -1216,6 +1236,11 @@ class test_idviews(Declarative):
                     serverhostname=[host1],
                     memberof_hostgroup=[hostgroup1],
                     ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Host Password Policy',
+                        api.env.container_host,
+                        api.env.basedn,
+                    )],
                 ),
             ),
         ),
@@ -1244,6 +1269,11 @@ class test_idviews(Declarative):
                     objectclass=objectclasses.host,
                     serverhostname=[host3],
                     ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Host Password Policy',
+                        api.env.container_host,
+                        api.env.basedn,
+                    )],
                 ),
             ),
         ),
@@ -1499,6 +1529,11 @@ class test_idviews(Declarative):
                     objectclass=objectclasses.host,
                     serverhostname=[host4],
                     ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Host Password Policy',
+                        api.env.container_host,
+                        api.env.basedn,
+                    )],
                 ),
             ),
         ),
@@ -1666,6 +1701,41 @@ class test_idviews(Declarative):
                 summary=u'0 Group ID overrides matched',
                 count=0,
                 truncated=False,
+            ),
+        ),
+
+        # Delete the ID View
+
+        dict(
+            desc='Delete ID View "%s"' % idview1,
+            command=('idview_del', [idview1], {}),
+            expected=dict(
+                result=dict(failed=[]),
+                summary=u'Deleted ID View "%s"' % idview1,
+                value=[idview1],
+            ),
+        ),
+
+        # Test the creation of ID view with domain resolution order
+        # Non-regression test for issue 7350
+
+        dict(
+            desc='Create ID View "%s"' % idview1,
+            command=(
+                'idview_add',
+                [idview1],
+                dict(ipadomainresolutionorder=u'%s' % api.env.domain)
+            ),
+            expected=dict(
+                value=idview1,
+                summary=u'Added ID View "%s"' % idview1,
+                result=dict(
+                    dn=get_idview_dn(idview1),
+                    objectclass=objectclasses.idview +
+                    [u'ipanameresolutiondata'],
+                    cn=[idview1],
+                    ipadomainresolutionorder=[api.env.domain]
+                )
             ),
         ),
 

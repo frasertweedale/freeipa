@@ -1,83 +1,111 @@
 # Copyright (C) 2015 FreeIPa Project Contributors, see 'COPYING' for license.
 
-from ipapython.secrets.kem import IPAKEMKeys
-from ipapython.secrets.client import CustodiaClient
-from ipaserver.install.certs import CertDB
+from __future__ import print_function
+
+import logging
+
+from ipaserver.secrets.kem import IPAKEMKeys, KEMLdap
+from ipaserver.secrets.client import CustodiaClient
 from ipaplatform.paths import paths
 from ipaplatform.constants import constants
 from ipaserver.install.service import SimpleServiceInstance
 from ipapython import ipautil
-from ipapython.ipa_log_manager import root_logger
+from ipapython.certdb import NSSDatabase
 from ipaserver.install import installutils
 from ipaserver.install import ldapupdate
 from ipaserver.install import sysupgrade
-from base64 import b64encode, b64decode
+from base64 import b64decode
 from jwcrypto.common import json_decode
-import functools
 import shutil
 import os
 import stat
 import tempfile
+import time
 import pwd
+
+logger = logging.getLogger(__name__)
 
 
 class CustodiaInstance(SimpleServiceInstance):
-    def __init__(self, host_name=None, realm=None, ca_is_configured=True):
+    def __init__(self, host_name=None, realm=None, ldap_uri=None):
         super(CustodiaInstance, self).__init__("ipa-custodia")
         self.config_file = paths.IPA_CUSTODIA_CONF
-        self.server_keys = os.path.join(paths.IPA_CUSTODIA_CONF_DIR,
-                                        'server.keys')
-        self.ldap_uri = None
+        self.server_keys = paths.IPA_CUSTODIA_KEYS
+        self.ldap_uri = ldap_uri
         self.fqdn = host_name
         self.realm = realm
-        self.ca_is_configured = ca_is_configured
-        self.__CustodiaClient = functools.partial(
-            CustodiaClient,
-            client_service='host@%s' % self.fqdn,
-            keyfile=self.server_keys,
-            keytab=paths.KRB5_KEYTAB,
-            realm=realm,
-        )
 
     def __config_file(self):
         template_file = os.path.basename(self.config_file) + '.template'
-        template = os.path.join(ipautil.SHARE_DIR, template_file)
+        template = os.path.join(paths.USR_SHARE_IPA_DIR, template_file)
         httpd_info = pwd.getpwnam(constants.HTTPD_USER)
-        sub_dict = dict(IPA_CUSTODIA_CONF_DIR=paths.IPA_CUSTODIA_CONF_DIR,
-                        IPA_CUSTODIA_SOCKET=paths.IPA_CUSTODIA_SOCKET,
-                        IPA_CUSTODIA_AUDIT_LOG=paths.IPA_CUSTODIA_AUDIT_LOG,
-                        LDAP_URI=installutils.realm_to_ldapi_uri(self.realm),
-                        UID=httpd_info.pw_uid, GID=httpd_info.pw_gid)
+        sub_dict = dict(
+            IPA_CUSTODIA_CONF_DIR=paths.IPA_CUSTODIA_CONF_DIR,
+            IPA_CUSTODIA_KEYS=paths.IPA_CUSTODIA_KEYS,
+            IPA_CUSTODIA_SOCKET=paths.IPA_CUSTODIA_SOCKET,
+            IPA_CUSTODIA_AUDIT_LOG=paths.IPA_CUSTODIA_AUDIT_LOG,
+            LDAP_URI=installutils.realm_to_ldapi_uri(self.realm),
+            UID=httpd_info.pw_uid,
+            GID=httpd_info.pw_gid
+        )
         conf = ipautil.template_file(template, sub_dict)
-        fd = open(self.config_file, "w+")
-        fd.write(conf)
-        fd.flush()
-        fd.close()
+        with open(self.config_file, "w") as f:
+            f.write(conf)
+            ipautil.flush_sync(f)
 
-    def create_instance(self, dm_password=None):
+    def create_instance(self):
         suffix = ipautil.realm_to_suffix(self.realm)
         self.step("Generating ipa-custodia config file", self.__config_file)
         self.step("Making sure custodia container exists", self.__create_container)
         self.step("Generating ipa-custodia keys", self.__gen_keys)
         super(CustodiaInstance, self).create_instance(gensvc_name='KEYS',
                                                       fqdn=self.fqdn,
-                                                      dm_password=dm_password,
                                                       ldap_suffix=suffix,
                                                       realm=self.realm)
         sysupgrade.set_upgrade_state('custodia', 'installed', True)
 
+    def uninstall(self):
+        super(CustodiaInstance, self).uninstall()
+        keystore = IPAKEMKeys({
+            'server_keys': self.server_keys,
+            'ldap_uri': self.ldap_uri
+        })
+        keystore.remove_server_keys_file()
+        installutils.remove_file(self.config_file)
+        sysupgrade.set_upgrade_state('custodia', 'installed', False)
+
     def __gen_keys(self):
-        KeyStore = IPAKEMKeys({'server_keys': self.server_keys,
-                               'ldap_uri': self.ldap_uri})
-        KeyStore.generate_server_keys()
+        keystore = IPAKEMKeys({
+            'server_keys': self.server_keys,
+            'ldap_uri': self.ldap_uri
+        })
+        keystore.generate_server_keys()
 
     def upgrade_instance(self):
-        if not sysupgrade.get_upgrade_state("custodia", "installed"):
-            root_logger.info("Custodia service is being configured")
+        installed = sysupgrade.get_upgrade_state("custodia", "installed")
+        if installed:
+            if (not os.path.isfile(self.server_keys)
+                    or not os.path.isfile(self.config_file)):
+                logger.warning(
+                    "Custodia server keys or config are missing, forcing "
+                    "reinstallation of ipa-custodia."
+                )
+                installed = False
+
+        if not installed:
+            logger.info("Custodia service is being configured")
             self.create_instance()
+        else:
+            old_config = open(self.config_file).read()
+            self.__config_file()
+            new_config = open(self.config_file).read()
+            if new_config != old_config:
+                logger.info("Restarting Custodia")
+                self.restart()
+
         mode = os.stat(self.server_keys).st_mode
         if stat.S_IMODE(mode) != 0o600:
-            root_logger.info("Secure server.keys mode")
+            logger.info("Secure server.keys mode")
             os.chmod(self.server_keys, 0o600)
 
     def create_replica(self, master_host_name):
@@ -87,8 +115,6 @@ class CustodiaInstance(SimpleServiceInstance):
 
         self.step("Generating ipa-custodia config file", self.__config_file)
         self.step("Generating ipa-custodia keys", self.__gen_keys)
-        if self.ca_is_configured:
-            self.step("Importing RA Key", self.__import_ra_key)
         super(CustodiaInstance, self).create_instance(gensvc_name='KEYS',
                                                       fqdn=self.fqdn,
                                                       ldap_suffix=suffix,
@@ -103,17 +129,53 @@ class CustodiaInstance(SimpleServiceInstance):
             'SUFFIX': self.suffix,
         }
 
-        updater = ldapupdate.LDAPUpdate(dm_password=self.dm_password,
-                                        sub_dict=sub_dict)
+        updater = ldapupdate.LDAPUpdate(sub_dict=sub_dict)
         updater.update([os.path.join(paths.UPDATES_DIR, '73-custodia.update')])
 
-    def __import_ra_key(self):
-        cli = self.__CustodiaClient(server=self.master_host_name)
+    def import_ra_key(self, master_host_name):
+        cli = self.__CustodiaClient(server=master_host_name)
+        # please note that ipaCert part has to stay here for historical
+        # reasons (old servers expect you to ask for ra/ipaCert during
+        # replication as they store the RA agent cert in an NSS database
+        # with this nickname)
         cli.fetch_key('ra/ipaCert')
 
     def import_dm_password(self, master_host_name):
         cli = self.__CustodiaClient(server=master_host_name)
         cli.fetch_key('dm/DMHash')
+
+    def __wait_keys(self, host, timeout=300):
+        ldap_uri = 'ldap://%s' % host
+        deadline = int(time.time()) + timeout
+        logger.info("Waiting up to %s seconds to see our keys "
+                    "appear on host: %s", timeout, host)
+        # FIXME: Change once there's better way to show this mesage
+        # in installer output
+        print("Waiting for keys to appear on host: {}, "
+              "please wait until this has completed.".format(host))
+
+        konn = KEMLdap(ldap_uri)
+        saved_e = None
+        while True:
+            try:
+                return konn.check_host_keys(self.fqdn)
+            except Exception as e:
+                # log only once for the same error
+                if not isinstance(e, type(saved_e)):
+                    logger.debug(
+                        "Transient error getting keys: '%s'", e)
+                    saved_e = e
+                if int(time.time()) > deadline:
+                    raise RuntimeError("Timed out trying to obtain keys.")
+                time.sleep(1)
+
+    def __CustodiaClient(self, server):
+        # Before we attempt to fetch keys from this host, make sure our public
+        # keys have been replicated there.
+        self.__wait_keys(server)
+
+        return CustodiaClient('host@%s' % self.fqdn, self.server_keys,
+                              paths.KRB5_KEYTAB, server, realm=self.realm)
 
     def __get_keys(self, ca_host, cacerts_file, cacerts_pwd, data):
         # Fecth all needed certs one by one, then combine them in a single
@@ -126,13 +188,9 @@ class CustodiaInstance(SimpleServiceInstance):
 
         # Temporary nssdb
         tmpnssdir = tempfile.mkdtemp(dir=paths.TMP)
+        tmpdb = NSSDatabase(tmpnssdir)
+        tmpdb.create_db()
         try:
-            # Temporary nssdb password
-            nsspwfile = os.path.join(tmpnssdir, 'nsspwfile')
-            with open(nsspwfile, 'w+') as f:
-                f.write(b64encode(os.urandom(16)))
-                f.flush()
-
             # Cert file password
             crtpwfile = os.path.join(tmpnssdir, 'crtpwfile')
             with open(crtpwfile, 'w+') as f:
@@ -146,26 +204,23 @@ class CustodiaInstance(SimpleServiceInstance):
                 with open(pk12pwfile, 'w+') as f:
                     f.write(v['export password'])
                 pk12file = os.path.join(tmpnssdir, 'pk12file')
-                with open(pk12file, 'w+') as f:
+                with open(pk12file, 'wb') as f:
                     f.write(b64decode(v['pkcs12 data']))
                 ipautil.run([paths.PK12UTIL,
-                             '-d', tmpnssdir,
-                             '-k', nsspwfile,
+                             '-d', tmpdb.secdir,
+                             '-k', tmpdb.pwd_file,
                              '-n', nickname,
                              '-i', pk12file,
                              '-w', pk12pwfile])
 
             # Add CA certificates
-            tmpdb = CertDB(self.realm, nssdir=tmpnssdir)
             self.suffix = ipautil.realm_to_suffix(self.realm)
-            if self.admin_conn is not None:
-                self.ldap_disconnect()
-            self.import_ca_certs(tmpdb, True)
+            self.export_ca_certs_nssdb(tmpdb, True)
 
             # Now that we gathered all certs, re-export
             ipautil.run([paths.PKCS12EXPORT,
-                         '-d', tmpnssdir,
-                         '-p', nsspwfile,
+                         '-d', tmpdb.secdir,
+                         '-p', tmpdb.pwd_file,
                          '-w', crtpwfile,
                          '-o', cacerts_file])
 

@@ -17,6 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import logging
 import posixpath
 from copy import deepcopy
 
@@ -38,16 +39,21 @@ from .baseuser import (
     baseuser_find,
     baseuser_show,
     NO_UPG_MAGIC,
-    baseuser_pwdchars,
     baseuser_output_params,
+    baseuser_add_cert,
+    baseuser_remove_cert,
+    baseuser_add_principal,
+    baseuser_remove_principal,
     baseuser_add_manager,
-    baseuser_remove_manager)
+    baseuser_remove_manager,
+    baseuser_add_certmapdata,
+    baseuser_remove_certmapdata)
 from ipalib.request import context
 from ipalib.util import set_krbcanonicalname
 from ipalib import _, ngettext
 from ipalib import output
 from ipaplatform.paths import paths
-from ipapython.ipautil import ipa_generate_password, GEN_TMP_PWD_LEN
+from ipapython.ipautil import ipa_generate_password, TMP_PWD_ENTROPY_BITS
 from ipalib.capabilities import client_has_capability
 
 if six.PY3:
@@ -95,6 +101,8 @@ EXAMPLES:
    ipa stageuser-add  --first=Tim --last=User --from-delete tuser1
 
 """)
+
+logger = logging.getLogger(__name__)
 
 register = Registry()
 
@@ -340,7 +348,7 @@ class stageuser_add(baseuser_add):
         # If requested, generate a userpassword
         if 'userpassword' not in entry_attrs and options.get('random'):
             entry_attrs['userpassword'] = ipa_generate_password(
-                baseuser_pwdchars, pwd_len=GEN_TMP_PWD_LEN)
+                entropy_bits=TMP_PWD_ENTROPY_BITS)
             # save the password so it can be displayed in post_callback
             setattr(context, 'randompassword', entry_attrs['userpassword'])
 
@@ -444,7 +452,8 @@ class stageuser_find(baseuser_find):
         # but then they have to create inetOrgPerson stage user
         stagefilter = filter.replace(container_filter,
                                      "(|%s(objectclass=inetOrgPerson))" % container_filter)
-        self.log.debug("stageuser_find: pre_callback new filter=%s " % (stagefilter))
+        logger.debug("stageuser_find: pre_callback new filter=%s ",
+                     stagefilter)
         return (stagefilter, base_dn, scope)
 
     def post_callback(self, ldap, entries, truncated, *args, **options):
@@ -578,9 +587,10 @@ class stageuser_activate(LDAPQuery):
                    (isinstance(v, unicode) and v in (u'', None)):
                     try:
                         v.decode('utf-8')
-                        self.log.debug("merge: %s:%r wiped" % (attr, v))
+                        logger.debug("merge: %s:%r wiped", attr, v)
                     except Exception:
-                        self.log.debug("merge %s: [no_print %s]" % (attr, v.__class__.__name__))
+                        logger.debug("merge %s: [no_print %s]",
+                                     attr, v.__class__.__name__)
                     if isinstance(entry_to[attr], (list, tuple)):
                         # multi value attribute
                         if v not in entry_to[attr]:
@@ -594,9 +604,10 @@ class stageuser_activate(LDAPQuery):
                 else:
                     try:
                         v.decode('utf-8')
-                        self.log.debug("Add: %s:%r" % (attr, v))
+                        logger.debug("Add: %s:%r", attr, v)
                     except Exception:
-                        self.log.debug("Add %s: [no_print %s]" % (attr, v.__class__.__name__))
+                        logger.debug("Add %s: [no_print %s]",
+                                     attr, v.__class__.__name__)
 
                     if isinstance(entry_to[attr], (list, tuple)):
                         # multi value attribute
@@ -660,7 +671,7 @@ class stageuser_activate(LDAPQuery):
                 staging_dn, ['*']
             )
         except errors.NotFound:
-            self.obj.handle_not_found(*args)
+            raise self.obj.handle_not_found(*args)
         entry_attrs = dict((k.lower(), v) for (k, v) in entry_attrs.items())
 
         # Check it does not exist an active entry with the same RDN
@@ -692,7 +703,7 @@ class stageuser_activate(LDAPQuery):
                 del result_entry['description']
 
         for (k, v) in new_entry_attrs.items():
-            self.log.debug("new entry: k=%r and v=%r)"  % (k, v))
+            logger.debug("new entry: k=%r and v=%r)", k, v)
 
         self._build_new_entry(ldap, staging_dn, entry_attrs, new_entry_attrs)
 
@@ -705,10 +716,12 @@ class stageuser_activate(LDAPQuery):
             self._exc_wrapper(args, options, ldap.delete_entry)(staging_dn)
         except:
             try:
-                self.log.error("Fail to delete the Staging user after activating it %s " % (staging_dn))
+                logger.error("Fail to delete the Staging user after "
+                             "activating it %s ", staging_dn)
                 self._exc_wrapper(args, options, ldap.delete_entry)(active_dn)
             except Exception:
-                self.log.error("Fail to cleanup activation. The user remains active %s" % (active_dn))
+                logger.error("Fail to cleanup activation. The user remains "
+                             "active %s", active_dn)
             raise
 
         # add the user we just created into the default primary group
@@ -745,3 +758,39 @@ class stageuser_add_manager(baseuser_add_manager):
 @register()
 class stageuser_remove_manager(baseuser_remove_manager):
     __doc__ = _("Remove a manager to the stage user entry")
+
+
+@register()
+class stageuser_add_cert(baseuser_add_cert):
+    __doc__ = _("Add one or more certificates to the stageuser entry")
+    msg_summary = _('Added certificates to stageuser "%(value)s"')
+
+
+@register()
+class stageuser_remove_cert(baseuser_remove_cert):
+    __doc__ = _("Remove one or more certificates to the stageuser entry")
+    msg_summary = _('Removed certificates from stageuser "%(value)s"')
+
+
+@register()
+class stageuser_add_principal(baseuser_add_principal):
+    __doc__ = _('Add new principal alias to the stageuser entry')
+    msg_summary = _('Added new aliases to stageuser "%(value)s"')
+
+
+@register()
+class stageuser_remove_principal(baseuser_remove_principal):
+    __doc__ = _('Remove principal alias from the stageuser entry')
+    msg_summary = _('Removed aliases from stageuser "%(value)s"')
+
+
+@register()
+class stageuser_add_certmapdata(baseuser_add_certmapdata):
+    __doc__ = _("Add one or more certificate mappings to the stage user"
+                " entry.")
+
+
+@register()
+class stageuser_remove_certmapdata(baseuser_remove_certmapdata):
+    __doc__ = _("Remove one or more certificate mappings from the stage user"
+                " entry.")

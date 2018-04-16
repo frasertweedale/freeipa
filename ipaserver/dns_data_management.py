@@ -4,6 +4,8 @@
 
 from __future__ import absolute_import
 
+import logging
+
 import six
 
 from collections import defaultdict
@@ -20,10 +22,11 @@ from time import sleep, time
 from ipalib import errors
 from ipalib.dns import record_name_format
 from ipapython.dnsutil import DNSName, resolve_rrsets
-from ipapython.ipa_log_manager import root_logger
 
 if six.PY3:
     unicode=str
+
+logger = logging.getLogger(__name__)
 
 
 IPA_DEFAULT_MASTER_SRV_REC = (
@@ -51,6 +54,8 @@ IPA_DEFAULT_NTP_SRV_REC = (
     # srv record name, port
     (DNSName("_ntp._udp"), 123),
 )
+
+CA_RECORDS_DNS_TIMEOUT = 30  # timeout in seconds
 
 
 class IPADomainIsNotManagedByIPAError(Exception):
@@ -131,7 +136,7 @@ class IPASystemRecords(object):
         assert isinstance(hostname, DNSName) and hostname.is_absolute()
         r_name = DNSName('ipa-ca') + self.domain_abs
         rrsets = []
-        end_time = time() + 120  # timeout in seconds
+        end_time = time() + CA_RECORDS_DNS_TIMEOUT
         while time() < end_time:
             try:
                 rrsets = resolve_rrsets(hostname, (rdatatype.A, rdatatype.AAAA))
@@ -142,8 +147,8 @@ class IPASystemRecords(object):
             sleep(5)
 
         if not rrsets:
-            root_logger.error('unable to resolve host name %s to IP address, '
-                              'ipa-ca DNS record will be incomplete', hostname)
+            logger.error('unable to resolve host name %s to IP address, '
+                         'ipa-ca DNS record will be incomplete', hostname)
             return
 
         for rrset in rrsets:

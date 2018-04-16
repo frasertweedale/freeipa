@@ -27,8 +27,6 @@ import six
 from six.moves.urllib.parse import urlparse
 # pylint: enable=import-error
 
-from ipapython.ipa_log_manager import log_mgr
-
 '''
 Core Python has two cookie libraries, Cookie.py targeted to server
 side and cookielib.py targeted to client side. So why this module and
@@ -112,7 +110,7 @@ class Cookie(object):
 
     cookie = Cookie('session', session_id,
                     domain=my_domain, path=mypath,
-                    httpOnly=True, secure=True, expires=expiration)
+                    httponly=True, secure=True, expires=expiration)
     headers.append(('Set-Cookie', str(cookie)))
 
 
@@ -322,7 +320,8 @@ class Cookie(object):
         return cookies
 
     @classmethod
-    def get_named_cookie_from_string(cls, cookie_string, cookie_name, request_url=None):
+    def get_named_cookie_from_string(cls, cookie_string, cookie_name,
+                                     request_url=None, timestamp=None):
         '''
         A cookie string may contain multiple cookies, parse the cookie
         string and return the last cookie in the string matching the
@@ -344,6 +343,8 @@ class Cookie(object):
             if cookie.key == cookie_name:
                 target_cookie = cookie
 
+        if timestamp is not None:
+            target_cookie.timestamp = timestamp
         if request_url is not None:
             target_cookie.normalize(request_url)
         return target_cookie
@@ -351,9 +352,6 @@ class Cookie(object):
 
     def __init__(self, key, value, domain=None, path=None, max_age=None, expires=None,
                  secure=None, httponly=None, timestamp=None):
-
-        log_mgr.get_logger(self, True)
-
         self.key = key
         self.value = value
         self.domain = domain
@@ -596,7 +594,9 @@ class Cookie(object):
             # FIXME: At the moment we can't import from ipalib at the
             # module level because of a dependency loop (cycle) in the
             # import. Our module layout needs to be refactored.
+            # pylint: disable=ipa-forbidden-import
             from ipalib.util import validate_domain_name
+            # pylint: enable=ipa-forbidden-import
             try:
                 validate_domain_name(url_domain)
             except Exception:

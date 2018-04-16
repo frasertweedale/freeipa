@@ -17,6 +17,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import logging
 import os
 import shutil
 import tempfile
@@ -25,22 +26,19 @@ import pwd
 import ldif
 import itertools
 
-# pylint: disable=import-error
-from six.moves.configparser import SafeConfigParser
-# pylint: enable=import-error
+import six
 
+from ipaclient.install.client import update_ipa_nssdb
 from ipalib import api, errors
 from ipalib.constants import FQDN
-from ipapython import version, ipautil, certdb
+from ipapython import version, ipautil
 from ipapython.ipautil import run, user_input
-from ipapython import admintool
+from ipapython import admintool, certdb
 from ipapython.dn import DN
-from ipaserver.install.dsinstance import create_ds_user
-from ipaserver.install.cainstance import create_ca_user
 from ipaserver.install.replication import (wait_for_task, ReplicationManager,
                                            get_cs_replication_manager)
 from ipaserver.install import installutils
-from ipaserver.install import dsinstance, httpinstance, cainstance
+from ipaserver.install import dsinstance, httpinstance, cainstance, krbinstance
 from ipapython import ipaldap
 import ipapython.errors
 from ipaplatform.constants import constants
@@ -52,6 +50,17 @@ try:
     from ipaserver.install import adtrustinstance
 except ImportError:
     adtrustinstance = None
+
+# pylint: disable=import-error
+if six.PY3:
+    # The SafeConfigParser class has been renamed to ConfigParser in Py3
+    from configparser import ConfigParser as SafeConfigParser
+else:
+    from ConfigParser import SafeConfigParser
+# pylint: enable=import-error
+
+logger = logging.getLogger(__name__)
+
 
 def recursive_chown(path, uid, gid):
     '''
@@ -98,10 +107,9 @@ def decrypt_file(tmpdir, filename, keyring):
 
 
 class RemoveRUVParser(ldif.LDIFParser):
-    def __init__(self, input_file, writer, logger):
+    def __init__(self, input_file, writer):
         ldif.LDIFParser.__init__(self, input_file)
         self.writer = writer
-        self.log = logger
 
     def handle(self, dn, entry):
         objectclass = None
@@ -114,10 +122,12 @@ class RemoveRUVParser(ldif.LDIFParser):
             elif name == 'nsuniqueid':
                 nsuniqueid = [x.lower() for x in value]
 
-        if (objectclass and nsuniqueid and
-            'nstombstone' in objectclass and
-            'ffffffff-ffffffff-ffffffff-ffffffff' in nsuniqueid):
-            self.log.debug("Removing RUV entry %s", dn)
+        if (
+            objectclass and nsuniqueid and
+            b'nstombstone' in objectclass and
+            b'ffffffff-ffffffff-ffffffff-ffffffff' in nsuniqueid
+        ):
+            logger.debug("Removing RUV entry %s", dn)
             return
 
         self.writer.unparse(dn, entry)
@@ -137,7 +147,9 @@ class Restore(admintool.AdminTool):
         paths.DNSSEC_TOKENS_DIR,
     ]
 
-    FILES_TO_BE_REMOVED = []
+    FILES_TO_BE_REMOVED = [
+        paths.HTTPD_NSS_CONF,
+    ]
 
     def __init__(self, options, args):
         super(Restore, self).__init__(options, args)
@@ -216,8 +228,8 @@ class Restore(admintool.AdminTool):
         if not os.path.isabs(self.backup_dir):
             self.backup_dir = os.path.join(paths.IPA_BACKUP_DIR, self.backup_dir)
 
-        self.log.info("Preparing restore from %s on %s",
-                      self.backup_dir, FQDN)
+        logger.info("Preparing restore from %s on %s",
+                    self.backup_dir, FQDN)
 
         self.header = os.path.join(self.backup_dir, 'header')
 
@@ -277,8 +289,8 @@ class Restore(admintool.AdminTool):
                 raise admintool.ScriptError(
                     "Cannot restore a data backup into an empty system")
 
-        self.log.info("Performing %s restore from %s backup" %
-                      (restore_type, self.backup_type))
+        logger.info("Performing %s restore from %s backup",
+                    restore_type, self.backup_type)
 
         if self.backup_host != FQDN:
             raise admintool.ScriptError(
@@ -286,16 +298,15 @@ class Restore(admintool.AdminTool):
                 (FQDN, self.backup_host))
 
         if self.backup_ipa_version != str(version.VERSION):
-            self.log.warning(
+            logger.warning(
                 "Restoring data from a different release of IPA.\n"
                 "Data is version %s.\n"
-                "Server is running %s." %
-                (self.backup_ipa_version, str(version.VERSION)))
+                "Server is running %s.",
+                self.backup_ipa_version, str(version.VERSION))
             if (not options.unattended and
                     not user_input("Continue to restore?", False)):
                 raise admintool.ScriptError("Aborted")
 
-        create_ds_user()
         pent = pwd.getpwnam(constants.DS_USER)
 
         # Temporary directory for decrypting files before restoring
@@ -308,6 +319,9 @@ class Restore(admintool.AdminTool):
         os.chown(self.dir, pent.pw_uid, pent.pw_gid)
 
         cwd = os.getcwd()
+
+        logger.info("Temporary setting umask to 022")
+        old_umask = os.umask(0o022)
         try:
             dirsrv = services.knownservices.dirsrv
 
@@ -346,30 +360,30 @@ class Restore(admintool.AdminTool):
                 not user_input("Restoring data will overwrite existing live data. Continue to restore?", False)):
                 raise admintool.ScriptError("Aborted")
 
-            self.log.info(
+            logger.info(
                 "Each master will individually need to be re-initialized or")
-            self.log.info(
+            logger.info(
                 "re-created from this one. The replication agreements on")
-            self.log.info(
+            logger.info(
                 "masters running IPA 3.1 or earlier will need to be manually")
-            self.log.info(
+            logger.info(
                 "re-enabled. See the man page for details.")
 
-            self.log.info("Disabling all replication.")
+            logger.info("Disabling all replication.")
             self.disable_agreements()
 
             if restore_type != 'FULL':
                 if not options.online:
-                    self.log.info('Stopping Directory Server')
+                    logger.info('Stopping Directory Server')
                     dirsrv.stop(capture_output=False)
                 else:
-                    self.log.info('Starting Directory Server')
+                    logger.info('Starting Directory Server')
                     dirsrv.start(capture_output=False)
             else:
-                self.log.info('Stopping IPA services')
-                result = run(['ipactl', 'stop'], raiseonerr=False)
+                logger.info('Stopping IPA services')
+                result = run([paths.IPACTL, 'stop'], raiseonerr=False)
                 if result.returncode not in [0, 6]:
-                    self.log.warning('Stopping IPA failed: %s' % result.error_log)
+                    logger.warning('Stopping IPA failed: %s', result.error_log)
 
                 self.restore_selinux_booleans()
 
@@ -378,15 +392,11 @@ class Restore(admintool.AdminTool):
             # We do either a full file restore or we restore data.
             if restore_type == 'FULL':
                 self.remove_old_files()
-                if 'CA' in self.backup_services:
-                    create_ca_user()
                 self.cert_restore_prepare()
                 self.file_restore(options.no_logs)
                 self.cert_restore()
                 if 'CA' in self.backup_services:
                     self.__create_dogtag_log_dirs()
-                if http.is_kdcproxy_configured():
-                    httpinstance.create_kdcproxy_user()
 
             # Always restore the data from ldif
             # We need to restore both userRoot and ipaca.
@@ -395,7 +405,7 @@ class Restore(admintool.AdminTool):
 
             if restore_type != 'FULL':
                 if not options.online:
-                    self.log.info('Starting Directory Server')
+                    logger.info('Starting Directory Server')
                     dirsrv.start(capture_output=False)
             else:
                 # restore access controll configuration
@@ -407,18 +417,31 @@ class Restore(admintool.AdminTool):
                 services.knownservices.pki_tomcatd.enable()
                 services.knownservices.pki_tomcatd.disable()
 
-                self.log.info('Starting IPA services')
-                run(['ipactl', 'start'])
-                self.log.info('Restarting SSSD')
-                sssd = services.service('sssd')
+                logger.info('Restarting GSS-proxy')
+                gssproxy = services.service('gssproxy', api)
+                gssproxy.reload_or_restart()
+                logger.info('Starting IPA services')
+                run([paths.IPACTL, 'start'])
+                logger.info('Restarting SSSD')
+                sssd = services.service('sssd', api)
                 sssd.restart()
-                http.remove_httpd_ccache()
+                logger.info('Restarting oddjobd')
+                oddjobd = services.service('oddjobd', api)
+                if not oddjobd.is_enabled():
+                    logger.info("Enabling oddjobd")
+                    oddjobd.enable()
+                oddjobd.start()
+                http.remove_httpd_ccaches()
+                # have the daemons pick up their restored configs
+                run([paths.SYSTEMCTL, "--system", "daemon-reload"])
         finally:
             try:
                 os.chdir(cwd)
             except Exception as e:
-                self.log.error('Cannot change directory to %s: %s' % (cwd, e))
+                logger.error('Cannot change directory to %s: %s', cwd, e)
             shutil.rmtree(self.top_dir)
+            logger.info("Restoring umask to %s", old_umask)
+            os.umask(old_umask)
 
 
     def get_connection(self):
@@ -435,14 +458,11 @@ class Restore(admintool.AdminTool):
         if self._conn is not None:
             return self._conn
 
-        self._conn = ipaldap.IPAdmin(host=api.env.host,
-                                   ldapi=True,
-                                   protocol='ldapi',
-                                   realm=api.env.realm)
+        ldap_uri = ipaldap.get_ldap_uri(protocol='ldapi', realm=api.env.realm)
+        self._conn = ipaldap.LDAPClient(ldap_uri)
 
         try:
-            pw_name = pwd.getpwuid(os.geteuid()).pw_name
-            self._conn.do_external_bind(pw_name)
+            self._conn.external_bind()
         except Exception as e:
             raise admintool.ScriptError('Unable to bind to LDAP server: %s'
                 % e)
@@ -458,7 +478,8 @@ class Restore(admintool.AdminTool):
         try:
             conn = self.get_connection()
         except Exception as e:
-            self.log.error('Unable to get connection, skipping disabling agreements: %s' % e)
+            logger.error('Unable to get connection, skipping disabling '
+                         'agreements: %s', e)
             return
         masters = []
         dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
@@ -478,7 +499,8 @@ class Restore(admintool.AdminTool):
                 repl = ReplicationManager(api.env.realm, master,
                                           self.dirman_password)
             except Exception as e:
-                self.log.critical("Unable to disable agreement on %s: %s" % (master, e))
+                logger.critical("Unable to disable agreement on %s: %s",
+                                master, e)
                 continue
 
             master_dn = DN(('cn', master), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), api.env.basedn)
@@ -495,7 +517,8 @@ class Restore(admintool.AdminTool):
                      for rep in host_entries]
 
             for host in hosts:
-                self.log.info('Disabling replication agreement on %s to %s' % (master, host))
+                logger.info('Disabling replication agreement on %s to %s',
+                            master, host)
                 repl.disable_agreement(host)
 
             if 'CA' in services_cns:
@@ -503,14 +526,16 @@ class Restore(admintool.AdminTool):
                     repl = get_cs_replication_manager(api.env.realm, master,
                                                       self.dirman_password)
                 except Exception as e:
-                    self.log.critical("Unable to disable agreement on %s: %s" % (master, e))
+                    logger.critical("Unable to disable agreement on %s: %s",
+                                    master, e)
                     continue
 
                 host_entries = repl.find_ipa_replication_agreements()
                 hosts = [rep.single_value.get('nsds5replicahost')
                          for rep in host_entries]
                 for host in hosts:
-                    self.log.info('Disabling CA replication agreement on %s to %s' % (master, host))
+                    logger.info('Disabling CA replication agreement on %s to '
+                                '%s', master, host)
                     repl.hostnames = [master, host]
                     repl.disable_agreement(host)
 
@@ -521,7 +546,7 @@ class Restore(admintool.AdminTool):
 
         If executed online create a task and wait for it to complete.
         '''
-        self.log.info('Restoring from %s in %s' % (backend, instance))
+        logger.info('Restoring from %s in %s', backend, instance)
 
         cn = time.strftime('import_%Y_%m_%d_%H_%M_%S')
         dn = DN(('cn', cn), ('cn', 'import'), ('cn', 'tasks'), ('cn', 'config'))
@@ -538,11 +563,15 @@ class Restore(admintool.AdminTool):
             os.chown(ldifdir, pent.pw_uid, pent.pw_gid)
 
         ipautil.backup_file(ldiffile)
-        with open(ldiffile, 'wb') as out_file:
+        with open(ldiffile, 'w') as out_file:
             ldif_writer = ldif.LDIFWriter(out_file)
             with open(srcldiffile, 'rb') as in_file:
-                ldif_parser = RemoveRUVParser(in_file, ldif_writer, self.log)
+                ldif_parser = RemoveRUVParser(in_file, ldif_writer)
                 ldif_parser.parse()
+
+        # Make sure the modified ldiffile is owned by DS_USER
+        pent = pwd.getpwnam(constants.DS_USER)
+        os.chown(ldiffile, pent.pw_uid, pent.pw_gid)
 
         if online:
             conn = self.get_connection()
@@ -560,10 +589,10 @@ class Restore(admintool.AdminTool):
             try:
                 conn.add_entry(ent)
             except Exception as e:
-                self.log.error("Unable to bind to LDAP server: %s" % e)
+                logger.error("Unable to bind to LDAP server: %s", e)
                 return
 
-            self.log.info("Waiting for LDIF to finish")
+            logger.info("Waiting for LDIF to finish")
             wait_for_task(conn, dn)
         else:
             try:
@@ -577,7 +606,7 @@ class Restore(admintool.AdminTool):
                     '-n', backend]
             result = run(args, raiseonerr=False)
             if result.returncode != 0:
-                self.log.critical("ldif2db failed: %s" % result.error_log)
+                logger.critical("ldif2db failed: %s", result.error_log)
 
 
     def bak2db(self, instance, backend, online=True):
@@ -593,9 +622,9 @@ class Restore(admintool.AdminTool):
         to treat ipaca specially.
         '''
         if backend is not None:
-            self.log.info('Restoring %s in %s' % (backend, instance))
+            logger.info('Restoring %s in %s', backend, instance)
         else:
-            self.log.info('Restoring %s' % instance)
+            logger.info('Restoring %s', instance)
 
         cn = time.strftime('restore_%Y_%m_%d_%H_%M_%S')
 
@@ -621,7 +650,7 @@ class Restore(admintool.AdminTool):
                 raise admintool.ScriptError('Unable to bind to LDAP server: %s'
                     % e)
 
-            self.log.info("Waiting for restore to finish")
+            logger.info("Waiting for restore to finish")
             wait_for_task(conn, dn)
         else:
             args = [paths.BAK2DB,
@@ -632,7 +661,7 @@ class Restore(admintool.AdminTool):
                 args.append(backend)
             result = run(args, raiseonerr=False)
             if result.returncode != 0:
-                self.log.critical("bak2db failed: %s" % result.error_log)
+                logger.critical("bak2db failed: %s", result.error_log)
 
 
     def restore_default_conf(self):
@@ -654,8 +683,8 @@ class Restore(admintool.AdminTool):
 
         result = run(args, raiseonerr=False)
         if result.returncode != 0:
-            self.log.critical('Restoring %s failed: %s' %
-                              (paths.IPA_DEFAULT_CONF, result.error_log))
+            logger.critical('Restoring %s failed: %s',
+                            paths.IPA_DEFAULT_CONF, result.error_log)
         os.chdir(cwd)
 
     def remove_old_files(self):
@@ -668,15 +697,14 @@ class Restore(admintool.AdminTool):
                 shutil.rmtree(d)
             except OSError as e:
                 if e.errno != 2:  # 2: dir does not exist
-                    self.log.warning("Could not remove directory: %s (%s)",
-                                     d, e)
+                    logger.warning("Could not remove directory: %s (%s)", d, e)
 
         for f in self.FILES_TO_BE_REMOVED:
             try:
                 os.remove(f)
             except OSError as e:
                 if e.errno != 2:  # 2: file does not exist
-                    self.log.warning("Could not remove file: %s (%s)", f, e)
+                    logger.warning("Could not remove file: %s (%s)", f, e)
 
     def file_restore(self, nologs=False):
         '''
@@ -685,7 +713,7 @@ class Restore(admintool.AdminTool):
         This MUST be done offline because we directly backup the 389-ds
         databases.
         '''
-        self.log.info("Restoring files")
+        logger.info("Restoring files")
         cwd = os.getcwd()
         os.chdir('/')
         args = ['tar',
@@ -700,7 +728,7 @@ class Restore(admintool.AdminTool):
 
         result = run(args, raiseonerr=False)
         if result.returncode != 0:
-            self.log.critical('Restoring files failed: %s', result.error_log)
+            logger.critical('Restoring files failed: %s', result.error_log)
 
         os.chdir(cwd)
 
@@ -710,16 +738,19 @@ class Restore(admintool.AdminTool):
         Read the backup file header that contains the meta data about
         this particular backup.
         '''
-        with open(self.header) as fd:
-            config = SafeConfigParser()
-            config.readfp(fd)
+        config = SafeConfigParser()
+        config.read(self.header)
 
         self.backup_type = config.get('ipa', 'type')
         self.backup_time = config.get('ipa', 'time')
         self.backup_host = config.get('ipa', 'host')
         self.backup_ipa_version = config.get('ipa', 'ipa_version')
         self.backup_version = config.get('ipa', 'version')
+        # pylint: disable=no-member
+        # we can assume that returned object is string and it has .split()
+        # method
         self.backup_services = config.get('ipa', 'services').split(',')
+        # pylint: enable=no-member
 
 
     def extract_backup(self, keyring=None):
@@ -742,7 +773,7 @@ class Restore(admintool.AdminTool):
                 encrypt = True
 
         if encrypt:
-            self.log.info('Decrypting %s' % filename)
+            logger.info('Decrypting %s', filename)
             filename = decrypt_file(self.dir, filename, keyring)
 
         os.chdir(self.dir)
@@ -784,34 +815,34 @@ class Restore(admintool.AdminTool):
         try:
             pent = pwd.getpwnam(constants.PKI_USER)
         except KeyError:
-            self.log.debug("No %s user exists, skipping CA directory creation",
-                           constants.PKI_USER)
+            logger.debug("No %s user exists, skipping CA directory creation",
+                         constants.PKI_USER)
             return
-        self.log.debug('Creating log directories for dogtag')
+        logger.debug('Creating log directories for dogtag')
         for dir in dirs:
             try:
-                self.log.debug('Creating %s' % dir)
+                logger.debug('Creating %s', dir)
                 os.mkdir(dir)
                 os.chmod(dir, 0o770)
                 os.chown(dir, pent.pw_uid, pent.pw_gid)
                 tasks.restore_context(dir)
             except Exception as e:
                 # This isn't so fatal as to side-track the restore
-                self.log.error('Problem with %s: %s' % (dir, e))
+                logger.error('Problem with %s: %s', dir, e)
 
     def restore_selinux_booleans(self):
-        bools = dict(httpinstance.SELINUX_BOOLEAN_SETTINGS)
+        bools = dict(constants.SELINUX_BOOLEAN_HTTPD)
         if 'ADTRUST' in self.backup_services:
             if adtrustinstance:
-                bools.update(adtrustinstance.SELINUX_BOOLEAN_SETTINGS)
+                bools.update(constants.SELINUX_BOOLEAN_ADTRUST)
             else:
-                self.log.error(
+                logger.error(
                     'The AD trust package was not found, '
                     'not setting SELinux booleans.')
         try:
             tasks.set_selinux_booleans(bools)
         except ipapython.errors.SetseboolError as e:
-            self.log.error('%s', e)
+            logger.error('%s', e)
 
     def cert_restore_prepare(self):
         cainstance.CAInstance().stop_tracking_certificates()
@@ -819,30 +850,33 @@ class Restore(admintool.AdminTool):
         try:
             dsinstance.DsInstance().stop_tracking_certificates(
                 installutils.realm_to_serverid(api.env.realm))
-        except OSError:
+        except (OSError, IOError):
             # When IPA is not installed, DS NSS DB does not exist
             pass
 
-        for basename in ('cert8.db', 'key3.db', 'secmod.db', 'pwdfile.txt'):
+        krbinstance.KrbInstance().stop_tracking_certs()
+
+        for basename in certdb.NSS_FILES:
             filename = os.path.join(paths.IPA_NSSDB_DIR, basename)
             try:
                 ipautil.backup_file(filename)
             except OSError as e:
-                self.log.error("Failed to backup %s: %s" % (filename, e))
+                logger.error("Failed to backup %s: %s", filename, e)
 
         tasks.remove_ca_certs_from_systemwide_ca_store()
 
     def cert_restore(self):
         try:
-            certdb.update_ipa_nssdb()
+            update_ipa_nssdb()
         except RuntimeError as e:
-            self.log.error("%s", e)
+            logger.error("%s", e)
 
         tasks.reload_systemwide_ca_store()
 
         services.knownservices.certmonger.restart()
 
     def init_api(self, **overrides):
+        overrides.setdefault('confdir', paths.ETC_IPA)
         api.bootstrap(in_server=True, context='restore', **overrides)
         api.finalize()
 

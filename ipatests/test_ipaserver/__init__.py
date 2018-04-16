@@ -20,3 +20,7 @@
 """
 Sub-package containing unit tests for `ipaserver` package.
 """
+import ipatests.util
+
+
+ipatests.util.check_ipaclient_unittests()

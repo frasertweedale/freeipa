@@ -7,9 +7,7 @@ SUBDIRS =  				\
 	$(NULL)
 
 EXTRA_DIST =                            \
-        $(NULL)
-
-MAINTAINERCLEANFILES =                  \
-        *~                              \
-        Makefile.in
-	$(NULL)
+	build.profile.js		\
+	dojo.profile.js			\
+	freeipa				\
+	webui.profile.js

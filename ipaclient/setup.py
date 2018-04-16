@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 # Copyright (C) 2007  Red Hat
 # see file 'COPYING' for use and warranty information
 #
@@ -31,10 +31,10 @@ if __name__ == '__main__':
     ipasetup(
         name="ipaclient",
         doc=__doc__,
-        scripts=['../ipa'],
         package_dir={'ipaclient': ''},
         packages=[
             "ipaclient",
+            "ipaclient.install",
             "ipaclient.plugins",
             "ipaclient.remote_plugins",
             "ipaclient.remote_plugins.2_49",
@@ -42,4 +42,29 @@ if __name__ == '__main__':
             "ipaclient.remote_plugins.2_156",
             "ipaclient.remote_plugins.2_164",
         ],
+        package_data={
+            'ipaclient': [
+                'csrgen/profiles/*.json',
+                'csrgen/rules/*.json',
+                'csrgen/templates/*.tmpl',
+            ],
+        },
+        install_requires=[
+            "cryptography",
+            "ipalib",
+            "ipapython",
+            "qrcode",
+            "six",
+        ],
+        entry_points={
+            'console_scripts': [
+                'ipa = ipaclient.__main__:main'
+            ]
+        },
+        extras_require={
+            "install": ["ipaplatform"],
+            "otptoken_yubikey": ["python-yubico", "pyusb"],
+            "csrgen": ["cffi", "jinja2"],
+        },
+        zip_safe=False,
     )

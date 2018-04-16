@@ -1,4 +1,4 @@
-Here is a quickie guide to get you started in IPA development.
+Here is a quick guide to get you started in IPA development.
 
 Dependencies
 ------------
@@ -7,41 +7,39 @@ For more information, see http://www.freeipa.org/page/Build
 
 The quickest way to get the dependencies needed for building is:
 
-# dnf builddep -b -D "with_lint 1" --spec freeipa.spec.in
+# dnf builddep -b -D "with_python3 1" -D "with_wheels 1" -D "with_lint 1" --spec freeipa.spec.in --best --allowerasing
 
-or
+TIP: For building with latest dependencies for freeipa master enable copr repo:
 
-# yum install rpm-build `grep "^BuildRequires" freeipa.spec.in | awk '{ print $2 }' | grep -v "^/"`
+# dnf copr enable @freeipa/freeipa-master
 
-This is currently (2015-05-07):
-
-yum install rpm-build 389-ds-base-devel svrcore-devel policycoreutils \
-systemd-units samba-devel samba-python libtalloc-devel \
-libtevent-devel nspr-devel nss-devel openssl-devel openldap-devel krb5-devel \
-krb5-workstation libuuid-devel libcurl-devel xmlrpc-c-devel popt-devel \
-autoconf automake m4 libtool gettext python-devel python-ldap \
-python-setuptools python-nss python-netaddr python-gssapi \
-python-rhsm pyOpenSSL pylint python-polib libipa_hbac-python python-memcached \
-sssd python-lxml python-pyasn1 python-qrcode-core python-dns m2crypto \
-libsss_idmap-devel libsss_nss_idmap-devel java-headless rhino \
-libverto-devel systemd libunistring-devel python-lesscpy python-yubico \
-python-backports-ssl_match_hostname softhsm-devel openssl-devel \
-p11-kit-devel pki-base python-pytest-multihost python-pytest-sourceorder
+see: https://copr.fedorainfracloud.org/coprs/g/freeipa/freeipa-master/
 
 Building
 --------
 
 From the root of the source tree run:
-$ make rpms
+$ ./makerpms.sh
 
 The resulting rpm packages are in dist/rpms:
 
 # yum --nogpgcheck localinstall dist/rpms/*
 # ipa-server-install
 
-It may be possible to do a simple make all install but this has not been
+You might tweak the build and run steps separatelly:
+$ autoreconf -i
+$ ./configure
+$ make
+$ make install
+
+It may be possible to do a simple make install but this has not been
 well-tested. Additional work is done in pre/post install scripts in the ipa
 spec file.
+
+To build only python2 packages on fedora following steps are required:
+$ autoreconf -i
+$ ./configure
+$ make rpms RPMBUILD_OPTS="--define 'with_python3 0'"
 
 Developing plugins
 ------------------
@@ -54,7 +52,7 @@ install the rpms and then configure IPA using ipa-server-install.
 Get a TGT for the admin user with: kinit admin
 
 Next you'll need 2 sessions in the source tree. In the first session run
-python lite-server.py. In the second session copy /etc/ipa/default.conf into
+```make lite-server```. In the second session copy /etc/ipa/default.conf into
 ~/.ipa/default.conf and replace xmlrpc_uri with http://127.0.0.1:8888/ipa/xml.
 Finally run the ./ipa tool and it will make requests to the lite-server
 listening on 127.0.0.1:8888.
@@ -68,9 +66,9 @@ changes are required.
 Testing
 -------
 
-For more information, see http://www.freeipa.org/page/Testing
+For more information, see https://www.freeipa.org/page/Testing
 
-We use python nosetests to test for regressions in the management framework
+We use python pytest to test for regressions in the management framework
 and plugins. All test dependencies are required by the freeipa-tests package.
 
 To run all of the tests you will need 2 sessions, one to run the lite-server
@@ -83,6 +81,14 @@ the lite-server:
 Some tests may be skipped. For example, all the XML-RPC tests will be skipped
 if you haven't started the lite-server. The DNS tests will be skipped if
 the underlying IPA installation doesn't configure DNS, etc.
+
+To just execute fast unittest and code linters, use the fastcheck target.
+Fast tests only execute a subset of the test suite that does not depend on
+an initialized API and server instance. Fast linting just verifies modified
+files / lines.
+
+% make fastcheck
+
 
 API.txt
 -------

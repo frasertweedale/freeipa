@@ -17,30 +17,38 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+import logging
 import os
 import shutil
 import tempfile
 import time
 import pwd
 
-# pylint: disable=import-error
-from six.moves.configparser import SafeConfigParser
-# pylint: enable=import-error
+import six
 
 from ipaplatform.paths import paths
 from ipaplatform import services
 from ipalib import api, errors
 from ipapython import version
 from ipapython.ipautil import run, write_tmp_file
-from ipapython import admintool
+from ipapython import admintool, certdb
 from ipapython.dn import DN
 from ipaserver.install.replication import wait_for_task
 from ipaserver.install import installutils
-from ipaserver.session import ISO8601_DATETIME_FMT
 from ipapython import ipaldap
-from ipalib.constants import CACERT
 from ipaplatform.constants import constants
 from ipaplatform.tasks import tasks
+
+# pylint: disable=import-error
+if six.PY3:
+    # The SafeConfigParser class has been renamed to ConfigParser in Py3
+    from configparser import ConfigParser as SafeConfigParser
+else:
+    from ConfigParser import SafeConfigParser
+# pylint: enable=import-error
+ISO8601_DATETIME_FMT = '%Y-%m-%dT%H:%M:%S'
+
+logger = logging.getLogger(__name__)
 
 """
 A test gpg can be generated like this:
@@ -102,20 +110,19 @@ class Backup(admintool.AdminTool):
     description = "Back up IPA files and databases."
 
     dirs = (paths.IPA_HTML_DIR,
-        paths.ROOT_PKI,
-        paths.PKI_TOMCAT,
-        paths.SYSCONFIG_PKI,
-        paths.HTTPD_ALIAS_DIR,
-        paths.VAR_LIB_PKI_DIR,
-        paths.SYSRESTORE,
-        paths.IPA_CLIENT_SYSRESTORE,
-        paths.IPA_DNSSEC_DIR,
-        paths.SSSD_PUBCONF_KRB5_INCLUDE_D_DIR,
-        paths.AUTHCONFIG_LAST,
-        paths.VAR_LIB_CERTMONGER_DIR,
-        paths.VAR_LIB_IPA,
-        paths.VAR_RUN_DIRSRV_DIR,
-        paths.DIRSRV_LOCK_DIR,
+            paths.ROOT_PKI,
+            paths.PKI_TOMCAT,
+            paths.SYSCONFIG_PKI,
+            paths.VAR_LIB_PKI_DIR,
+            paths.SYSRESTORE,
+            paths.IPA_CLIENT_SYSRESTORE,
+            paths.IPA_DNSSEC_DIR,
+            paths.SSSD_PUBCONF_KRB5_INCLUDE_D_DIR,
+            paths.AUTHCONFIG_LAST,
+            paths.VAR_LIB_CERTMONGER_DIR,
+            paths.VAR_LIB_IPA,
+            paths.VAR_RUN_DIRSRV_DIR,
+            paths.DIRSRV_LOCK_DIR,
     )
 
     files = (
@@ -124,7 +131,6 @@ class Backup(admintool.AdminTool):
         paths.RESOLV_CONF,
         paths.SYSCONFIG_PKI_TOMCAT,
         paths.SYSCONFIG_DIRSRV,
-        paths.SYSCONFIG_NTPD,
         paths.SYSCONFIG_KRB5KDC_DIR,
         paths.SYSCONFIG_IPA_DNSKEYSYNCD,
         paths.SYSCONFIG_IPA_ODS_EXPORTER,
@@ -140,26 +146,36 @@ class Backup(admintool.AdminTool):
         paths.OPENLDAP_LDAP_CONF,
         paths.LIMITS_CONF,
         paths.HTTPD_PASSWORD_CONF,
-        paths.IPA_KEYTAB,
+        paths.HTTP_KEYTAB,
         paths.HTTPD_IPA_KDCPROXY_CONF,
         paths.HTTPD_IPA_PKI_PROXY_CONF,
         paths.HTTPD_IPA_REWRITE_CONF,
-        paths.HTTPD_NSS_CONF,
+        paths.HTTPD_SSL_CONF,
+        paths.HTTPD_CERT_FILE,
+        paths.HTTPD_KEY_FILE,
         paths.HTTPD_IPA_CONF,
         paths.SSHD_CONFIG,
         paths.SSH_CONFIG,
         paths.KRB5_CONF,
-        CACERT,
+        paths.KDC_CA_BUNDLE_PEM,
+        paths.CA_BUNDLE_PEM,
+        paths.IPA_CA_CRT,
         paths.IPA_DEFAULT_CONF,
         paths.DS_KEYTAB,
-        paths.NTP_CONF,
+        paths.CHRONY_CONF,
         paths.SMB_CONF,
         paths.SAMBA_KEYTAB,
         paths.DOGTAG_ADMIN_P12,
-        paths.KRA_AGENT_PEM,
+        paths.RA_AGENT_PEM,
+        paths.RA_AGENT_KEY,
         paths.CACERT_P12,
+        paths.KRACERT_P12,
         paths.KRB5KDC_KDC_CONF,
+        paths.KDC_CERT,
+        paths.KDC_KEY,
+        paths.CACERT_PEM,
         paths.SYSTEMD_IPA_SERVICE,
+        paths.SYSTEMD_SYSTEM_HTTPD_IPA_CONF,
         paths.SYSTEMD_SSSD_SERVICE,
         paths.SYSTEMD_CERTMONGER_SERVICE,
         paths.SYSTEMD_PKI_TOMCAT_SERVICE,
@@ -172,10 +188,12 @@ class Backup(admintool.AdminTool):
         paths.DNSSEC_SOFTHSM_PIN_SO,
         paths.IPA_ODS_EXPORTER_KEYTAB,
         paths.IPA_DNSKEYSYNCD_KEYTAB,
+        paths.IPA_CUSTODIA_KEYS,
+        paths.IPA_CUSTODIA_CONF,
         paths.HOSTS,
     ) + tuple(
         os.path.join(paths.IPA_NSSDB_DIR, file)
-        for file in ('cert8.db', 'key3.db', 'secmod.db')
+        for file in (certdb.NSS_DBM_FILES + certdb.NSS_SQL_FILES)
     )
 
     logs=(
@@ -257,10 +275,10 @@ class Backup(admintool.AdminTool):
         options = self.options
         super(Backup, self).run()
 
-        api.bootstrap(in_server=True, context='backup')
+        api.bootstrap(in_server=True, context='backup', confdir=paths.ETC_IPA)
         api.finalize()
 
-        self.log.info("Preparing backup on %s", api.env.host)
+        logger.info("Preparing backup on %s", api.env.host)
 
         pent = pwd.getpwnam(constants.DS_USER)
 
@@ -288,11 +306,11 @@ class Backup(admintool.AdminTool):
             self.create_header(options.data_only)
             if options.data_only:
                 if not options.online:
-                    self.log.info('Stopping Directory Server')
+                    logger.info('Stopping Directory Server')
                     dirsrv.stop(capture_output=False)
             else:
-                self.log.info('Stopping IPA services')
-                run(['ipactl', 'stop'])
+                logger.info('Stopping IPA services')
+                run([paths.IPACTL, 'stop'])
 
             instance = installutils.realm_to_serverid(api.env.realm)
             if os.path.exists(paths.VAR_LIB_SLAPD_INSTANCE_DIR_TEMPLATE %
@@ -311,17 +329,17 @@ class Backup(admintool.AdminTool):
 
             if options.data_only:
                 if not options.online:
-                    self.log.info('Starting Directory Server')
+                    logger.info('Starting Directory Server')
                     dirsrv.start(capture_output=False)
             else:
-                self.log.info('Starting IPA service')
-                run(['ipactl', 'start'])
+                logger.info('Starting IPA service')
+                run([paths.IPACTL, 'start'])
 
         finally:
             try:
                 os.chdir(cwd)
             except Exception as e:
-                self.log.error('Cannot change directory to %s: %s' % (cwd, e))
+                logger.error('Cannot change directory to %s: %s', cwd, e)
             shutil.rmtree(self.top_dir)
 
 
@@ -346,6 +364,10 @@ class Backup(admintool.AdminTool):
             if os.path.exists(file):
                 self.files.append(file)
 
+        self.files.append(
+            paths.HTTPD_PASSWD_FILE_FMT.format(host=api.env.host)
+        )
+
         self.logs.append(paths.VAR_LOG_DIRSRV_INSTANCE_TEMPLATE % serverid)
 
 
@@ -356,17 +378,14 @@ class Backup(admintool.AdminTool):
         if self._conn is not None:
             return self._conn
 
-        self._conn = ipaldap.IPAdmin(host=api.env.host,
-                                    ldapi=True,
-                                    protocol='ldapi',
-                                    realm=api.env.realm)
+        ldap_uri = ipaldap.get_ldap_uri(protocol='ldapi', realm=api.env.realm)
+        self._conn = ipaldap.LDAPClient(ldap_uri)
 
         try:
-            pw_name = pwd.getpwuid(os.geteuid()).pw_name
-            self._conn.do_external_bind(pw_name)
+            self._conn.external_bind()
         except Exception as e:
-            self.log.error("Unable to bind to LDAP server %s: %s" %
-                (self._conn.host, e))
+            logger.error("Unable to bind to LDAP server %s: %s",
+                         self._conn.host, e)
 
         return self._conn
 
@@ -380,7 +399,7 @@ class Backup(admintool.AdminTool):
         For SELinux reasons this writes out to the 389-ds backup location
         and we move it.
         '''
-        self.log.info('Backing up %s in %s to LDIF' % (backend, instance))
+        logger.info('Backing up %s in %s to LDIF', backend, instance)
 
         cn = time.strftime('export_%Y_%m_%d_%H_%M_%S')
         dn = DN(('cn', cn), ('cn', 'export'), ('cn', 'tasks'), ('cn', 'config'))
@@ -410,7 +429,7 @@ class Backup(admintool.AdminTool):
                 raise admintool.ScriptError('Unable to add LDIF task: %s'
                     % e)
 
-            self.log.info("Waiting for LDIF to finish")
+            logger.info("Waiting for LDIF to finish")
             wait_for_task(conn, dn)
         else:
             args = [paths.DB2LDIF,
@@ -420,7 +439,7 @@ class Backup(admintool.AdminTool):
                     '-a', ldiffile]
             result = run(args, raiseonerr=False)
             if result.returncode != 0:
-                self.log.critical('db2ldif failed: %s', result.error_log)
+                logger.critical('db2ldif failed: %s', result.error_log)
 
         # Move the LDIF backup to our location
         shutil.move(ldiffile, os.path.join(self.dir, ldifname))
@@ -432,7 +451,7 @@ class Backup(admintool.AdminTool):
 
         If executed online create a task and wait for it to complete.
         '''
-        self.log.info('Backing up %s' % instance)
+        logger.info('Backing up %s', instance)
         cn = time.strftime('backup_%Y_%m_%d_%H_%M_%S')
         dn = DN(('cn', cn), ('cn', 'backup'), ('cn', 'tasks'), ('cn', 'config'))
 
@@ -457,13 +476,13 @@ class Backup(admintool.AdminTool):
                 raise admintool.ScriptError('Unable to to add backup task: %s'
                     % e)
 
-            self.log.info("Waiting for BAK to finish")
+            logger.info("Waiting for BAK to finish")
             wait_for_task(conn, dn)
         else:
             args = [paths.DB2BAK, bakdir, '-Z', instance]
             result = run(args, raiseonerr=False)
             if result.returncode != 0:
-                self.log.critical('db2bak failed: %s', result.error_log)
+                logger.critical('db2bak failed: %s', result.error_log)
 
         shutil.move(bakdir, self.dir)
 
@@ -475,7 +494,7 @@ class Backup(admintool.AdminTool):
 
         tarfile = os.path.join(self.dir, 'files.tar')
 
-        self.log.info("Backing up files")
+        logger.info("Backing up files")
         args = ['tar',
                 '--exclude=/var/lib/ipa/backup',
                 '--xattrs',
@@ -520,7 +539,7 @@ class Backup(admintool.AdminTool):
 
         # Compress the archive. This is done separately, since 'tar' cannot
         # append to a compressed archive.
-        result = run(['gzip', tarfile], raiseonerr=False)
+        result = run([paths.GZIP, tarfile], raiseonerr=False)
         if result.returncode != 0:
             raise admintool.ScriptError(
                 'gzip returned non-zero code %d '
@@ -553,11 +572,11 @@ class Backup(admintool.AdminTool):
             conn = self.get_connection()
             services = conn.get_entries(dn, conn.SCOPE_ONELEVEL)
         except errors.NetworkError:
-            self.log.critical(
+            logger.critical(
               "Unable to obtain list of master services, continuing anyway")
         except Exception as e:
-            self.log.error("Failed to read services from '%s': %s" %
-                (conn.host, e))
+            logger.error("Failed to read services from '%s': %s",
+                         conn.host, e)
         else:
             services_cns = [s.single_value['cn'] for s in services]
 
@@ -604,9 +623,9 @@ class Backup(admintool.AdminTool):
                 (result.returncode, result.error_log))
 
         if encrypt:
-            self.log.info('Encrypting %s' % filename)
+            logger.info('Encrypting %s', filename)
             filename = encrypt_file(filename, keyring)
 
         shutil.move(self.header, backup_dir)
 
-        self.log.info('Backed up to %s', backup_dir)
+        logger.info('Backed up to %s', backup_dir)

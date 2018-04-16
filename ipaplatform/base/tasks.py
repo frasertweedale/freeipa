@@ -22,27 +22,23 @@
 This module contains default platform-specific implementations of system tasks.
 '''
 
-import pwd
-import grp
+import logging
 
 from pkg_resources import parse_version
 
 from ipaplatform.paths import paths
-from ipapython.ipa_log_manager import log_mgr
 from ipapython import ipautil
 
-log = log_mgr.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class BaseTaskNamespace(object):
 
-    def restore_context(self, filepath):
-        """
-        Restore SELinux security context on the given filepath.
+    def restore_context(self, filepath, force=False):
+        """Restore SELinux security context on the given filepath.
 
         No return value expected.
         """
-
         raise NotImplementedError()
 
     def backup_hostname(self, fstore, statestore):
@@ -100,6 +96,11 @@ class BaseTaskNamespace(object):
         an RuntimeError, which suggest installing the package containing
         restorecon and rerunning the installation.
         """
+
+        raise NotImplementedError()
+
+    def check_ipv6_stack_enabled(self):
+        """Check whether IPv6 kernel module is loaded"""
 
         raise NotImplementedError()
 
@@ -181,53 +182,8 @@ class BaseTaskNamespace(object):
 
         raise NotImplementedError()
 
-    def create_system_user(self, name, group, homedir, shell, uid=None, gid=None, comment=None, create_homedir=False):
-        """Create a system user with a corresponding group"""
-        try:
-            grp.getgrnam(group)
-        except KeyError:
-            log.debug('Adding group %s', group)
-            args = [paths.GROUPADD, '-r', group]
-            if gid:
-                args += ['-g', str(gid)]
-            try:
-                ipautil.run(args)
-                log.debug('Done adding group')
-            except ipautil.CalledProcessError as e:
-                log.critical('Failed to add group: %s', e)
-                raise
-        else:
-            log.debug('group %s exists', group)
-
-        try:
-            pwd.getpwnam(name)
-        except KeyError:
-            log.debug('Adding user %s', name)
-            args = [
-                paths.USERADD,
-                '-g', group,
-                '-d', homedir,
-                '-s', shell,
-                '-r', name,
-            ]
-            if uid:
-                args += ['-u', str(uid)]
-            if comment:
-                args += ['-c', comment]
-            if create_homedir:
-                args += ['-m']
-            else:
-                args += ['-M']
-            try:
-                ipautil.run(args)
-                log.debug('Done adding user')
-            except ipautil.CalledProcessError as e:
-                log.critical('Failed to add user: %s', e)
-                raise
-        else:
-            log.debug('user %s exists', name)
-
-    def parse_ipa_version(self, version):
+    @staticmethod
+    def parse_ipa_version(version):
         """
         :param version: textual version
         :return: object implementing proper __cmp__ method for version compare
@@ -246,6 +202,28 @@ class BaseTaskNamespace(object):
         """Configure httpd service to work with IPA"""
         raise NotImplementedError()
 
+    def configure_http_gssproxy_conf(self, ipauser):
+        raise NotImplementedError()
+
     def remove_httpd_service_ipa_conf(self):
         """Remove configuration of httpd service of IPA"""
         raise NotImplementedError()
+
+    def configure_httpd_wsgi_conf(self):
+        """Configure WSGI for correct Python version"""
+        raise NotImplementedError()
+
+    def is_fips_enabled(self):
+        return False
+
+    def add_user_to_group(self, user, group):
+        logger.debug('Adding user %s to group %s', user, group)
+        args = [paths.USERMOD, '-a', '-G', group, user]
+        try:
+            ipautil.run(args)
+            logger.debug('Done adding user to group')
+        except ipautil.CalledProcessError as e:
+            logger.debug('Failed to add user to group: %s', e)
+
+
+tasks = BaseTaskNamespace()

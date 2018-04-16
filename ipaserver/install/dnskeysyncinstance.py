@@ -4,56 +4,40 @@
 
 from __future__ import print_function
 
+import logging
+import errno
 import os
 import pwd
 import grp
-import random
 import shutil
 import stat
 
 import ldap
 
-from ipapython import p11helper as _ipap11helper
+from ipaserver import p11helper as _ipap11helper
 from ipapython.dnsutil import DNSName
 from ipaserver.install import service
 from ipaserver.install import installutils
-from ipapython.ipa_log_manager import root_logger
 from ipapython.dn import DN
-from ipapython import ipaldap
-from ipapython import sysrestore, ipautil
+from ipapython import ipautil
 from ipaplatform.constants import constants
 from ipaplatform.paths import paths
 from ipalib import errors, api
-from ipalib.constants import CACERT
+from ipalib.constants import SOFTHSM_DNSSEC_TOKEN_LABEL
 from ipaserver.install.bindinstance import dns_container_exists
 
-softhsm_token_label = u'ipaDNSSEC'
-softhsm_slot = 0
+logger = logging.getLogger(__name__)
+
 replica_keylabel_template = u"dnssec-replica:%s"
 
 
-def dnssec_container_exists(fqdn, suffix, dm_password=None, ldapi=False,
-                            realm=None, autobind=ipaldap.AUTOBIND_DISABLED):
+def dnssec_container_exists(suffix):
     """
     Test whether the dns container exists.
     """
     assert isinstance(suffix, DN)
-    try:
-        # At install time we may need to use LDAPI to avoid chicken/egg
-        # issues with SSL certs and truting CAs
-        if ldapi:
-            conn = ipaldap.IPAdmin(host=fqdn, ldapi=True, realm=realm)
-        else:
-            conn = ipaldap.IPAdmin(host=fqdn, port=636, cacert=CACERT)
-
-        conn.do_bind(dm_password, autobind=autobind)
-    except ldap.SERVER_DOWN:
-        raise RuntimeError('LDAP server on %s is not responding. Is IPA installed?' % fqdn)
-
-    ret = conn.entry_exists(DN(('cn', 'sec'), ('cn', 'dns'), suffix))
-    conn.unbind()
-
-    return ret
+    return api.Backend.ldap2.entry_exists(
+        DN(('cn', 'sec'), ('cn', 'dns'), suffix))
 
 
 def remove_replica_public_keys(hostname):
@@ -62,26 +46,19 @@ def remove_replica_public_keys(hostname):
 
 
 class DNSKeySyncInstance(service.Service):
-    def __init__(self, fstore=None, dm_password=None, logger=root_logger,
-                 ldapi=False, start_tls=False):
-        service.Service.__init__(
-            self, "ipa-dnskeysyncd",
+    def __init__(self, fstore=None, logger=logger):
+        super(DNSKeySyncInstance, self).__init__(
+            "ipa-dnskeysyncd",
             service_desc="DNS key synchronization service",
-            dm_password=dm_password,
-            ldapi=ldapi,
-            start_tls=start_tls
+            fstore=fstore,
+            service_prefix=u'ipa-dnskeysyncd',
+            keytab=paths.IPA_DNSKEYSYNCD_KEYTAB
         )
-        self.dm_password = dm_password
-        self.logger = logger
         self.extra_config = [u'dnssecVersion 1', ]  # DNSSEC enabled
         self.named_uid = None
         self.named_gid = None
         self.ods_uid = None
         self.ods_gid = None
-        if fstore:
-            self.fstore = fstore
-        else:
-            self.fstore = sysrestore.FileStore(paths.SYSRESTORE)
 
     suffix = ipautil.dn_attribute_property('_suffix')
 
@@ -131,8 +108,6 @@ class DNSKeySyncInstance(service.Service):
         except Exception:
             pass
 
-        # get a connection to the DS
-        self.ldap_connect()
         # checking status step must be first
         self.step("checking status", self.__check_dnssec_status)
         self.step("setting up bind-dyndb-ldap working directory",
@@ -171,10 +146,7 @@ class DNSKeySyncInstance(service.Service):
         except KeyError:
             raise RuntimeError("OpenDNSSEC GID not found")
 
-        if not dns_container_exists(
-            self.fqdn, self.suffix, realm=self.realm, ldapi=True,
-            dm_password=self.dm_password, autobind=ipaldap.AUTOBIND_AUTO
-        ):
+        if not dns_container_exists(self.suffix):
             raise RuntimeError("DNS container does not exist")
 
         # ready to be installed, storing a state is required to run uninstall
@@ -184,12 +156,9 @@ class DNSKeySyncInstance(service.Service):
         """
         Setup LDAP containers for DNSSEC
         """
-        if dnssec_container_exists(self.fqdn, self.suffix, ldapi=True,
-                                   dm_password=self.dm_password,
-                                   realm=self.realm,
-                                   autobind=ipaldap.AUTOBIND_AUTO):
+        if dnssec_container_exists(self.suffix):
 
-            self.logger.info("DNSSEC container exists (step skipped)")
+            logger.info("DNSSEC container exists (step skipped)")
             return
 
         self._ldap_mod("dnssec.ldif", {'SUFFIX': self.suffix, })
@@ -202,7 +171,7 @@ class DNSKeySyncInstance(service.Service):
 
         # create dnssec directory
         if not os.path.exists(paths.IPA_DNSSEC_DIR):
-            self.logger.debug("Creating %s directory", paths.IPA_DNSSEC_DIR)
+            logger.debug("Creating %s directory", paths.IPA_DNSSEC_DIR)
             os.mkdir(paths.IPA_DNSSEC_DIR)
             os.chmod(paths.IPA_DNSSEC_DIR, 0o770)
             # chown ods:named
@@ -215,7 +184,7 @@ class DNSKeySyncInstance(service.Service):
                             "objectstore.backend = file") % {
                                'tokens_dir': paths.DNSSEC_TOKENS_DIR
                             }
-        self.logger.debug("Creating new softhsm config file")
+        logger.debug("Creating new softhsm config file")
         named_fd = open(paths.DNSSEC_SOFTHSM2_CONF, 'w')
         named_fd.seek(0)
         named_fd.truncate(0)
@@ -241,13 +210,12 @@ class DNSKeySyncInstance(service.Service):
 
         # remove old tokens
         if token_dir_exists:
-            self.logger.debug('Removing old tokens directory %s',
-                              paths.DNSSEC_TOKENS_DIR)
+            logger.debug('Removing old tokens directory %s',
+                         paths.DNSSEC_TOKENS_DIR)
             shutil.rmtree(paths.DNSSEC_TOKENS_DIR)
 
         # create tokens subdirectory
-        self.logger.debug('Creating tokens %s directory',
-                          paths.DNSSEC_TOKENS_DIR)
+        logger.debug('Creating tokens %s directory', paths.DNSSEC_TOKENS_DIR)
         # sticky bit is required by daemon
         os.mkdir(paths.DNSSEC_TOKENS_DIR)
         os.chmod(paths.DNSSEC_TOKENS_DIR, 0o770 | stat.S_ISGID)
@@ -255,12 +223,13 @@ class DNSKeySyncInstance(service.Service):
         os.chown(paths.DNSSEC_TOKENS_DIR, self.ods_uid, self.named_gid)
 
         # generate PINs for softhsm
-        allowed_chars = u'123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
         pin_length = 30  # Bind allows max 32 bytes including ending '\0'
-        pin = ipautil.ipa_generate_password(allowed_chars, pin_length)
-        pin_so = ipautil.ipa_generate_password(allowed_chars, pin_length)
+        pin = ipautil.ipa_generate_password(
+            entropy_bits=0, special=None, min_len=pin_length)
+        pin_so = ipautil.ipa_generate_password(
+            entropy_bits=0, special=None, min_len=pin_length)
 
-        self.logger.debug("Saving user PIN to %s", paths.DNSSEC_SOFTHSM_PIN)
+        logger.debug("Saving user PIN to %s", paths.DNSSEC_SOFTHSM_PIN)
         named_fd = open(paths.DNSSEC_SOFTHSM_PIN, 'w')
         named_fd.seek(0)
         named_fd.truncate(0)
@@ -270,7 +239,7 @@ class DNSKeySyncInstance(service.Service):
         # chown to ods:named
         os.chown(paths.DNSSEC_SOFTHSM_PIN, self.ods_uid, self.named_gid)
 
-        self.logger.debug("Saving SO PIN to %s", paths.DNSSEC_SOFTHSM_PIN_SO)
+        logger.debug("Saving SO PIN to %s", paths.DNSSEC_SOFTHSM_PIN_SO)
         named_fd = open(paths.DNSSEC_SOFTHSM_PIN_SO, 'w')
         named_fd.seek(0)
         named_fd.truncate(0)
@@ -284,12 +253,12 @@ class DNSKeySyncInstance(service.Service):
         command = [
             paths.SOFTHSM2_UTIL,
             '--init-token',
-            '--slot', str(softhsm_slot),
-            '--label', softhsm_token_label,
+            '--free',  # use random free slot
+            '--label', SOFTHSM_DNSSEC_TOKEN_LABEL,
             '--pin', pin,
             '--so-pin', pin_so,
         ]
-        self.logger.debug("Initializing tokens")
+        logger.debug("Initializing tokens")
         os.environ["SOFTHSM2_CONF"] = paths.DNSSEC_SOFTHSM2_CONF
         ipautil.run(command, nolog=(pin, pin_so,))
 
@@ -297,24 +266,23 @@ class DNSKeySyncInstance(service.Service):
         keylabel = replica_keylabel_template % DNSName(self.fqdn).\
             make_absolute().canonicalize().ToASCII()
 
-        ldap = self.admin_conn
+        ldap = api.Backend.ldap2
         dn_base = DN(('cn', 'keys'), ('cn', 'sec'), ('cn', 'dns'), api.env.basedn)
 
         with open(paths.DNSSEC_SOFTHSM_PIN, "r") as f:
                 pin = f.read()
 
         os.environ["SOFTHSM2_CONF"] = paths.DNSSEC_SOFTHSM2_CONF
-        p11 = _ipap11helper.P11_Helper(softhsm_slot, pin, paths.LIBSOFTHSM2_SO)
+        p11 = _ipap11helper.P11_Helper(
+            SOFTHSM_DNSSEC_TOKEN_LABEL, pin, paths.LIBSOFTHSM2_SO)
 
         try:
             # generate replica keypair
-            self.logger.debug("Creating replica's key pair")
+            logger.debug("Creating replica's key pair")
             key_id = None
             while True:
                 # check if key with this ID exist in softHSM
-                # id is 16 Bytes long
-                key_id = "".join(chr(random.randint(0, 255))
-                                 for _ in range(0, 16))
+                key_id = _ipap11helper.gen_key_id()
                 replica_pubkey_dn = DN(('ipk11UniqueId', 'autogenerate'), dn_base)
 
 
@@ -358,14 +326,14 @@ class DNSKeySyncInstance(service.Service):
                 'ipk11VerifyRecover': [False],
             }
 
-            self.logger.debug("Storing replica public key to LDAP, %s",
-                              replica_pubkey_dn)
+            logger.debug("Storing replica public key to LDAP, %s",
+                         replica_pubkey_dn)
 
             entry = ldap.make_entry(replica_pubkey_dn, **kw)
             ldap.add_entry(entry)
-            self.logger.debug("Replica public key stored")
+            logger.debug("Replica public key stored")
 
-            self.logger.debug("Setting CKA_WRAP=False for old replica keys")
+            logger.debug("Setting CKA_WRAP=False for old replica keys")
             # first create new keys, we don't want disable keys before, we
             # have new keys in softhsm and LDAP
 
@@ -399,7 +367,7 @@ class DNSKeySyncInstance(service.Service):
             p11.finalize()
 
         # change tokens mod/owner
-        self.logger.debug("Changing ownership of token files")
+        logger.debug("Changing ownership of token files")
         for (root, dirs, files) in os.walk(paths.DNSSEC_TOKENS_DIR):
             for directory in dirs:
                 dir_path = os.path.join(root, directory)
@@ -414,43 +382,42 @@ class DNSKeySyncInstance(service.Service):
 
     def __enable(self):
         try:
-            self.ldap_enable('DNSKeySync', self.fqdn, self.dm_password,
+            self.ldap_enable('DNSKeySync', self.fqdn, None,
                              self.suffix, self.extra_config)
         except errors.DuplicateEntry:
-            self.logger.error("DNSKeySync service already exists")
+            logger.error("DNSKeySync service already exists")
 
     def __setup_principal(self):
         assert self.ods_gid is not None
-        installutils.remove_keytab(paths.IPA_DNSKEYSYNCD_KEYTAB)
-        dnssynckey_principal = "ipa-dnskeysyncd/" + self.fqdn + "@" + self.realm
-        installutils.kadmin_addprinc(dnssynckey_principal)
+        installutils.remove_keytab(self.keytab)
+        installutils.kadmin_addprinc(self.principal)
 
         # Store the keytab on disk
-        installutils.create_keytab(paths.IPA_DNSKEYSYNCD_KEYTAB, dnssynckey_principal)
-        p = self.move_service(dnssynckey_principal)
+        installutils.create_keytab(self.keytab, self.principal)
+        p = self.move_service(self.principal)
         if p is None:
             # the service has already been moved, perhaps we're doing a DNS reinstall
             dnssynckey_principal_dn = DN(
-                ('krbprincipalname', dnssynckey_principal),
+                ('krbprincipalname', self.principal),
                 ('cn', 'services'), ('cn', 'accounts'), self.suffix)
         else:
             dnssynckey_principal_dn = p
 
         # Make sure access is strictly reserved to the named user
-        os.chown(paths.IPA_DNSKEYSYNCD_KEYTAB, 0, self.ods_gid)
-        os.chmod(paths.IPA_DNSKEYSYNCD_KEYTAB, 0o440)
+        os.chown(self.keytab, 0, self.ods_gid)
+        os.chmod(self.keytab, 0o440)
 
         dns_group = DN(('cn', 'DNS Servers'), ('cn', 'privileges'),
                        ('cn', 'pbac'), self.suffix)
         mod = [(ldap.MOD_ADD, 'member', dnssynckey_principal_dn)]
 
         try:
-            self.admin_conn.modify_s(dns_group, mod)
+            api.Backend.ldap2.modify_s(dns_group, mod)
         except ldap.TYPE_OR_VALUE_EXISTS:
             pass
         except Exception as e:
-            self.logger.critical("Could not modify principal's %s entry: %s"
-                                 % (dnssynckey_principal_dn, str(e)))
+            logger.critical("Could not modify principal's %s entry: %s",
+                            dnssynckey_principal_dn, str(e))
             raise
 
         # bind-dyndb-ldap persistent search feature requires both size and time
@@ -461,10 +428,10 @@ class DNSKeySyncInstance(service.Service):
                (ldap.MOD_REPLACE, 'nsIdleTimeout', '-1'),
                (ldap.MOD_REPLACE, 'nsLookThroughLimit', '-1')]
         try:
-            self.admin_conn.modify_s(dnssynckey_principal_dn, mod)
+            api.Backend.ldap2.modify_s(dnssynckey_principal_dn, mod)
         except Exception as e:
-            self.logger.critical("Could not set principal's %s LDAP limits: %s"
-                                 % (dnssynckey_principal_dn, str(e)))
+            logger.critical("Could not set principal's %s LDAP limits: %s",
+                            dnssynckey_principal_dn, str(e))
             raise
 
     def __start(self):
@@ -472,7 +439,7 @@ class DNSKeySyncInstance(service.Service):
             self.restart()
         except Exception as e:
             print("Failed to start ipa-dnskeysyncd")
-            self.logger.debug("Failed to start ipa-dnskeysyncd: %s", e)
+            logger.debug("Failed to start ipa-dnskeysyncd: %s", e)
 
 
     def uninstall(self):
@@ -492,14 +459,20 @@ class DNSKeySyncInstance(service.Service):
             try:
                 self.fstore.restore_file(f)
             except ValueError as error:
-                self.logger.debug(error)
+                logger.debug('%s', error)
 
         # remove softhsm pin, to make sure new installation will generate
         # new token database
         # do not delete *so pin*, user can need it to get token data
-        try:
-            os.remove(paths.DNSSEC_SOFTHSM_PIN)
-        except Exception:
-            pass
+        installutils.remove_file(paths.DNSSEC_SOFTHSM_PIN)
+        installutils.remove_file(paths.DNSSEC_SOFTHSM2_CONF)
 
-        installutils.remove_keytab(paths.IPA_DNSKEYSYNCD_KEYTAB)
+        try:
+            shutil.rmtree(paths.DNSSEC_TOKENS_DIR)
+        except OSError as e:
+            if e.errno != errno.ENOENT:
+                logger.exception(
+                    "Failed to remove %s", paths.DNSSEC_TOKENS_DIR
+                )
+
+        installutils.remove_keytab(self.keytab)

@@ -4,49 +4,43 @@
 
 from __future__ import print_function
 
+import errno
+import logging
 import os
 import pickle
-import pwd
-import random
 import shutil
 import sys
+import time
 import tempfile
 import textwrap
 
 import six
 
-from ipapython import certmonger, ipaldap, ipautil, sysrestore
-from ipapython.dn import DN
-from ipapython.dnsutil import check_zone_overlap
-from ipapython.install import core
-from ipapython.install.common import step
-from ipapython.install.core import Knob
-from ipapython.ipa_log_manager import root_logger
+from ipaclient.install.ipachangeconf import IPAChangeConf
+from ipalib.install import certmonger, sysrestore
+from ipapython import ipautil
 from ipapython.ipautil import (
-    decrypt_file, format_netloc, ipa_generate_password, run, user_input,
-    is_fips_enabled)
+    ipa_generate_password, run, user_input)
 from ipapython.admintool import ScriptError
 from ipaplatform import services
 from ipaplatform.paths import paths
 from ipaplatform.tasks import tasks
-from ipalib import api, constants, errors, x509
-from ipalib.constants import CACERT
+from ipalib import api, errors, x509
+from ipalib.constants import DOMAIN_LEVEL_0
 from ipalib.util import (
     validate_domain_name,
-    network_ip_address_warning,
-    broadcast_ip_address_warning,
+    no_matching_interface_for_ip_address_warning,
 )
-import ipaclient.ntpconf
+import ipaclient.install.timeconf
 from ipaserver.install import (
-    bindinstance, ca, cainstance, certs, dns, dsinstance,
-    httpinstance, installutils, kra, krbinstance, memcacheinstance,
-    ntpinstance, otpdinstance, custodiainstance, replication, service,
+    adtrust, bindinstance, ca, dns, dsinstance,
+    httpinstance, installutils, kra, krbinstance,
+    otpdinstance, custodiainstance, replication, service,
     sysupgrade)
 from ipaserver.install.installutils import (
     IPA_MODULES, BadHostError, get_fqdn, get_server_ip_address,
     is_ipa_configured, load_pkcs12, read_password, verify_fqdn,
     update_hosts_file)
-from ipaserver.plugins.ldap2 import ldap2
 
 if six.PY3:
     unicode = str
@@ -57,7 +51,9 @@ try:
 except ImportError:
     _server_trust_ad_installed = False
 
-from .common import BaseServer, BaseServerCA
+NoneType = type(None)
+
+logger = logging.getLogger(__name__)
 
 SYSRESTORE_DIR_PATH = paths.SYSRESTORE
 
@@ -106,13 +102,16 @@ def read_cache(dm_password):
     """
     Returns a dict of cached answers or empty dict if no cache file exists.
     """
-    if not ipautil.file_exists(paths.ROOT_IPA_CACHE):
+    if not os.path.isfile(paths.ROOT_IPA_CACHE):
         return {}
 
     top_dir = tempfile.mkdtemp("ipa")
     fname = "%s/cache" % top_dir
     try:
-        decrypt_file(paths.ROOT_IPA_CACHE, fname, dm_password, top_dir)
+        installutils.decrypt_file(paths.ROOT_IPA_CACHE,
+                                  fname,
+                                  dm_password,
+                                  top_dir)
     except Exception as e:
         shutil.rmtree(top_dir)
         raise Exception("Decryption of answer cache in %s failed, please "
@@ -149,8 +148,10 @@ def write_cache(options):
     try:
         with open(fname, 'wb') as f:
             pickle.dump(options, f)
-        ipautil.encrypt_file(fname, paths.ROOT_IPA_CACHE,
-                             options['dm_password'], top_dir)
+        installutils.encrypt_file(fname,
+                                  paths.ROOT_IPA_CACHE,
+                                  options['dm_password'],
+                                  top_dir)
     except IOError as e:
         raise Exception("Unable to cache command-line options %s" % str(e))
     finally:
@@ -243,25 +244,6 @@ def check_dirsrv(unattended):
         raise ScriptError(msg)
 
 
-def set_subject_in_config(realm_name, dm_password, suffix, subject_base):
-        ldapuri = 'ldapi://%%2fvar%%2frun%%2fslapd-%s.socket' % (
-            installutils.realm_to_serverid(realm_name)
-        )
-        try:
-            conn = ldap2(api, ldap_uri=ldapuri)
-            conn.connect(bind_dn=DN(('cn', 'directory manager')),
-                         bind_pw=dm_password)
-        except errors.ExecutionError as e:
-            root_logger.critical("Could not connect to the Directory Server "
-                                 "on %s" % realm_name)
-            raise e
-        entry_attrs = conn.get_ipa_config()
-        if 'ipacertificatesubjectbase' not in entry_attrs:
-            entry_attrs['ipacertificatesubjectbase'] = [str(subject_base)]
-            conn.update_entry(entry_attrs)
-        conn.disconnect()
-
-
 def common_cleanup(func):
     def decorated(installer):
         success = False
@@ -279,9 +261,9 @@ def common_cleanup(func):
                     try:
                         dsinstance.remove_ds_instance(ds.serverid)
                     except ipautil.CalledProcessError:
-                        root_logger.error("Failed to remove DS instance. You "
-                                          "may need to remove instance data "
-                                          "manually")
+                        logger.error("Failed to remove DS instance. You "
+                                     "may need to remove instance data "
+                                     "manually")
             raise ScriptError()
         finally:
             if not success and installer._installation_cleanup:
@@ -310,7 +292,7 @@ def remove_master_from_managed_topology(api_instance, options):
         raise ScriptError(str(e))
     except Exception as e:
         # if the master was already deleted we will just get a warning
-        root_logger.warning("Failed to delete master: {}".format(e))
+        logger.warning("Failed to delete master: %s", e)
 
 
 @common_cleanup
@@ -325,11 +307,10 @@ def install_check(installer):
     external_cert_file = installer._external_cert_file
     external_ca_file = installer._external_ca_file
     http_ca_cert = installer._ca_cert
+    dirsrv_ca_cert = None
+    pkinit_ca_cert = None
 
-    if is_fips_enabled():
-        raise RuntimeError(
-            "Installing IPA server in FIPS mode is not supported")
-
+    tasks.check_ipv6_stack_enabled()
     tasks.check_selinux_status()
 
     if options.master_password:
@@ -363,7 +344,7 @@ def install_check(installer):
     sstore = sysrestore.StateFile(SYSRESTORE_DIR_PATH)
 
     # This will override any settings passed in on the cmdline
-    if ipautil.file_exists(paths.ROOT_IPA_CACHE):
+    if os.path.isfile(paths.ROOT_IPA_CACHE):
         if options.dm_password is not None:
             dm_password = options.dm_password
         else:
@@ -386,8 +367,15 @@ def install_check(installer):
         setup_ca = True
     options.setup_ca = setup_ca
 
-    # first instance of KRA must be installed by ipa-kra-install
-    options.setup_kra = False
+    if not setup_ca and options.ca_subject:
+        raise ScriptError(
+            "--ca-subject cannot be used with CA-less installation")
+    if not setup_ca and options.subject_base:
+        raise ScriptError(
+            "--subject-base cannot be used with CA-less installation")
+    if not setup_ca and options.setup_kra:
+        raise ScriptError(
+            "--setup-kra cannot be used with CA-less installation")
 
     print("======================================="
           "=======================================")
@@ -398,18 +386,22 @@ def install_check(installer):
         print("  * Configure a stand-alone CA (dogtag) for certificate "
               "management")
     if not options.no_ntp:
-        print("  * Configure the Network Time Daemon (ntpd)")
+        print("  * Configure the NTP client (chronyd)")
     print("  * Create and configure an instance of Directory Server")
     print("  * Create and configure a Kerberos Key Distribution Center (KDC)")
     print("  * Configure Apache (httpd)")
+    if options.setup_kra:
+        print("  * Configure KRA (dogtag) for secret management")
     if options.setup_dns:
         print("  * Configure DNS (bind)")
+    if options.setup_adtrust:
+        print("  * Configure Samba (smb) and winbind for managing AD trusts")
     if not options.no_pkinit:
         print("  * Configure the KDC to enable PKINIT")
     if options.no_ntp:
         print("")
         print("Excluded by options:")
-        print("  * Configure the Network Time Daemon (ntpd)")
+        print("  * Configure the NTP client (chronyd)")
     if installer.interactive:
         print("")
         print("To accept the default shown in brackets, press the Enter key.")
@@ -421,18 +413,14 @@ def install_check(installer):
 
     if not options.no_ntp:
         try:
-            ipaclient.ntpconf.check_timedate_services()
-        except ipaclient.ntpconf.NTPConflictingService as e:
-            print(("WARNING: conflicting time&date synchronization service '%s'"
-                  " will be disabled" % e.conflicting_service))
-            print("in favor of ntpd")
+            ipaclient.install.timeconf.check_timedate_services()
+        except ipaclient.install.timeconf.NTPConflictingService as e:
+            print("WARNING: conflicting time&date synchronization service '{}'"
+                  " will be disabled".format(e.conflicting_service))
+            print("in favor of chronyd")
             print("")
-        except ipaclient.ntpconf.NTPConfigurationError:
+        except ipaclient.install.timeconf.NTPConfigurationError:
             pass
-
-    # Check to see if httpd is already configured to listen on 443
-    if httpinstance.httpd_443_configured():
-        raise ScriptError("Aborting installation")
 
     if not options.setup_dns and installer.interactive:
         if ipautil.user_input("Do you want to configure integrated DNS "
@@ -465,12 +453,12 @@ def install_check(installer):
         raise ScriptError(e)
 
     host_name = host_name.lower()
-    root_logger.debug("will use host_name: %s\n" % host_name)
+    logger.debug("will use host_name: %s\n", host_name)
 
     if not options.domain_name:
         domain_name = read_domain_name(host_name[host_name.find(".")+1:],
                                        not installer.interactive)
-        root_logger.debug("read domain_name: %s\n" % domain_name)
+        logger.debug("read domain_name: %s\n", domain_name)
         try:
             validate_domain_name(domain_name)
         except ValueError as e:
@@ -482,12 +470,21 @@ def install_check(installer):
 
     if not options.realm_name:
         realm_name = read_realm_name(domain_name, not installer.interactive)
-        root_logger.debug("read realm_name: %s\n" % realm_name)
+        logger.debug("read realm_name: %s\n", realm_name)
+
+        try:
+            validate_domain_name(realm_name, entity="realm")
+        except ValueError as e:
+            raise ScriptError("Invalid realm name: {}".format(unicode(e)))
     else:
         realm_name = options.realm_name.upper()
 
-    if not options.subject:
-        options.subject = DN(('O', realm_name))
+    if not options.subject_base:
+        options.subject_base = installutils.default_subject_base(realm_name)
+
+    if not options.ca_subject:
+        options.ca_subject = \
+            installutils.default_ca_subject_dn(options.subject_base)
 
     if options.http_cert_files:
         if options.http_pin is None:
@@ -529,18 +526,25 @@ def install_check(installer):
             if options.pkinit_pin is None:
                 raise ScriptError(
                     "Kerberos KDC private key unlock password required")
-        pkinit_pkcs12_file, pkinit_pin, _pkinit_ca_cert = load_pkcs12(
+        pkinit_pkcs12_file, pkinit_pin, pkinit_ca_cert = load_pkcs12(
             cert_files=options.pkinit_cert_files,
             key_password=options.pkinit_pin,
             key_nickname=options.pkinit_cert_name,
             ca_cert_files=options.ca_cert_files,
-            host_name=host_name)
+            realm_name=realm_name)
         pkinit_pkcs12_info = (pkinit_pkcs12_file.name, pkinit_pin)
 
     if (options.http_cert_files and options.dirsrv_cert_files and
             http_ca_cert != dirsrv_ca_cert):
         raise ScriptError(
             "Apache Server SSL certificate and Directory Server SSL "
+            "certificate are not signed by the same CA certificate")
+
+    if (options.http_cert_files and
+            options.pkinit_cert_files and
+            http_ca_cert != pkinit_ca_cert):
+        raise ScriptError(
+            "Apache Server SSL certificate and PKINIT KDC "
             "certificate are not signed by the same CA certificate")
 
     if not options.dm_password:
@@ -567,6 +571,7 @@ def install_check(installer):
     # we are sure we have the configuration file ready.
     cfg = dict(
         context='installer',
+        confdir=paths.ETC_IPA,
         in_server=True,
         # make sure host name specified by user is used instead of default
         host=host_name,
@@ -577,24 +582,44 @@ def install_check(installer):
 
     # Create the management framework config file and finalize api
     target_fname = paths.IPA_DEFAULT_CONF
-    fd = open(target_fname, "w")
-    fd.write("[global]\n")
-    fd.write("host=%s\n" % host_name)
-    fd.write("basedn=%s\n" % ipautil.realm_to_suffix(realm_name))
-    fd.write("realm=%s\n" % realm_name)
-    fd.write("domain=%s\n" % domain_name)
-    fd.write("xmlrpc_uri=https://%s/ipa/xml\n" % format_netloc(host_name))
-    fd.write("ldap_uri=ldapi://%%2fvar%%2frun%%2fslapd-%s.socket\n" %
-             installutils.realm_to_serverid(realm_name))
+    ipaconf = IPAChangeConf("IPA Server Install")
+    ipaconf.setOptionAssignment(" = ")
+    ipaconf.setSectionNameDelimiters(("[", "]"))
+
+    xmlrpc_uri = 'https://{0}/ipa/xml'.format(
+                    ipautil.format_netloc(host_name))
+    ldapi_uri = 'ldapi://%2fvar%2frun%2fslapd-{0}.socket\n'.format(
+                    installutils.realm_to_serverid(realm_name))
+
+    # [global] section
+    gopts = [
+        ipaconf.setOption('host', host_name),
+        ipaconf.setOption('basedn', ipautil.realm_to_suffix(realm_name)),
+        ipaconf.setOption('realm', realm_name),
+        ipaconf.setOption('domain', domain_name),
+        ipaconf.setOption('xmlrpc_uri', xmlrpc_uri),
+        ipaconf.setOption('ldap_uri', ldapi_uri),
+        ipaconf.setOption('mode', 'production')
+    ]
+
     if setup_ca:
-        fd.write("enable_ra=True\n")
-        fd.write("ra_plugin=dogtag\n")
-        fd.write("dogtag_version=10\n")
+        gopts.extend([
+            ipaconf.setOption('enable_ra', 'True'),
+            ipaconf.setOption('ra_plugin', 'dogtag'),
+            ipaconf.setOption('dogtag_version', '10')
+        ])
     else:
-        fd.write("enable_ra=False\n")
-        fd.write("ra_plugin=none\n")
-    fd.write("mode=production\n")
-    fd.close()
+        gopts.extend([
+            ipaconf.setOption('enable_ra', 'False'),
+            ipaconf.setOption('ra_plugin', 'None')
+        ])
+
+    opts = [
+        ipaconf.setSection('global', gopts),
+        {'name': 'empty', 'type': 'empty'}
+    ]
+
+    ipaconf.newConf(target_fname, opts)
 
     # Must be readable for everyone
     os.chmod(target_fname, 0o644)
@@ -604,6 +629,8 @@ def install_check(installer):
 
     if setup_ca:
         ca.install_check(False, None, options)
+    if options.setup_kra:
+        kra.install_check(api, None, options)
 
     if options.setup_dns:
         dns.install_check(False, api, False, options, host_name)
@@ -614,8 +641,18 @@ def install_check(installer):
                                              options.ip_addresses)
 
         # check addresses here, dns module is doing own check
-        network_ip_address_warning(ip_addresses)
-        broadcast_ip_address_warning(ip_addresses)
+        no_matching_interface_for_ip_address_warning(ip_addresses)
+
+    instance_name = "-".join(realm_name.split("."))
+    dirsrv = services.knownservices.dirsrv
+    if (options.external_cert_files
+           and dirsrv.is_installed(instance_name)
+           and not dirsrv.is_running(instance_name)):
+        logger.debug('Starting Directory Server')
+        services.knownservices.dirsrv.start(instance_name)
+
+    if options.setup_adtrust:
+        adtrust.install_check(False, options, api)
 
     # installer needs to update hosts file when DNS subsystem will be
     # installed or custom addresses are used
@@ -630,6 +667,10 @@ def install_check(installer):
     print("Realm name:     %s" % realm_name)
     print()
 
+    if setup_ca:
+        ca.print_ca_configuration(options)
+        print()
+
     if options.setup_dns:
         print("BIND DNS server will be configured to serve IPA domain with:")
         print("Forwarders:       %s" % (
@@ -643,16 +684,17 @@ def install_check(installer):
         ))
         print()
 
-    # If domain name and realm does not match, IPA server will not be able
-    # to estabilish trust with Active Directory. Print big fat warning.
+    if not options.setup_adtrust:
+        # If domain name and realm does not match, IPA server will not be able
+        # to establish trust with Active Directory. Print big fat warning.
 
-    realm_not_matching_domain = (domain_name.upper() != realm_name)
+        realm_not_matching_domain = (domain_name.upper() != realm_name)
 
-    if realm_not_matching_domain:
-        print("WARNING: Realm name does not match the domain name.\n"
-              "You will not be able to estabilish trusts with Active "
-              "Directory unless\nthe realm name of the IPA server matches "
-              "its domain name.\n\n")
+        if realm_not_matching_domain:
+            print("WARNING: Realm name does not match the domain name.\n"
+                  "You will not be able to establish trusts with Active "
+                  "Directory unless\nthe realm name of the IPA server matches "
+                  "its domain name.\n\n")
 
     if installer.interactive and not user_input(
             "Continue to configure the system with these values?", False):
@@ -717,17 +759,20 @@ def install(installer):
     if installer._update_hosts_file:
         update_hosts_file(ip_addresses, host_name, fstore)
 
-    # Create DS user/group if it doesn't exist yet
-    dsinstance.create_ds_user()
-
     # Create a directory server instance
     if not options.external_cert_files:
-        # Configure ntpd
+        # We have to sync time before certificate handling on master.
+        # As chrony configuration is moved from client here, unconfiguration of
+        # chrony will be handled here in uninstall() method as well by invoking
+        # the ipa-server-install --uninstall
         if not options.no_ntp:
-            ipaclient.ntpconf.force_ntpd(sstore)
-            ntp = ntpinstance.NTPInstance(fstore)
-            if not ntp.is_configured():
-                ntp.create_instance()
+            print("Synchronizing time")
+            if ipaclient.install.client.sync_time(options, fstore, sstore):
+                print("Time synchronization was successful.")
+            else:
+                print("Warning: IPA was unable to sync time with chrony!")
+                print("         Time synchronization is required for IPA "
+                      "to work correctly")
 
         if options.dirsrv_cert_files:
             ds = dsinstance.DsInstance(fstore=fstore,
@@ -737,8 +782,10 @@ def install(installer):
             ds.create_instance(realm_name, host_name, domain_name,
                                dm_password, dirsrv_pkcs12_info,
                                idstart=options.idstart, idmax=options.idmax,
-                               subject_base=options.subject,
-                               hbac_allow=not options.no_hbac_allow)
+                               subject_base=options.subject_base,
+                               ca_subject=options.ca_subject,
+                               hbac_allow=not options.no_hbac_allow,
+                               setup_pkinit=not options.no_pkinit)
         else:
             ds = dsinstance.DsInstance(fstore=fstore,
                                        domainlevel=options.domainlevel,
@@ -747,18 +794,32 @@ def install(installer):
             ds.create_instance(realm_name, host_name, domain_name,
                                dm_password,
                                idstart=options.idstart, idmax=options.idmax,
-                               subject_base=options.subject,
-                               hbac_allow=not options.no_hbac_allow)
-
-        ntpinstance.ntp_ldap_enable(host_name, ds.suffix, realm_name)
+                               subject_base=options.subject_base,
+                               ca_subject=options.ca_subject,
+                               hbac_allow=not options.no_hbac_allow,
+                               setup_pkinit=not options.no_pkinit)
 
     else:
+        api.Backend.ldap2.connect()
         ds = dsinstance.DsInstance(fstore=fstore,
                                    domainlevel=options.domainlevel)
         installer._ds = ds
         ds.init_info(
             realm_name, host_name, domain_name, dm_password,
-            options.subject, 1101, 1100, None)
+            options.subject_base, options.ca_subject, 1101, 1100, None,
+            setup_pkinit=not options.no_pkinit)
+
+    krb = krbinstance.KrbInstance(fstore)
+    if not options.external_cert_files:
+        krb.create_instance(realm_name, host_name, domain_name,
+                            dm_password, master_password,
+                            setup_pkinit=not options.no_pkinit,
+                            pkcs12_info=pkinit_pkcs12_info,
+                            subject_base=options.subject_base)
+    else:
+        krb.init_info(realm_name, host_name,
+                      setup_pkinit=not options.no_pkinit,
+                      subject_base=options.subject_base)
 
     if setup_ca:
         if not options.external_cert_files and options.external_ca:
@@ -775,107 +836,80 @@ def install(installer):
             write_cache(cache_vars)
 
         ca.install_step_0(False, None, options)
-
-        # Now put the CA cert where other instances exepct it
-        ca_instance = cainstance.CAInstance(realm_name, certs.NSS_DIR)
-        ca_instance.publish_ca_cert(CACERT)
     else:
         # Put the CA cert where other instances expect it
-        x509.write_certificate(http_ca_cert, CACERT)
-        os.chmod(CACERT, 0o444)
+        x509.write_certificate(http_ca_cert, paths.IPA_CA_CRT)
+        os.chmod(paths.IPA_CA_CRT, 0o444)
+
+        if not options.no_pkinit:
+            x509.write_certificate(http_ca_cert, paths.KDC_CA_BUNDLE_PEM)
+        else:
+            with open(paths.KDC_CA_BUNDLE_PEM, 'w'):
+                pass
+        os.chmod(paths.KDC_CA_BUNDLE_PEM, 0o444)
+
+        x509.write_certificate(http_ca_cert, paths.CA_BUNDLE_PEM)
+        os.chmod(paths.CA_BUNDLE_PEM, 0o444)
 
     # we now need to enable ssl on the ds
     ds.enable_ssl()
 
-    krb = krbinstance.KrbInstance(fstore)
-    if options.pkinit_cert_files:
-        krb.create_instance(realm_name, host_name, domain_name,
-                            dm_password, master_password,
-                            setup_pkinit=not options.no_pkinit,
-                            pkcs12_info=pkinit_pkcs12_info,
-                            subject_base=options.subject)
-    else:
-        krb.create_instance(realm_name, host_name, domain_name,
-                            dm_password, master_password,
-                            setup_pkinit=not options.no_pkinit,
-                            subject_base=options.subject)
-
     if setup_ca:
         ca.install_step_1(False, None, options)
 
-    # The DS instance is created before the keytab, add the SSL cert we
-    # generated
-    ds.add_cert_to_service()
-
-    memcache = memcacheinstance.MemcacheInstance()
-    memcache.create_instance('MEMCACHE', host_name, dm_password,
-                             ipautil.realm_to_suffix(realm_name))
-
     otpd = otpdinstance.OtpdInstance()
-    otpd.create_instance('OTPD', host_name, dm_password,
+    otpd.create_instance('OTPD', host_name,
                          ipautil.realm_to_suffix(realm_name))
 
     custodia = custodiainstance.CustodiaInstance(host_name, realm_name)
-    custodia.create_instance(dm_password)
+    custodia.create_instance()
 
     # Create a HTTP instance
     http = httpinstance.HTTPInstance(fstore)
     if options.http_cert_files:
         http.create_instance(
             realm_name, host_name, domain_name, dm_password,
-            pkcs12_info=http_pkcs12_info, subject_base=options.subject,
+            pkcs12_info=http_pkcs12_info, subject_base=options.subject_base,
             auto_redirect=not options.no_ui_redirect,
             ca_is_configured=setup_ca)
     else:
         http.create_instance(
             realm_name, host_name, domain_name, dm_password,
-            subject_base=options.subject,
+            subject_base=options.subject_base,
             auto_redirect=not options.no_ui_redirect,
             ca_is_configured=setup_ca)
     tasks.restore_context(paths.CACHE_IPA_SESSIONS)
 
-    # Export full CA chain
-    ca_db = certs.CertDB(realm_name)
-    os.chmod(CACERT, 0o644)
-    ca_db.publish_ca_cert(CACERT)
+    ca.set_subject_base_in_config(options.subject_base)
 
-    set_subject_in_config(realm_name, dm_password,
-                          ipautil.realm_to_suffix(realm_name), options.subject)
+    # configure PKINIT now that all required services are in place
+    krb.enable_ssl()
 
     # Apply any LDAP updates. Needs to be done after the configuration file
-    # is created
+    # is created. DS is restarted in the process.
     service.print_msg("Applying LDAP updates")
     ds.apply_updates()
 
-    # Restart ds and krb after configurations have been changed
-    service.print_msg("Restarting the directory server")
-    ds.restart()
-
+    # Restart krb after configurations have been changed
     service.print_msg("Restarting the KDC")
     krb.restart()
 
-    if setup_ca:
-        services.knownservices['pki_tomcatd'].restart('pki-tomcat')
+    if options.setup_kra:
+        kra.install(api, None, options)
 
-    api.Backend.ldap2.connect(autobind=True)
     if options.setup_dns:
         dns.install(False, False, options)
     else:
         # Create a BIND instance
-        bind = bindinstance.BindInstance(fstore, dm_password)
+        bind = bindinstance.BindInstance(fstore)
         bind.setup(host_name, ip_addresses, realm_name,
                    domain_name, (), 'first', (),
                    zonemgr=options.zonemgr,
                    no_dnssec_validation=options.no_dnssec_validation)
         bind.create_file_with_system_records()
 
-    # Restart httpd to pick up the new IPA configuration
-    service.print_msg("Restarting the web server")
-    http.restart()
-
-    # update DNA shared config entry is done as far as possible
-    # from restart to avoid waiting for its creation
-    ds.update_dna_shared_config()
+    if options.setup_adtrust:
+        adtrust.install(False, options, fstore, api)
 
     # Set the admin user kerberos password
     ds.change_admin_password(admin_password)
@@ -885,7 +919,7 @@ def install(installer):
     try:
         args = [paths.IPA_CLIENT_INSTALL, "--on-master", "--unattended",
                 "--domain", domain_name, "--server", host_name,
-                "--realm", realm_name, "--hostname", host_name]
+                "--realm", realm_name, "--hostname", host_name, "--no-ntp"]
         if options.no_dns_sshfp:
             args.append("--no-dns-sshfp")
         if options.ssh_trust_dns:
@@ -896,9 +930,11 @@ def install(installer):
             args.append("--no-sshd")
         if options.mkhomedir:
             args.append("--mkhomedir")
-        if options.debug:
-            args.append("--debug")
+        start = time.time()
         run(args, redirect_output=True)
+        dur = time.time() - start
+        logger.debug("Client install duration: %0.3f", dur,
+                     extra={'timing': ('clientinstall', None, None, dur)})
         print()
     except Exception:
         raise ScriptError("Configuration of client side components failed!")
@@ -931,10 +967,10 @@ def install(installer):
           "user-add)")
     print("\t   and the web user interface.")
 
-    if not services.knownservices.ntpd.is_running():
+    if not services.knownservices.chronyd.is_running():
         print("\t3. Kerberos requires time synchronization between clients")
         print("\t   and servers for correct operation. You should consider "
-              "enabling ntpd.")
+              "enabling chronyd.")
 
     print("")
     if setup_ca:
@@ -943,12 +979,8 @@ def install(installer):
         print("These files are required to create replicas. The password for "
               "these")
         print("files is the Directory Manager password")
-    else:
-        print("In order for Firefox autoconfiguration to work you will need to")
-        print("use a SSL signing certificate. See the IPA documentation for "
-              "more details.")
 
-    if ipautil.file_exists(paths.ROOT_IPA_CACHE):
+    if os.path.isfile(paths.ROOT_IPA_CACHE):
         os.remove(paths.ROOT_IPA_CACHE)
 
 
@@ -972,6 +1004,7 @@ def uninstall_check(installer):
     # we are sure we have the configuration file ready.
     cfg = dict(
         context='installer',
+        confdir=paths.ETC_IPA,
         in_server=True,
     )
 
@@ -982,19 +1015,16 @@ def uninstall_check(installer):
 
     if installer.interactive:
         print("\nThis is a NON REVERSIBLE operation and will delete all data "
-              "and configuration!\n")
+              "and configuration!\nIt is highly recommended to take a backup of "
+              "existing data and configuration using ipa-backup utility "
+              "before proceeding.\n")
         if not user_input("Are you sure you want to continue with the "
                           "uninstall procedure?", False):
             raise ScriptError("Aborting uninstall operation.")
 
     try:
-        conn = ipaldap.IPAdmin(
-            api.env.host,
-            ldapi=True,
-            realm=api.env.realm
-        )
-        conn.do_external_bind(pwd.getpwuid(os.geteuid()).pw_name)
         api.Backend.ldap2.connect(autobind=True)
+
         domain_level = dsinstance.get_domain_level(api)
     except Exception:
         msg = ("\nWARNING: Failed to connect to Directory Server to find "
@@ -1013,12 +1043,12 @@ def uninstall_check(installer):
     else:
         dns.uninstall_check(options)
 
-        if domain_level == constants.DOMAIN_LEVEL_0:
+        if domain_level == DOMAIN_LEVEL_0:
             rm = replication.ReplicationManager(
                 realm=api.env.realm,
                 hostname=api.env.host,
                 dirman_passwd=None,
-                conn=conn
+                conn=api.Backend.ldap2
             )
             agreements = rm.find_ipa_replication_agreements()
 
@@ -1042,6 +1072,8 @@ def uninstall_check(installer):
         else:
             remove_master_from_managed_topology(api, options)
 
+        api.Backend.ldap2.disconnect()
+
     installer._fstore = fstore
     installer._sstore = sstore
 
@@ -1055,13 +1087,17 @@ def uninstall(installer):
 
     print("Shutting down all IPA services")
     try:
-        run([paths.IPACTL, "stop"], raiseonerr=False)
+        services.knownservices.ipa.stop()
     except Exception:
-        pass
+        # Fallback to direct ipactl stop only if system command fails
+        try:
+            run([paths.IPACTL, "stop"], raiseonerr=False)
+        except Exception:
+            pass
 
-    ntpinstance.NTPInstance(fstore).uninstall()
+    ipaclient.install.client.restore_time_sync(sstore, fstore)
 
-    kra.uninstall(False)
+    kra.uninstall()
 
     ca.uninstall()
 
@@ -1072,8 +1108,9 @@ def uninstall(installer):
     dsinstance.DsInstance(fstore=fstore).uninstall()
     if _server_trust_ad_installed:
         adtrustinstance.ADTRUSTInstance(fstore).uninstall()
-    custodiainstance.CustodiaInstance().uninstall()
-    memcacheinstance.MemcacheInstance().uninstall()
+    # ldap_uri isn't used, but IPAKEMKeys parses /etc/ipa/default.conf
+    # otherwise, see https://pagure.io/freeipa/issue/7474 .
+    custodiainstance.CustodiaInstance(ldap_uri='ldapi://invalid').uninstall()
     otpdinstance.OtpdInstance().uninstall()
     tasks.restore_hostname(fstore, sstore)
     fstore.restore_all_files()
@@ -1090,7 +1127,7 @@ def uninstall(installer):
 
     sstore._load()
 
-    ipaclient.ntpconf.restore_forced_ntpd(sstore)
+    ipaclient.install.timeconf.restore_forced_timeservices(sstore)
 
     # Clean up group_exists (unused since IPA 2.2, not being set since 4.1)
     sstore.restore_state("install", "group_exists")
@@ -1101,40 +1138,52 @@ def uninstall(installer):
     sysupgrade.remove_upgrade_file()
 
     if fstore.has_files():
-        root_logger.error('Some files have not been restored, see '
-                          '%s/sysrestore.index' % SYSRESTORE_DIR_PATH)
+        logger.error('Some files have not been restored, see '
+                     '%s/sysrestore.index', SYSRESTORE_DIR_PATH)
     has_state = False
     for module in IPA_MODULES:  # from installutils
         if sstore.has_state(module):
-            root_logger.error('Some installation state for %s has not been '
-                              'restored, see %s/sysrestore.state' %
-                              (module, SYSRESTORE_DIR_PATH))
+            logger.error('Some installation state for %s has not been '
+                         'restored, see %s/sysrestore.state',
+                         module, SYSRESTORE_DIR_PATH)
             has_state = True
             rv = 1
 
     if has_state:
-        root_logger.error('Some installation state has not been restored.\n'
-                          'This may cause re-installation to fail.\n'
-                          'It should be safe to remove %s/sysrestore.state '
-                          'but it may\n'
-                          'mean your system hasn\'t be restored to its '
-                          'pre-installation state.' % SYSRESTORE_DIR_PATH)
+        logger.error('Some installation state has not been restored.\n'
+                     'This may cause re-installation to fail.\n'
+                     'It should be safe to remove %s/sysrestore.state '
+                     'but it may\n'
+                     'mean your system hasn\'t be restored to its '
+                     'pre-installation state.', SYSRESTORE_DIR_PATH)
+    else:
+        # sysrestore.state has no state left, remove it
+        sysrestore = os.path.join(SYSRESTORE_DIR_PATH, 'sysrestore.state')
+        installutils.remove_file(sysrestore)
 
     # Note that this name will be wrong after the first uninstall.
     dirname = dsinstance.config_dirname(
         installutils.realm_to_serverid(api.env.realm))
-    dirs = [dirname, paths.PKI_TOMCAT_ALIAS_DIR, certs.NSS_DIR]
+    dirs = [dirname, paths.PKI_TOMCAT_ALIAS_DIR, paths.HTTPD_ALIAS_DIR]
     ids = certmonger.check_state(dirs)
     if ids:
-        root_logger.error('Some certificates may still be tracked by '
-                          'certmonger.\n'
-                          'This will cause re-installation to fail.\n'
-                          'Start the certmonger service and list the '
-                          'certificates being tracked\n'
-                          ' # getcert list\n'
-                          'These may be untracked by executing\n'
-                          ' # getcert stop-tracking -i <request_id>\n'
-                          'for each id in: %s' % ', '.join(ids))
+        logger.error('Some certificates may still be tracked by '
+                     'certmonger.\n'
+                     'This will cause re-installation to fail.\n'
+                     'Start the certmonger service and list the '
+                     'certificates being tracked\n'
+                     ' # getcert list\n'
+                     'These may be untracked by executing\n'
+                     ' # getcert stop-tracking -i <request_id>\n'
+                     'for each id in: %s', ', '.join(ids))
+
+    # Remove the cert renewal lock file
+    try:
+        os.remove(paths.IPA_RENEWAL_LOCK)
+    except OSError as e:
+        if e.errno != errno.ENOENT:
+            logger.warning("Failed to remove file %s: %s",
+                           paths.IPA_RENEWAL_LOCK, e)
 
     print("Removing IPA client configuration")
     try:
@@ -1150,226 +1199,21 @@ def uninstall(installer):
     sys.exit(rv)
 
 
-class ServerCA(BaseServerCA):
+def init(installer):
+    installer.unattended = not installer.interactive
 
-    # FIXME: Following Knobs are inherited because framework is not able to
-    # help groups correctly.
+    installer.domainlevel = installer.domain_level
 
-    external_ca = Knob(BaseServerCA.external_ca)
-    external_ca_type = Knob(BaseServerCA.external_ca_type)
-    external_cert_files = Knob(BaseServerCA.external_cert_files)
+    installer._installation_cleanup = True
+    installer._ds = None
 
-    dirsrv_cert_files = Knob(
-        BaseServerCA.dirsrv_cert_files,
-        cli_aliases=['dirsrv_pkcs12'],
-    )
-
-    http_cert_files = Knob(
-        BaseServerCA.http_cert_files,
-        cli_aliases=['http_pkcs12'],
-    )
-
-    pkinit_cert_files = Knob(
-        BaseServerCA.pkinit_cert_files,
-        cli_aliases=['pkinit_pkcs12'],
-    )
-
-    dirsrv_pin = Knob(
-        BaseServerCA.dirsrv_pin,
-        cli_aliases=['dirsrv_pin'],
-    )
-
-    http_pin = Knob(
-        BaseServerCA.http_pin,
-        cli_aliases=['http_pin'],
-    )
-
-    pkinit_pin = Knob(
-        BaseServerCA.pkinit_pin,
-        cli_aliases=['pkinit_pin'],
-    )
-
-    dirsrv_cert_name = Knob(BaseServerCA.dirsrv_cert_name)
-    http_cert_name = Knob(BaseServerCA.http_cert_name)
-    pkinit_cert_name = Knob(BaseServerCA.pkinit_cert_name)
-    ca_cert_files = Knob(BaseServerCA.ca_cert_files)
-    subject = Knob(BaseServerCA.subject)
-    ca_signing_algorithm = Knob(BaseServerCA.ca_signing_algorithm)
-    skip_schema_check = None
-
-
-class Server(BaseServer):
-    setup_ca = None
-    setup_kra = None
-    setup_dns = Knob(BaseServer.setup_dns)
-
-    realm_name = Knob(BaseServer.realm_name)
-    domain_name = Knob(BaseServer.domain_name)
-
-    @domain_name.validator
-    def domain_name(self, value):
-        if (self.setup_dns and
-                not self.dns.allow_zone_overlap):  # pylint: disable=no-member
-            print("Checking DNS domain %s, please wait ..." % value)
-            check_zone_overlap(value, False)
-
-    dm_password = Knob(
-        BaseServer.dm_password,
-        description="Directory Manager password",
-        cli_name='ds-password',
-    )
-
-    @dm_password.validator
-    def dm_password(self, value):
-        validate_dm_password(value)
-
-    master_password = Knob(
-        str, None,
-        sensitive=True,
-        deprecated=True,
-        description="kerberos master password (normally autogenerated)",
-        cli_short_name='P',
-    )
-
-    admin_password = Knob(
-        BaseServer.admin_password,
-        description="admin user kerberos password",
-        cli_short_name='a',
-    )
-
-    @admin_password.validator
-    def admin_password(self, value):
-        validate_admin_password(value)
-
-    mkhomedir = Knob(BaseServer.mkhomedir)
-    host_name = Knob(BaseServer.host_name)
-
-    domainlevel = Knob(
-        int, constants.MAX_DOMAIN_LEVEL,
-        description="IPA domain level",
-        cli_name='domain-level',
-        deprecated=True,
-    )
-
-    @domainlevel.validator
-    def domainlevel(self, value):
-        # Check that Domain Level is within the allowed range
-        if value < constants.MIN_DOMAIN_LEVEL:
-            raise ValueError(
-                "Domain Level cannot be lower than {0}".format(
-                    constants.MIN_DOMAIN_LEVEL))
-        elif value > constants.MAX_DOMAIN_LEVEL:
-            raise ValueError(
-                "Domain Level cannot be higher than {0}".format(
-                    constants.MAX_DOMAIN_LEVEL))
-
-    ip_addresses = Knob(
-        BaseServer.ip_addresses,
-        description=("Master Server IP Address. This option can be used "
-                     "multiple times"),
-    )
-
-    no_host_dns = Knob(BaseServer.no_host_dns)
-    no_ntp = Knob(BaseServer.no_ntp)
-
-    idstart = Knob(
-        int, random.randint(1, 10000) * 200000,
-        description="The starting value for the IDs range (default random)",
-    )
-
-    idmax = Knob(
-        int,
-        description=("The max value for the IDs range (default: "
-                     "idstart+199999)"),
-    )
-
-    @idmax.default_getter
-    def idmax(self):
-        return self.idstart + 200000 - 1
-
-    no_hbac_allow = Knob(
-        bool, False,
-        description="Don't install allow_all HBAC rule",
-        cli_name='no-hbac-allow',
-        cli_aliases=['no_hbac_allow'],
-    )
-
-    ignore_topology_disconnect = Knob(
-        bool, False,
-        description="do not check whether server uninstall disconnects the "
-                    "topology (domain level 1+)",
-    )
-    ignore_last_of_role = Knob(
-        bool, False,
-        description="do not check whether server uninstall removes last "
-                    "CA/DNS server or DNSSec master (domain level 1+)",
-    )
-
-    # dns
-    dnssec_master = None
-    disable_dnssec_master = None
-    kasp_db_file = None
-    force = None
-
-    def __init__(self, **kwargs):
-        super(Server, self).__init__(**kwargs)
-
-        self._installation_cleanup = True
-        self._ds = None
-
-        self._dirsrv_pkcs12_file = None
-        self._http_pkcs12_file = None
-        self._pkinit_pkcs12_file = None
-        self._dirsrv_pkcs12_info = None
-        self._http_pkcs12_info = None
-        self._pkinit_pkcs12_info = None
-        self._external_cert_file = None
-        self._external_ca_file = None
-        self._ca_cert = None
-        self._update_hosts_file = False
-
-        # pylint: disable=no-member
-
-        if self.uninstalling:
-            if (self.realm_name or self.admin_password or
-                    self.master_password):
-                raise RuntimeError(
-                    "In uninstall mode, -a, -r and -P options are not allowed")
-        elif not self.interactive:
-            if (not self.realm_name or not self.dm_password or
-                    not self.admin_password):
-                raise RuntimeError(
-                    "In unattended mode you need to provide at least -r, -p "
-                    "and -a options")
-            if self.setup_dns:
-                if (not self.dns.forwarders and not self.dns.no_forwarders
-                    and not self.dns.auto_forwarders):
-                    raise RuntimeError(
-                        "You must specify at least one of --forwarder, "
-                        "--auto-forwarders, or --no-forwarders options")
-
-        any_ignore_option_true = any(
-            [self.ignore_topology_disconnect, self.ignore_last_of_role])
-        if any_ignore_option_true and not self.uninstalling:
-            raise RuntimeError(
-                "'--ignore-topology-disconnect/--ignore-last-of-role' options "
-                "can be used only during uninstallation")
-
-        if self.idmax < self.idstart:
-            raise RuntimeError(
-                "idmax (%s) cannot be smaller than idstart (%s)" %
-                (self.idmax, self.idstart))
-
-    ca = core.Component(ServerCA)
-
-    @step()
-    def main(self):
-        install_check(self)
-        yield
-        install(self)
-
-    @main.uninstaller
-    def main(self):
-        uninstall_check(self)
-        yield
-        uninstall(self)
+    installer._dirsrv_pkcs12_file = None
+    installer._http_pkcs12_file = None
+    installer._pkinit_pkcs12_file = None
+    installer._dirsrv_pkcs12_info = None
+    installer._http_pkcs12_info = None
+    installer._pkinit_pkcs12_info = None
+    installer._external_cert_file = None
+    installer._external_ca_file = None
+    installer._ca_cert = None
+    installer._update_hosts_file = False

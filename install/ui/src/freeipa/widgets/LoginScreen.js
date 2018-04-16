@@ -19,10 +19,12 @@
 */
 
 define(['dojo/_base/declare',
+        'dojo/Deferred',
         'dojo/dom-construct',
         'dojo/dom-style',
         'dojo/query',
         'dojo/on',
+        'dojo/topic',
         '../ipa',
         '../auth',
         '../reg',
@@ -31,7 +33,7 @@ define(['dojo/_base/declare',
         '../util',
         './LoginScreenBase'
        ],
-       function(declare, construct, dom_style, query, on,
+       function(declare, Deferred, construct, dom_style, query, on, topic,
                 IPA, auth, reg, FieldBinder, text, util, LoginScreenBase) {
 
 
@@ -49,16 +51,20 @@ define(['dojo/_base/declare',
 
         expired_msg: "Your session has expired. Please re-login.",
 
-        form_auth_msg: "<i class=\"fa fa-info-circle\"></i> To login with <strong>username and password</strong>, enter them in the corresponding fields, then click Login.",
+        form_auth_msg: "<i class=\"fa fa-info-circle\"></i> To log in with <strong>username and password</strong>, enter them in the corresponding fields, then click Login.",
 
-        kerberos_msg: "<i class=\"fa fa-info-circle\"></i> To login with <strong>Kerberos</strong>, please make sure you" +
+        kerberos_msg: "<i class=\"fa fa-info-circle\"></i> To log in with <strong>Kerberos</strong>, please make sure you" +
                     " have valid tickets (obtainable via kinit) and " +
-                    "<a href='http://${host}/ipa/config/unauthorized.html'>configured</a>" +
+                    "<a href='http://${host}/ipa/config/ssbrowser.html'>configured</a>" +
                     " the browser correctly, then click Login. ",
+        cert_msg: "<i class=\"fa fa-info-circle\"></i> To log in with <strong>certificate</strong>," +
+              " please make sure you have valid personal certificate. ",
 
         form_auth_failed: "Login failed due to an unknown reason. ",
 
         krb_auth_failed: "Authentication with Kerberos failed",
+
+        cert_auth_failed: "Authentication with personal certificate failed",
 
         password_expired: "Your password has expired. Please enter a new password.",
 
@@ -72,9 +78,12 @@ define(['dojo/_base/declare',
 
         user_locked: "The user account you entered is locked. ",
 
+        x509_url: '/ipa/session/login_x509',
+
         //nodes:
         login_btn_node: null,
         reset_btn_node: null,
+        cert_btn_node: null,
 
         /**
          * View this form is in.
@@ -85,6 +94,16 @@ define(['dojo/_base/declare',
         view: 'login',
 
         render_buttons: function(container) {
+
+            this.cert_btn_node = IPA.button({
+                name: 'cert_auth',
+                title:"Log in using personal certificate",
+                label: "Log In Using Certificate",
+                button_class: 'btn btn-link',
+                click: this.login_with_cert.bind(this)
+            })[0];
+            construct.place(this.cert_btn_node, container);
+            construct.place(document.createTextNode(" "), container);
 
             this.sync_btn_node = IPA.button({
                 name: 'sync',
@@ -97,7 +116,7 @@ define(['dojo/_base/declare',
 
             this.login_btn_node = IPA.button({
                 name: 'login',
-                label: text.get('@i18n:login.login', "Login"),
+                label: text.get('@i18n:login.login', "Log in"),
                 'class': 'btn-primary btn-lg',
                 click: this.on_confirm.bind(this)
             })[0];
@@ -251,6 +270,18 @@ define(['dojo/_base/declare',
             }.bind(this));
         },
 
+        login_with_cert: function() {
+
+            this.lookup_credentials().then(function(status) {
+                if (status === 200) {
+                    this.emit('logged_in');
+                } else {
+                    var val_summary = this.get_widget('validation');
+                    val_summary.add_error('login', this.cert_auth_failed);
+                }
+            }.bind(this));
+        },
+
         login_and_reset: function() {
 
             var val_summary = this.get_widget('validation');
@@ -293,6 +324,40 @@ define(['dojo/_base/declare',
 
         },
 
+        lookup_credentials: function() {
+
+            var status;
+            var d = new Deferred();
+
+            function error_handler(xhr, text_status, error_thrown) {
+                d.resolve(xhr.status);
+                topic.publish('rpc-end');
+            }
+
+            function success_handler(data, text_status, xhr) {
+                auth.current.set_authenticated(true, 'kerberos');
+                d.resolve(xhr.status);
+                topic.publish('rpc-end');
+            }
+
+            var login = this.get_field('username').get_value()[0];
+
+            var request = {
+                url: this.x509_url,
+                cache: false,
+                type: "GET",
+                data: $.param({
+                    'username': login
+                }),
+                success: success_handler,
+                error: error_handler
+            };
+            topic.publish('rpc-start');
+            $.ajax(request);
+
+            return d.promise;
+        },
+
         refresh: function() {
             if (this.view === 'reset') {
                 this.show_reset_view();
@@ -307,7 +372,7 @@ define(['dojo/_base/declare',
                 var val_summary = this.get_widget('validation');
                 val_summary.add_info('expired', this.expired_msg);
             }
-            this.set_visible_buttons(['sync', 'login']);
+            this.set_visible_buttons(['cert_auth', 'sync', 'login']);
             if (this.password_enabled()) {
                 this.use_fields(['username', 'password']);
                 var username_f = this.get_field('username');
@@ -339,11 +404,15 @@ define(['dojo/_base/declare',
         set_login_aside_text: function() {
             var aside = "";
             if (this.password_enabled()) {
-                aside += "<p>"+this.form_auth_msg;+"<p/>";
+                aside += "<p>"+this.form_auth_msg+"<p/>";
             }
             if (this.kerberos_enabled()) {
-                aside += "<p>"+this.kerberos_msg;+"<p/>";
+                aside += "<p>"+this.kerberos_msg+"<p/>";
             }
+            if (this.certificate_enabled()) {
+                aside += "<p>"+this.cert_msg+"<p/>";
+            }
+
             this.set('aside', aside);
         },
 

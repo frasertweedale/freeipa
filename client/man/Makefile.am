@@ -2,9 +2,7 @@
 
 AUTOMAKE_OPTIONS = 1.7
 
-NULL =
-
-man1_MANS = 				\
+dist_man1_MANS =			\
 		ipa-getkeytab.1		\
 		ipa-rmkeytab.1		\
 		ipa-client-install.1	\
@@ -13,13 +11,5 @@ man1_MANS = 				\
 		ipa-join.1		\
 		ipa.1
 
-man5_MANS =				\
+dist_man5_MANS =			\
 		default.conf.5
-	
-install-data-hook:
-	@for i in $(man1_MANS) ; do gzip -f $(DESTDIR)$(man1dir)/$$i ; done
-	@for i in $(man5_MANS) ; do gzip -f $(DESTDIR)$(man5dir)/$$i ; done
-
-MAINTAINERCLEANFILES =          \
-	Makefile.in		\
-	$(NULL)

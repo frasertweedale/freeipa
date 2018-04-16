@@ -738,28 +738,28 @@ cli_plugins = (
     show_mappings,
 )
 
+
 def run(api):
     error = None
     try:
-        (options, argv) = api.bootstrap_with_global_options(context='cli')
+        (_options, argv) = api.bootstrap_with_global_options(context='cli')
         for klass in cli_plugins:
-            api.register(klass)
-        api.load_plugins()
+            api.add_plugin(klass)
         api.finalize()
-        if not 'config_loaded' in api.env:
+        if not 'config_loaded' in api.env and not 'help' in argv:
             raise NotConfiguredError()
         sys.exit(api.Backend.cli.run(argv))
     except KeyboardInterrupt:
-        print ''
-        api.log.info('operation aborted')
+        print('')
+        logger.info('operation aborted')
     except PublicError as e:
         error = e
     except Exception as e:
-        api.log.exception('%s: %s', e.__class__.__name__, str(e))
+        logger.exception('%s: %s', e.__class__.__name__, str(e))
         error = InternalError()
     if error is not None:
         assert isinstance(error, PublicError)
-        api.log.error(error.strerror)
+        logger.error(error.strerror)
         sys.exit(error.rval)
 #+END_SRC
 

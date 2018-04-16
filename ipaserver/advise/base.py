@@ -19,14 +19,17 @@
 
 from __future__ import print_function
 
+from contextlib import contextmanager
+import logging
 import os
 from textwrap import wrap
 
 from ipalib import api
 from ipalib.plugable import Plugin, API
 from ipalib.errors import ValidationError
+from ipaplatform.paths import paths
 from ipapython import admintool
-from ipapython.ipa_log_manager import log_mgr
+from ipapython.ipa_log_manager import Filter
 
 
 """
@@ -74,6 +77,148 @@ As a result, you can redirect the advice's output directly to a script file.
 # ./script.sh
 """
 
+DEFAULT_INDENTATION_INCREMENT = 2
+
+
+class _IndentationTracker(object):
+    """
+    A simple wrapper that tracks the indentation level of the generated bash
+    commands
+    """
+    def __init__(self, spaces_per_indent=0):
+        if spaces_per_indent <= 0:
+            raise ValueError(
+                "Indentation increments cannot be zero or negative")
+        self.spaces_per_indent = spaces_per_indent
+        self._indentation_stack = []
+        self._total_indentation_level = 0
+
+    @property
+    def indentation_string(self):
+        """
+        return a string containing number of spaces corresponding to
+        indentation level
+        """
+        return " " * self._total_indentation_level
+
+    def indent(self):
+        """
+        track a single indentation of the generated code
+        """
+        self._indentation_stack.append(self.spaces_per_indent)
+        self._recompute_indentation_level()
+
+    def _recompute_indentation_level(self):
+        """
+        Track total indentation level of the generated code
+        """
+        self._total_indentation_level = sum(self._indentation_stack)
+
+    def dedent(self):
+        """
+        track a single dedentation of the generated code
+        dedents that would result in zero or negative indentation level will be
+        ignored
+        """
+        try:
+            self._indentation_stack.pop()
+        except IndexError:
+            # can not dedent any further
+            pass
+
+        self._recompute_indentation_level()
+
+
+class CompoundStatement(object):
+    """
+    Wrapper around indented blocks of Bash statements.
+
+    Override `begin_statement` and `end_statement` methods to issue
+    opening/closing commands using the passed in _AdviceOutput instance
+    """
+
+    def __init__(self, advice_output):
+        self.advice_output = advice_output
+
+    def __enter__(self):
+        self.begin_statement()
+        self.advice_output.indent()
+
+    def begin_statement(self):
+        pass
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.advice_output.dedent()
+        self.end_statement()
+
+    def end_statement(self):
+        pass
+
+
+class IfBranch(CompoundStatement):
+    """
+    Base wrapper around `if` branch. The closing statement is empty so it
+    leaves trailing block that can be closed off or continued by else branches
+    """
+    def __init__(self, advice_output, conditional):
+        super(IfBranch, self).__init__(advice_output)
+        self.conditional = conditional
+
+    def begin_statement(self):
+        self.advice_output.command('if {}'.format(self.conditional))
+        self.advice_output.command('then')
+
+
+class ElseIfBranch(CompoundStatement):
+    """
+    Wrapper for `else if <CONDITIONAL>`
+    """
+    def __init__(self, advice_output, alternative_conditional):
+        super(ElseIfBranch, self).__init__(advice_output)
+        self.alternative_conditional = alternative_conditional
+
+    def begin_statement(self):
+        command = 'else if {}'.format(self.alternative_conditional)
+
+        self.advice_output.command(command)
+
+
+class ElseBranch(CompoundStatement):
+    """
+    Wrapper for final `else` block
+    """
+    def begin_statement(self):
+        self.advice_output.command('else')
+
+    def end_statement(self):
+        self.advice_output.command('fi')
+
+
+class UnbranchedIfStatement(IfBranch):
+    """
+    Plain `if` without branches
+    """
+    def end_statement(self):
+        self.advice_output.command('fi')
+
+
+class ForLoop(CompoundStatement):
+    """
+    Wrapper around the for loop
+    """
+    def __init__(self, advice_output, loop_variable, iterable):
+        super(ForLoop, self).__init__(advice_output)
+        self.loop_variable = loop_variable
+        self.iterable = iterable
+
+    def begin_statement(self):
+        self.advice_output.command(
+            'for {} in {}'.format(self.loop_variable, self.iterable))
+        self.advice_output.command('do')
+
+    def end_statement(self):
+        self.advice_output.command('done')
+
 
 class _AdviceOutput(object):
 
@@ -81,20 +226,137 @@ class _AdviceOutput(object):
         self.content = []
         self.prefix = '# '
         self.options = None
+        self._indentation_tracker = _IndentationTracker(
+            spaces_per_indent=DEFAULT_INDENTATION_INCREMENT)
+
+    def indent(self):
+        """
+        Indent the statements by one level
+        """
+        self._indentation_tracker.indent()
+
+    def dedent(self):
+        """
+        Dedent the statements by one level
+        """
+        self._indentation_tracker.dedent()
+
+    @contextmanager
+    def indented_block(self):
+        self.indent()
+        try:
+            yield
+        finally:
+            self.dedent()
 
     def comment(self, line, wrapped=True):
         if wrapped:
-            for wrapped_line in wrap(line, 70):
-                self.content.append(self.prefix + wrapped_line)
+            self.append_wrapped_and_indented_comment(line)
         else:
-            self.content.append(self.prefix + line)
+            self.append_comment(line)
+
+    def append_wrapped_and_indented_comment(self, line, character_limit=70):
+        """
+        append wrapped and indented comment to the output
+        """
+        for wrapped_indented_line in wrap(
+                self.indent_statement(line), character_limit):
+            self.append_comment(wrapped_indented_line)
+
+    def append_comment(self, line):
+        self.append_statement(self.prefix + line)
+
+    def append_statement(self, statement):
+        """
+        Append a line to the generated content indenting it by tracked number
+        of spaces
+        """
+        self.content.append(self.indent_statement(statement))
+
+    def indent_statement(self, statement):
+        return '{indent}{statement}'.format(
+            indent=self._indentation_tracker.indentation_string,
+            statement=statement)
 
     def debug(self, line):
         if self.options.verbose:
             self.comment('DEBUG: ' + line)
 
     def command(self, line):
-        self.content.append(line)
+        self.append_statement(line)
+
+    def echo_error(self, error_message):
+        self.command(self._format_error(error_message))
+
+    def _format_error(self, error_message):
+        return 'echo "{}" >&2'.format(error_message)
+
+    def exit_on_failed_command(self, command_to_run,
+                               error_message_lines):
+        self.command(command_to_run)
+        self.exit_on_predicate(
+            '[ "$?" -ne "0" ]',
+            error_message_lines)
+
+    def exit_on_nonroot_euid(self):
+        self.exit_on_predicate(
+            '[ "$(id -u)" -ne "0" ]',
+            ["This script has to be run as root user"]
+        )
+
+    def exit_on_predicate(self, predicate, error_message_lines):
+        with self.unbranched_if(predicate):
+            for error_message_line in error_message_lines:
+                self.command(self._format_error(error_message_line))
+
+            self.command('exit 1')
+
+    @contextmanager
+    def unbranched_if(self, predicate):
+        with self._compound_statement(UnbranchedIfStatement, predicate):
+            yield
+
+    @contextmanager
+    def _compound_statement(self, statement_cls, *args):
+        with statement_cls(self, *args):
+            yield
+
+    def commands_on_predicate(self, predicate, commands_to_run_when_true,
+                              commands_to_run_when_false=None):
+        if commands_to_run_when_false is not None:
+            if_statement = self.if_branch
+        else:
+            if_statement = self.unbranched_if
+
+        with if_statement(predicate):
+            for command_to_run_when_true in commands_to_run_when_true:
+                self.command(
+                    command_to_run_when_true)
+
+        if commands_to_run_when_false is not None:
+            with self.else_branch():
+                for command_to_run_when_false in commands_to_run_when_false:
+                    self.command(command_to_run_when_false)
+
+    @contextmanager
+    def if_branch(self, predicate):
+        with self._compound_statement(IfBranch, predicate):
+            yield
+
+    @contextmanager
+    def else_branch(self):
+        with self._compound_statement(ElseBranch):
+            yield
+
+    @contextmanager
+    def else_if_branch(self, predicate):
+        with self._compound_statement(ElseIfBranch, predicate):
+            yield
+
+    @contextmanager
+    def for_loop(self, loop_variable, iterable):
+        with self._compound_statement(ForLoop, loop_variable, iterable):
+            yield
 
 
 class Advice(Plugin):
@@ -235,14 +497,19 @@ class IpaAdvise(admintool.AdminTool):
     def run(self):
         super(IpaAdvise, self).run()
 
-        api.bootstrap(in_server=False, context='cli')
+        api.bootstrap(in_server=False,
+                      context='cli',
+                      confdir=paths.ETC_IPA)
         api.finalize()
-        advise_api.bootstrap(in_server=False, context='cli')
+        advise_api.bootstrap(in_server=False,
+                             context='cli',
+                             confdir=paths.ETC_IPA)
         advise_api.finalize()
         if not self.options.verbose:
             # Do not print connection information by default
-            logger_name = r'ipa\.ipalib\.plugins\.rpcclient'
-            log_mgr.configure(dict(logger_regexps=[(logger_name, 'warning')]))
+            logger_name = r'ipalib\.rpc'
+            root_logger = logging.getLogger()
+            root_logger.addFilter(Filter(logger_name, logging.WARNING))
 
         # With no argument, print the list out and exit
         if not self.args:

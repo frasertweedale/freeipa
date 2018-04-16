@@ -1,6 +1,7 @@
 #
-# Copyright (C) 2015  FreeIPA Contributors see COPYING for license
+# Copyright (C) 2015-2017  FreeIPA Contributors see COPYING for license
 #
+from collections import deque
 
 
 class Graph(object):
@@ -23,8 +24,10 @@ class Graph(object):
     def add_edge(self, tail, head):
         if tail not in self.vertices:
             raise ValueError("tail is not a vertex")
+
         if head not in self.vertices:
             raise ValueError("head is not a vertex")
+
         self.edges.append((tail, head))
         self._adj[tail].append(head)
 
@@ -33,14 +36,17 @@ class Graph(object):
             self.edges.remove((tail, head))
         except KeyError:
             raise ValueError(
-                "graph does not contain edge: (%s, %s)" % (tail, head))
+                "graph does not contain edge: ({0}, {1})".format(tail, head)
+            )
         self._adj[tail].remove(head)
 
     def remove_vertex(self, vertex):
         try:
             self.vertices.remove(vertex)
         except KeyError:
-            raise ValueError("graph does not contain vertex: %s" % vertex)
+            raise ValueError(
+                "graph does not contain vertex: {0}".format(vertex)
+            )
 
         # delete _adjacencies
         del self._adj[vertex]
@@ -48,8 +54,9 @@ class Graph(object):
             adj[:] = [v for v in adj if v != vertex]
 
         # delete edges
-        edges = [e for e in self.edges if e[0] != vertex and e[1] != vertex]
-        self.edges[:] = edges
+        self.edges = [
+            e for e in self.edges if e[0] != vertex and e[1] != vertex
+        ]
 
     def get_tails(self, head):
         """
@@ -69,11 +76,12 @@ class Graph(object):
         Return a set of all visited vertices
         """
         if not start:
-            start = list(self.vertices)[0]
+            start = next(iter(self.vertices))
         visited = set()
-        queue = [start]
+        queue = deque([start])
+
         while queue:
-            vertex = queue.pop(0)
+            vertex = queue.popleft()
             if vertex not in visited:
                 visited.add(vertex)
                 queue.extend(set(self._adj.get(vertex, [])) - visited)

@@ -22,21 +22,19 @@ Test the `ipaserver/plugins/cert.py` module against a RA.
 from __future__ import print_function
 
 import base64
-import nose
 import os
+import unittest
+
 import pytest
-import shutil
 import six
-import tempfile
 from ipalib import api
 from ipalib import errors
-from ipalib import x509
 from ipaplatform.paths import paths
-from ipapython import ipautil
+from ipapython.certdb import NSSDatabase
 from ipapython.dn import DN
 from ipapython.ipautil import run
+from ipatests.test_xmlrpc.testcert import subject_base
 from ipatests.test_xmlrpc.xmlrpc_test import XMLRPC_test
-from nose.tools import raises, assert_raises
 
 if six.PY3:
     unicode = str
@@ -58,8 +56,8 @@ def is_db_configured():
     aliasdir = api.env.dot_ipa + os.sep + 'alias' + os.sep + '.pwd'
 
     if (api.env.xmlrpc_uri == u'http://localhost:8888/ipa/xml' and
-       not ipautil.file_exists(aliasdir)):
-        raise nose.SkipTest('developer CA not configured in %s' % aliasdir)
+       not os.path.isfile(aliasdir)):
+        raise unittest.SkipTest('developer CA not configured in %s' % aliasdir)
 
 # Test setup
 #
@@ -70,65 +68,49 @@ def is_db_configured():
 #
 # To test against Dogtag CA in the lite-server:
 #
-# - Copy the 3 NSS db files from /etc/httpd/alias to ~/.ipa/alias
-# - Copy /etc/httpd/alias/pwdfile.txt to  ~/.ipa/alias/.pwd.
+# - Copy the 3 NSS db files from /var/lib/ipa/radb to ~/.ipa/alias
+# - Copy /var/lib/ipa/radb/pwdfile.txt to  ~/.ipa/alias/.pwd.
 # - Change ownership of these files to be readable by you.
 #
 # The API tested depends on the value of ~/.ipa/default/ra_plugin when
 # running as the lite-server.
 
-
 class BaseCert(XMLRPC_test):
+    host_fqdn = u'ipatestcert.%s' % api.env.domain
+    service_princ = u'test/%s@%s' % (host_fqdn, api.env.realm)
 
     @classmethod
     def setup_class(cls):
         super(BaseCert, cls).setup_class()
 
         if 'cert_request' not in api.Command:
-            raise nose.SkipTest('cert_request not registered')
+            raise unittest.SkipTest('cert_request not registered')
         if 'cert_show' not in api.Command:
-            raise nose.SkipTest('cert_show not registered')
+            raise unittest.SkipTest('cert_show not registered')
 
         is_db_configured()
 
-    def run_certutil(self, args, stdin=None):
-        new_args = [paths.CERTUTIL, "-d", self.reqdir]
-        new_args = new_args + args
-        return ipautil.run(new_args, stdin)
-
     def setup(self):
-        self.reqdir = tempfile.mkdtemp(prefix = "tmp-")
-        self.reqfile = self.reqdir + "/test.csr"
-        self.pwname = self.reqdir + "/pwd"
-        self.certfile = self.reqdir + "/cert.crt"
-
-        # Create an empty password file
-        fp = open(self.pwname, "w")
-        fp.write("\n")
-        fp.close()
-
+        self.nssdb = NSSDatabase()
+        secdir = self.nssdb.secdir
+        self.reqfile = os.path.join(secdir, "test.csr")
+        self.certfile = os.path.join(secdir, "cert.crt")
         # Create our temporary NSS database
-        self.run_certutil(["-N", "-f", self.pwname])
-
-        self.subject = DN(('CN', self.host_fqdn), x509.subject_base())
+        self.nssdb.create_db()
+        self.subject = DN(('CN', self.host_fqdn), subject_base())
 
     def teardown(self):
-        shutil.rmtree(self.reqdir, ignore_errors=True)
+        self.nssdb.close()  # remove tempdir
 
     def generateCSR(self, subject):
-        self.run_certutil(["-R", "-s", subject,
-                           "-o", self.reqfile,
-                           "-z", paths.GROUP,
-                           "-f", self.pwname,
-                           "-a",
-                           ])
-        fp = open(self.reqfile, "r")
-        data = fp.read()
-        fp.close()
-        return data
-
-    host_fqdn = u'ipatestcert.%s' % api.env.domain
-    service_princ = u'test/%s@%s' % (host_fqdn, api.env.realm)
+        self.nssdb.run_certutil([
+            "-R", "-s", subject,
+            "-o", self.reqfile,
+            "-z", paths.GROUP,
+            "-a",
+        ])
+        with open(self.reqfile, "rb") as f:
+            return f.read().decode('ascii')
 
 
 @pytest.mark.tier1
@@ -151,8 +133,8 @@ class test_cert(BaseCert):
         # First create the host that will use this policy
         assert 'result' in api.Command['host_add'](self.host_fqdn, force=True)
 
-        csr = unicode(self.generateCSR(str(self.subject)))
-        with assert_raises(errors.NotFound):
+        csr = self.generateCSR(str(self.subject))
+        with pytest.raises(errors.NotFound):
             api.Command['cert_request'](csr, principal=self.service_princ)
 
     def test_0002_cert_add(self):
@@ -162,9 +144,10 @@ class test_cert(BaseCert):
         # Our host should exist from previous test
         global cert, sn
 
-        csr = unicode(self.generateCSR(str(self.subject)))
+        csr = self.generateCSR(str(self.subject))
         res = api.Command['cert_request'](csr, principal=self.service_princ, add=True)['result']
         assert DN(res['subject']) == self.subject
+        assert 'cacn' in res
         # save the cert for the service_show/find tests
         cert = res['certificate'].encode('ascii')
         # save cert's SN for URI test
@@ -191,9 +174,9 @@ class test_cert(BaseCert):
         See https://fedorahosted.org/freeipa/ticket/5881
         """
         result = api.Command.cert_show(sn, out=unicode(self.certfile))
-        with open(self.certfile, "r") as f:
-            pem_cert = unicode(f.read())
-        result = run(['openssl', 'x509', '-text'],
+        with open(self.certfile, "rb") as f:
+            pem_cert = f.read().decode('ascii')
+        result = run([paths.OPENSSL, 'x509', '-text'],
                      stdin=pem_cert, capture_output=True)
         assert _EXP_CRL_URI in result.output
         assert _EXP_OCSP_URI in result.output
@@ -204,7 +187,7 @@ class test_cert(BaseCert):
         """
         global newcert
 
-        csr = unicode(self.generateCSR(str(self.subject)))
+        csr = self.generateCSR(str(self.subject))
         res = api.Command['cert_request'](csr, principal=self.service_princ)['result']
         assert DN(res['subject']) == self.subject
         # save the cert for the service_show/find tests
@@ -222,7 +205,58 @@ class test_cert(BaseCert):
         )
         assert set(certs_encoded) == set([cert, newcert])
 
-    def test_0008_cleanup(self):
+    def test_0008_cert_show(self):
+        """
+        Verify that cert-show shows CA of the certificate without --all
+        """
+        res = api.Command['cert_show'](sn)['result']
+        assert 'cacn' in res
+        assert 'valid_not_before' in res
+        assert 'valid_not_after' in res
+
+    def test_0009_cert_find(self):
+        """
+        Verify that cert-find shows CA of the certificate without --all
+        """
+        res = api.Command['cert_find'](min_serial_number=sn,
+                                       max_serial_number=sn)['result'][0]
+        assert 'cacn' in res
+        assert 'valid_not_before' in res
+        assert 'valid_not_after' in res
+
+    def test_00010_san_in_cert(self):
+        """
+        Test if SAN extension is automatically added with default profile.
+        """
+        csr = self.generateCSR(str(self.subject))
+        res = api.Command[
+            'cert_request'](csr, principal=self.service_princ)['result']
+        assert 'san_dnsname' in res
+
+    def test_00011_emails_are_valid(self):
+        """
+        Verify the different scenarios when checking if any email addr
+        from DN or SAN extension does not appear in ldap entry.
+        """
+
+        from ipaserver.plugins.cert import _emails_are_valid
+        email_addrs = [u'any@EmAiL.CoM']
+        result = _emails_are_valid(email_addrs, [u'any@email.com'])
+        assert True == result, result
+
+        email_addrs = [u'any@EmAiL.CoM']
+        result = _emails_are_valid(email_addrs, [u'any@email.com',
+                                                 u'another@email.com'])
+        assert True == result, result
+
+        result = _emails_are_valid([], [u'any@email.com'])
+        assert True == result, result
+
+        email_addrs = [u'invalidEmailAddress']
+        result = _emails_are_valid(email_addrs, [])
+        assert False == result, result
+
+    def test_99999_cleanup(self):
         """
         Clean up cert test data
         """
@@ -242,10 +276,10 @@ class test_cert_find(XMLRPC_test):
         super(test_cert_find, cls).setup_class()
 
         if 'cert_find' not in api.Command:
-            raise nose.SkipTest('cert_find not registered')
+            raise unittest.SkipTest('cert_find not registered')
 
         if api.env.ra_plugin != 'dogtag':
-            raise nose.SkipTest('cert_find for dogtag CA only')
+            raise unittest.SkipTest('cert_find for dogtag CA only')
 
         is_db_configured()
 
@@ -390,12 +424,12 @@ class test_cert_find(XMLRPC_test):
         res = api.Command['cert_find'](sizelimit=0)
         assert 'count' in res and res['count'] == count_all
 
-    @raises(errors.ValidationError)
     def test_0028_find_negative_size(self):
         """
         Search with a negative sizelimit
         """
-        api.Command['cert_find'](sizelimit=-100)
+        with pytest.raises(errors.ValidationError):
+            api.Command['cert_find'](sizelimit=-100)
 
     def test_0029_search_for_notfound(self):
         """
@@ -411,12 +445,12 @@ class test_cert_find(XMLRPC_test):
         res = api.Command['cert_find'](subject=u'ipatestcert.%s' % api.env.domain)
         assert 'count' in res and res['count'] >= 1
 
-    @raises(errors.ConversionError)
     def test_0031_search_on_invalid_date(self):
         """
         Search using invalid date format
         """
-        api.Command['cert_find'](issuedon_from=u'xyz')
+        with pytest.raises(errors.ConversionError):
+            api.Command['cert_find'](issuedon_from=u'xyz')
 
 
 @pytest.mark.tier1
@@ -432,7 +466,7 @@ class test_cert_revocation(BaseCert):
         assert 'result' in api.Command['host_add'](self.host_fqdn, force=True)
 
         # generate CSR, request certificate, obtain serial number
-        self.csr = unicode(self.generateCSR(str(self.subject)))
+        self.csr = self.generateCSR(str(self.subject))
         res = api.Command['cert_request'](self.csr,
                                           principal=self.service_princ,
                                           add=True, all=True)['result']

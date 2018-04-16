@@ -22,13 +22,16 @@ import re
 import six
 
 from .baseldap import (LDAPQuery, LDAPObject, LDAPCreate,
-                                     LDAPDelete, LDAPUpdate, LDAPSearch,
-                                     LDAPAddAttributeViaOption,
-                                     LDAPRemoveAttributeViaOption,
-                                     LDAPRetrieve, global_output_params)
+                       LDAPDelete, LDAPUpdate, LDAPSearch,
+                       LDAPAddAttributeViaOption,
+                       LDAPRemoveAttributeViaOption,
+                       LDAPRetrieve, global_output_params,
+                       add_missing_object_class)
 from .hostgroup import get_complete_hostgroup_member_list
-from .service import validate_certificate
-from ipalib import api, Str, Int, Bytes, Flag, _, ngettext, errors, output
+from ipalib import (
+    api, Str, Int, Flag, _, ngettext, errors, output
+)
+from ipalib.parameters import Certificate
 from ipalib.constants import (
     IPA_ANCHOR_PREFIX,
     SID_ANCHOR_PREFIX,
@@ -54,7 +57,9 @@ if api.env.in_server and api.env.context in ['lite', 'server']:
 
 __doc__ = _("""
 ID Views
+
 Manage ID Views
+
 IPA allows to override certain properties of users and groups per each host.
 This functionality is primarily used to allow migration from older systems or
 other Identity Management solutions.
@@ -95,8 +100,9 @@ class idview(LDAPObject):
     object_name = _('ID View')
     object_name_plural = _('ID Views')
     object_class = ['ipaIDView', 'top']
-    default_attributes = ['cn', 'description']
-    rdn_is_primary_key = True
+    possible_objectclasses = ['ipaNameResolutionData']
+    default_attributes = ['cn', 'description', 'ipadomainresolutionorder']
+    allow_rename = True
 
     label = _('ID Views')
     label_singular = _('ID View')
@@ -123,6 +129,14 @@ class idview(LDAPObject):
             label=_('Hosts the view applies to'),
             flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
         ),
+        Str(
+            'ipadomainresolutionorder?',
+            cli_name='domain_resolution_order',
+            label=_('Domain resolution order'),
+            doc=_('colon-separated list of domains used for short name'
+                  ' qualification'),
+            flags={'no_search'}
+        )
     )
 
     permission_filter_objectclasses = ['nsContainer']
@@ -131,16 +145,42 @@ class idview(LDAPObject):
             'ipapermbindruletype': 'all',
             'ipapermright': {'read', 'search', 'compare'},
             'ipapermdefaultattr': {
-                'cn', 'description', 'objectClass',
+                'cn', 'description', 'ipadomainresolutionorder', 'objectClass',
             },
         },
     }
+
+    def ensure_possible_objectclasses(self, ldap, dn, entry_attrs, *keys):
+        try:
+            orig_entry_attrs = ldap.get_entry(dn, ['objectclass'])
+        except errors.NotFound:
+            raise self.handle_not_found(*keys)
+
+        orig_objectclasses = {
+            o.lower() for o in orig_entry_attrs.get('objectclass', [])}
+
+        entry_attrs['objectclass'] = orig_entry_attrs['objectclass']
+
+        for obj_class_name in self.possible_objectclasses:
+            if obj_class_name.lower() not in orig_objectclasses:
+                entry_attrs['objectclass'].append(obj_class_name)
 
 
 @register()
 class idview_add(LDAPCreate):
     __doc__ = _('Add a new ID View.')
     msg_summary = _('Added ID View "%(value)s"')
+
+    def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
+        self.api.Object.config.validate_domain_resolution_order(entry_attrs)
+
+        # The objectclass ipaNameResolutionData may not be present on
+        # the id view. We need to add it if we define a new
+        # value for ipaDomainResolutionOrder
+        if 'ipadomainresolutionorder' in entry_attrs:
+            add_missing_object_class(ldap, u'ipanameresolutiondata', dn,
+                                     entry_attrs, update=False)
+        return dn
 
 
 @register()
@@ -165,6 +205,9 @@ class idview_mod(LDAPUpdate):
         for key in keys:
             if key.lower() == DEFAULT_TRUST_VIEW_NAME:
                 raise protected_default_trust_view_error
+
+        self.api.Object.config.validate_domain_resolution_order(entry_attrs)
+        self.obj.ensure_possible_objectclasses(ldap, dn, entry_attrs, *keys)
 
         return dn
 
@@ -325,7 +368,7 @@ class baseidview_apply(LDAPQuery):
 
                 ldap.update_entry(host_entry)
 
-                # If no exception was raised, view assigment went well
+                # If no exception was raised, view assignment went well
                 completed = completed + 1
                 succeeded['host'].append(host)
             except errors.EmptyModlist:
@@ -495,7 +538,7 @@ def resolve_object_to_anchor(ldap, obj_type, obj, fallback_to_ldap):
     Takes options:
         ldap - the backend
         obj_type - either 'user' or 'group'
-        obj - the name of the object, e.g 'admin' or 'testuser'
+        obj - the name of the object, e.g. 'admin' or 'testuser'
     """
 
     try:
@@ -511,10 +554,11 @@ def resolve_object_to_anchor(ldap, obj_type, obj, fallback_to_ldap):
             'group': 'ipausergroup',
         }[obj_type]
 
-        if required_objectclass not in entry['objectclass']:
+        if not api.Object[obj_type].has_objectclass(entry['objectclass'],
+                                                    required_objectclass):
             raise errors.ValidationError(
                     name=_('IPA object'),
-                    error=_('system IPA objects (e.g system groups, user '
+                    error=_('system IPA objects (e.g. system groups, user '
                             'private groups) cannot be overridden')
                 )
 
@@ -527,7 +571,7 @@ def resolve_object_to_anchor(ldap, obj_type, obj, fallback_to_ldap):
     except errors.NotFound:
         pass
 
-    # If not successfull, try looking up the object in the trusted domain
+    # If not successful, try looking up the object in the trusted domain
     try:
         if _dcerpc_bindings_installed:
             domain_validator = ipaserver.dcerpc.DomainValidator(api)
@@ -550,7 +594,7 @@ def resolve_object_to_anchor(ldap, obj_type, obj, fallback_to_ldap):
         pass
 
     # No acceptable object was found
-    api.Object[obj_type].handle_not_found(obj)
+    raise api.Object[obj_type].handle_not_found(obj)
 
 
 def resolve_anchor_to_object_name(ldap, obj_type, anchor):
@@ -752,14 +796,12 @@ class baseidoverride_del(LDAPDelete):
         try:
             entry = ldap.get_entry(dn, ['objectclass'])
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
-
-        required_object_classes = set(self.obj.object_class)
-        actual_object_classes = set(entry['objectclass'])
+            raise self.obj.handle_not_found(*keys)
 
         # If not, treat it as a failed search
-        if not required_object_classes.issubset(actual_object_classes):
-            self.obj.handle_not_found(*keys)
+        for required_oc in self.obj.object_class:
+            if not self.obj.has_objectclass(entry['objectclass'], required_oc):
+                raise self.obj.handle_not_found(*keys)
 
         return dn
 
@@ -816,7 +858,12 @@ class idoverrideuser(baseidoverride):
 
     label = _('User ID overrides')
     label_singular = _('User ID override')
-    rdn_is_primary_key = True
+    allow_rename = True
+
+    # ID user overrides are bindable because we map SASL GSSAPI
+    # authentication of trusted users to ID user overrides in the
+    # default trust view.
+    bindable = True
 
     permission_filter_objectclasses = ['ipaUserOverride']
     managed_permissions = {
@@ -883,7 +930,7 @@ class idoverrideuser(baseidoverride):
             normalizer=normalize_sshpubkey,
             flags=['no_search'],
         ),
-        Bytes('usercertificate*', validate_certificate,
+        Certificate('usercertificate*',
               cli_name='certificate',
               label=_('Certificate'),
               doc=_('Base-64 encoded user certificate'),
@@ -927,7 +974,7 @@ class idoverridegroup(baseidoverride):
 
     label = _('Group ID overrides')
     label_singular = _('Group ID override')
-    rdn_is_primary_key = True
+    allow_rename = True
 
     permission_filter_objectclasses = ['ipaGroupOverride']
     managed_permissions = {

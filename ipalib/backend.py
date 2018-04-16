@@ -21,12 +21,15 @@
 Base classes for all backed-end plugins.
 """
 
+import logging
 import threading
 import os
 
 from ipalib import plugable
 from ipalib.errors import PublicError, InternalError, CommandError
 from ipalib.request import context, Connection, destroy_context
+
+logger = logging.getLogger(__name__)
 
 
 class Backend(plugable.Plugin):
@@ -66,7 +69,7 @@ class Connectible(Backend):
         conn = self.create_connection(*args, **kw)
         setattr(context, self.id, Connection(conn, self.disconnect))
         assert self.conn is conn
-        self.debug('Created connection context.%s' % self.id)
+        logger.debug('Created connection context.%s', self.id)
 
     def create_connection(self, *args, **kw):
         raise NotImplementedError('%s.create_connection()' % self.id)
@@ -82,7 +85,7 @@ class Connectible(Backend):
             )
         self.destroy_connection()
         delattr(context, self.id)
-        self.debug('Destroyed connection context.%s' % self.id)
+        logger.debug('Destroyed connection context.%s', self.id)
 
     def destroy_connection(self):
         raise NotImplementedError('%s.destroy_connection()' % self.id)
@@ -120,7 +123,9 @@ class Executioner(Backend):
             os.environ["KRB5CCNAME"] = ccache
 
         if self.env.in_server:
-            self.Backend.ldap2.connect(ccache=ccache)
+            self.Backend.ldap2.connect(ccache=ccache,
+                                       size_limit=None,
+                                       time_limit=None)
         else:
             self.Backend.rpcclient.connect()
         if client_ip is not None:
@@ -130,20 +135,16 @@ class Executioner(Backend):
         destroy_context()
 
     def execute(self, _name, *args, **options):
-        error = None
         try:
             if _name not in self.Command:
                 raise CommandError(name=_name)
-            result = self.Command[_name](*args, **options)
-        except PublicError as e:
-            error = e
+            return self.Command[_name](*args, **options)
+        except PublicError:
+            raise
         except Exception as e:
-            self.exception(
+            logger.exception(
                 'non-public: %s: %s', e.__class__.__name__, str(e)
             )
-            error = InternalError()
-        destroy_context()
-        if error is None:
-            return result
-        assert isinstance(error, PublicError)
-        raise error #pylint: disable=E0702
+            raise InternalError()
+        finally:
+            destroy_context()

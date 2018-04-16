@@ -1,50 +1,35 @@
-# Authors:
-#   Simo Sorce <ssorce@redhat.com>
 #
-# Copyright (C) 2010  Red Hat
-# see file 'COPYING' for use and warranty information
+# Copyright (C) 2017  FreeIPA Contributors see COPYING for license
 #
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from ipalib import api, errors
-from ipalib import Str
-from ipalib import Object, Command
-from ipalib import _
+from ipalib import Object
+from ipalib import _, ngettext
+from ipalib.crud import Search
+from ipalib.parameters import Int, Str, StrEnum
 from ipalib.plugable import Registry
-from ipapython.dn import DN
-
-__doc__ = _("""
-Kerberos pkinit options
-
-Enable or disable anonymous pkinit using the principal
-WELLKNOWN/ANONYMOUS@REALM. The server must have been installed with
-pkinit support.
-
-EXAMPLES:
-
- Enable anonymous pkinit:
-  ipa pkinit-anonymous enable
-
- Disable anonymous pkinit:
-  ipa pkinit-anonymous disable
-
-For more information on anonymous pkinit see:
-
-http://k5wiki.kerberos.org/wiki/Projects/Anonymous_pkinit
-""")
 
 register = Registry()
+
+__doc__ = _("""
+Kerberos PKINIT feature status reporting tools.
+
+Report IPA masters on which Kerberos PKINIT is enabled or disabled
+
+EXAMPLES:
+ List PKINIT status on all masters:
+   ipa pkinit-status
+
+ Check PKINIT status on `ipa.example.com`:
+   ipa pkinit-status --server ipa.example.com
+
+ List all IPA masters with disabled PKINIT:
+   ipa pkinit-status --status='disabled'
+
+For more info about PKINIT support see:
+
+https://www.freeipa.org/page/V4/Kerberos_PKINIT
+""")
+
 
 @register()
 class pkinit(Object):
@@ -53,52 +38,92 @@ class pkinit(Object):
     """
     object_name = _('pkinit')
 
-    label=_('PKINIT')
+    label = _('PKINIT')
 
-
-def valid_arg(ugettext, action):
-    """
-    Accepts only Enable/Disable.
-    """
-    a = action.lower()
-    if a != 'enable' and a != 'disable':
-        raise errors.ValidationError(
-            name='action',
-            error=_('Unknown command %s') % action
+    takes_params = (
+        Str(
+            'server_server?',
+            cli_name='server',
+            label=_('Server name'),
+            doc=_('IPA server hostname'),
+        ),
+        StrEnum(
+            'status?',
+            cli_name='status',
+            label=_('PKINIT status'),
+            doc=_('Whether PKINIT is enabled or disabled'),
+            values=(u'enabled', u'disabled'),
+            flags={'virtual_attribute', 'no_create', 'no_update'}
         )
-
-@register()
-class pkinit_anonymous(Command):
-    __doc__ = _('Enable or Disable Anonymous PKINIT.')
-
-    princ_name = 'WELLKNOWN/ANONYMOUS@%s' % api.env.realm
-    default_dn = DN(('krbprincipalname', princ_name), ('cn', api.env.realm), ('cn', 'kerberos'), api.env.basedn)
-
-    takes_args = (
-        Str('action', valid_arg),
     )
 
-    def execute(self, action, **options):
-        ldap = self.api.Backend.ldap2
-        set_lock = False
-        lock = None
 
-        entry_attrs = ldap.get_entry(self.default_dn, ['nsaccountlock'])
+@register()
+class pkinit_status(Search):
+    __doc__ = _('Report PKINIT status on the IPA masters')
 
-        if 'nsaccountlock' in entry_attrs:
-            lock = entry_attrs['nsaccountlock'][0].lower()
+    msg_summary = ngettext('%(count)s server matched',
+                           '%(count)s servers matched', 0)
 
-        if action.lower() == 'enable':
-            if lock == 'true':
-                set_lock = True
-                lock = None
-        elif action.lower() == 'disable':
-            if lock != 'true':
-                set_lock = True
-                lock = 'TRUE'
+    takes_options = Search.takes_options + (
+        Int(
+            'timelimit?',
+            label=_('Time Limit'),
+            doc=_('Time limit of search in seconds (0 is unlimited)'),
+            flags=['no_display'],
+            minvalue=0,
+            autofill=False,
+        ),
+        Int(
+            'sizelimit?',
+            label=_('Size Limit'),
+            doc=_('Maximum number of entries returned (0 is unlimited)'),
+            flags=['no_display'],
+            minvalue=0,
+            autofill=False,
+        ),
+    )
 
-        if set_lock:
-            entry_attrs['nsaccountlock'] = lock
-            ldap.update_entry(entry_attrs)
+    def get_pkinit_status(self, server, status):
+        backend = self.api.Backend.serverroles
+        ipa_master_config = backend.config_retrieve("IPA master")
 
-        return dict(result=True)
+        if server is not None:
+            servers = [server]
+        else:
+            servers = ipa_master_config['ipa_master_server']
+
+        pkinit_servers = ipa_master_config.get('pkinit_server_server')
+        if pkinit_servers is None:
+            return
+
+        for s in servers:
+            pkinit_status = {
+                u'server_server': s,
+                u'status': (
+                    u'enabled' if s in pkinit_servers else u'disabled'
+                )
+            }
+            if status is not None and pkinit_status[u'status'] != status:
+                continue
+
+            yield pkinit_status
+
+    def execute(self, *keys, **options):
+        if keys:
+            return dict(
+                result=[],
+                count=0,
+                truncated=False
+            )
+
+        server = options.get('server_server', None)
+        status = options.get('status', None)
+
+        if server is not None:
+            self.api.Object.server_role.ensure_master_exists(server)
+
+        result = sorted(self.get_pkinit_status(server, status),
+                        key=lambda d: d.get('server_server'))
+
+        return dict(result=result, count=len(result), truncated=False)

@@ -16,22 +16,27 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
+from __future__ import absolute_import
 
-from optparse import Option, Values, OptionParser, IndentedHelpFormatter, OptionValueError
+# pylint: disable=deprecated-module
+from optparse import (
+    Option, Values, OptionParser, IndentedHelpFormatter, OptionValueError)
+# pylint: enable=deprecated-module
 from copy import copy
+import socket
+import functools
 
 from dns import resolver, rdatatype
 from dns.exception import DNSException
+import dns.name
 # pylint: disable=import-error
 from six.moves.configparser import SafeConfigParser
 from six.moves.urllib.parse import urlsplit
 # pylint: enable=import-error
 
-from ipapython.dn import DN
 from ipaplatform.paths import paths
-import dns.name
-
-import socket
+from ipapython.dn import DN
+from ipapython.ipautil import CheckedIPAddress, CheckedIPAddressLoopback
 
 
 class IPAConfigError(Exception):
@@ -55,15 +60,16 @@ class IPAFormatter(IndentedHelpFormatter):
             ret += "%s %s\n" % (spacing, line)
         return ret
 
-def check_ip_option(option, opt, value):
-    from ipapython.ipautil import CheckedIPAddress
 
-    ip_local = option.ip_local is True
-    ip_netmask = option.ip_netmask is True
+def check_ip_option(option, opt, value, allow_loopback=False):
     try:
-        return CheckedIPAddress(value, parse_netmask=ip_netmask, match_local=ip_local)
+        if allow_loopback:
+            return CheckedIPAddressLoopback(value)
+        else:
+            return CheckedIPAddress(value)
     except Exception as e:
-        raise OptionValueError("option %s: invalid IP address %s: %s" % (opt, value, e))
+        raise OptionValueError("option {}: invalid IP address {}: {}"
+                               .format(opt, value, e))
 
 def check_dn_option(option, opt, value):
     try:
@@ -71,16 +77,30 @@ def check_dn_option(option, opt, value):
     except Exception as e:
         raise OptionValueError("option %s: invalid DN: %s" % (opt, e))
 
+
+def check_constructor(option, opt, value):
+    con = option.constructor
+    assert con is not None, "Oops! Developer forgot to set 'constructor' kwarg"
+    try:
+        return con(value)
+    except Exception as e:
+        raise OptionValueError("option {} invalid: {}".format(opt, e))
+
+
 class IPAOption(Option):
     """
     optparse.Option subclass with support of options labeled as
     security-sensitive such as passwords.
     """
-    ATTRS = Option.ATTRS + ["sensitive", "ip_local", "ip_netmask"]
-    TYPES = Option.TYPES + ("ip", "dn")
+    ATTRS = Option.ATTRS + ["sensitive", "constructor"]
+    TYPES = Option.TYPES + ("ip", "dn", "constructor", "ip_with_loopback")
     TYPE_CHECKER = copy(Option.TYPE_CHECKER)
     TYPE_CHECKER["ip"] = check_ip_option
+    TYPE_CHECKER["ip_with_loopback"] = functools.partial(check_ip_option,
+                                                         allow_loopback=True)
     TYPE_CHECKER["dn"] = check_dn_option
+    TYPE_CHECKER["constructor"] = check_constructor
+
 
 class IPAOptionParser(OptionParser):
     """
@@ -106,7 +126,10 @@ class IPAOptionParser(OptionParser):
         Returns all options except those with sensitive=True in the same
         fashion as parse_args would
         """
-        all_opts_dict = dict([ (o.dest, o) for o in self._get_all_options() if hasattr(o, 'sensitive') ])
+        all_opts_dict = {
+            o.dest: o for o in self._get_all_options()
+            if hasattr(o, 'sensitive')
+        }
         safe_opts_dict = {}
 
         for option, value in opts.__dict__.items():
@@ -223,6 +246,8 @@ def __discover_config(discover_server = True):
 
     except Exception:
         pass
+    return None
+
 
 def add_standard_options(parser):
     parser.add_option("--realm", dest="realm", help="Override default IPA realm")

@@ -20,7 +20,8 @@
 Test the `ipaserver/plugins/dns.py` module.
 """
 
-import nose
+import unittest
+
 from ipalib import api, errors
 from ipalib.util import normalize_zone
 from ipapython.dnsutil import DNSName
@@ -268,6 +269,7 @@ absnxname = u'does.not.exist.test.'
 arec1 = u'172.16.29.111'
 arec2 = u'172.31.254.222'
 arec3 = u'172.16.250.123'
+aaaarec1 = u'ff02::1'
 
 fwd_ip = u'172.16.31.80'
 allowtransfer_tofwd = u'%s;' % fwd_ip
@@ -432,10 +434,13 @@ class test_dns(Declarative):
             api.Backend.rpcclient.connect()
 
         if not have_ldap2:
-            raise nose.SkipTest('server plugin not available')
+            raise unittest.SkipTest('server plugin not available')
 
         if get_nameservers_error is not None:
-            raise nose.SkipTest('unable to get list of nameservers (%s)' % get_nameservers_error)
+            raise unittest.SkipTest(
+                'unable to get list of nameservers (%s)' %
+                get_nameservers_error
+            )
 
         try:
            api.Command['dnszone_add'](zone1,
@@ -443,7 +448,7 @@ class test_dns(Declarative):
            )
            api.Command['dnszone_del'](zone1)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         except errors.DuplicateEntry:
             pass
 
@@ -1087,18 +1092,32 @@ class test_dns(Declarative):
 
         dict(
             desc='Modify AAAA record in %r in zone %r' % (name1, zone1),
-            command=('dnsrecord_mod', [zone1, name1], {'aaaarecord': u'ff02::1'}),
+            command=(
+                'dnsrecord_mod', [zone1, name1], {'aaaarecord': aaaarec1}
+            ),
             expected={
                 'value': name1_dnsname,
                 'summary': None,
                 'result': {
                     'idnsname': [name1_dnsname],
                     'arecord': [arec3],
-                    'aaaarecord': [u'ff02::1'],
+                    'aaaarecord': [aaaarec1],
                 },
             },
         ),
 
+        dict(
+            desc=('Show record %r in zone %r with --structured and --all '
+                  'options' % (name1, zone1)),
+            command=('dnsrecord_show', [zone1, name1],
+                     {'structured': True, 'all': True}),
+            expected=lambda o, x: (
+                'result' in x and
+                'dnsrecords' in x['result'] and
+                (len(x['result']['dnsrecords']) in (1, 2)) and
+                (any(y[u'dnsdata'] in (aaaarec1, arec3)
+                     for y in x['result']['dnsrecords']))),
+        ),
 
         dict(
             desc='Remove AAAA record from %r in zone %r using dnsrecord_mod' % (name1, zone1),
@@ -1156,8 +1175,8 @@ class test_dns(Declarative):
                                                                      % zone1_ns]}),
             expected=lambda x, output: (
                 type(x) == errors.ValidationError and
-                x.message.endswith(u'Raw value of a DNS record was already '
-                                   u'set by "srv_rec" option'),
+                str(x).endswith('Raw value of a DNS record was already '
+                                'set by "srv_rec" option'),
             ),
         ),
 
@@ -2846,6 +2865,33 @@ class test_dns(Declarative):
             },
         ),
 
+        dict(
+            desc='Show structured record %r in zone %r' % (
+                u'_foo._tcp', idnzone1
+            ),
+            command=(
+                'dnsrecord_show', [idnzone1, u'_foo._tcp'],
+                {u'structured': True, u'all': True}
+            ),
+            expected={
+                'value': DNSName(u'_foo._tcp'),
+                'summary': None,
+                'result': {
+                    'dn': DN(('idnsname', u'_foo._tcp'), idnzone1_dn),
+                    'idnsname': [DNSName(u'_foo._tcp')],
+                    'dnsrecords': [{
+                        u'dnsdata': u'0 100 1234 {}'.format(
+                            idnzone1_mname_punycoded),
+                        u'dnstype': u'SRV',
+                        u'srv_part_port': u'1234',
+                        u'srv_part_priority': u'0',
+                        u'srv_part_target': idnzone1_mname,
+                        u'srv_part_weight': u'100'
+                    }],
+                    'objectclass': objectclasses.dnsrecord,
+                },
+            },
+        ),
 
         dict(
             desc='Add AFSDB record to %r using dnsrecord_add' % (dnsafsdbres1),
@@ -3167,16 +3213,19 @@ class test_root_zone(Declarative):
             api.Backend.rpcclient.connect()
 
         if not have_ldap2:
-            raise nose.SkipTest('server plugin not available')
+            raise unittest.SkipTest('server plugin not available')
 
         if get_nameservers_error is not None:
-            raise nose.SkipTest('unable to get list of nameservers (%s)' % get_nameservers_error)
+            raise unittest.SkipTest(
+                'unable to get list of nameservers (%s)' %
+                get_nameservers_error
+            )
 
         try:
             api.Command['dnszone_add'](zone1, idnssoarname=zone1_rname,)
             api.Command['dnszone_del'](zone1)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         except errors.DuplicateEntry:
             pass
 
@@ -3250,13 +3299,13 @@ class test_forward_zones(Declarative):
             api.Backend.rpcclient.connect()
 
         if not have_ldap2:
-            raise nose.SkipTest('server plugin not available')
+            raise unittest.SkipTest('server plugin not available')
 
         try:
             api.Command['dnszone_add'](zone1, idnssoarname=zone1_rname,)
             api.Command['dnszone_del'](zone1)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         except errors.DuplicateEntry:
             pass
 
@@ -4459,13 +4508,13 @@ class test_forward_master_zones_mutual_exlusion(Declarative):
             api.Backend.rpcclient.connect()
 
         if not have_ldap2:
-            raise nose.SkipTest('server plugin not available')
+            raise unittest.SkipTest('server plugin not available')
 
         try:
             api.Command['dnszone_add'](zone1, idnssoarname=zone1_rname,)
             api.Command['dnszone_del'](zone1)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         except errors.DuplicateEntry:
             pass
 
@@ -4834,13 +4883,13 @@ class test_forwardzone_delegation_warnings(Declarative):
             api.Backend.rpcclient.connect()
 
         if not have_ldap2:
-            raise nose.SkipTest('server plugin not available')
+            raise unittest.SkipTest('server plugin not available')
 
         try:
             api.Command['dnszone_add'](zone1, idnssoarname=zone1_rname,)
             api.Command['dnszone_del'](zone1)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         except errors.DuplicateEntry:
             pass
 
@@ -5345,17 +5394,17 @@ class test_dns_soa(Declarative):
             api.Backend.rpcclient.connect()
 
         if not have_ldap2:
-            raise nose.SkipTest('server plugin not available')
+            raise unittest.SkipTest('server plugin not available')
 
         if get_nameservers_error is not None:
-            raise nose.SkipTest('unable to get list of nameservers (%s)' %
+            raise unittest.SkipTest('unable to get list of nameservers (%s)' %
                                 get_nameservers_error)
         try:
             api.Command['dnszone_add'](zone1,
                                        idnssoarname=zone1_rname,)
             api.Command['dnszone_del'](zone1)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         except errors.DuplicateEntry:
             pass
 

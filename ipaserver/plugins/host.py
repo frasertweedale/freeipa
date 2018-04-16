@@ -20,15 +20,16 @@
 
 from __future__ import absolute_import
 
+import logging
+
 import dns.resolver
-import string
 
 import six
 
 from ipalib import api, errors, util
 from ipalib import messages
-from ipalib import Str, Flag, Bytes
-from ipalib.parameters import Principal
+from ipalib import Str, Flag
+from ipalib.parameters import Principal, Certificate
 from ipalib.plugable import Registry
 from .baseldap import (LDAPQuery, LDAPObject, LDAPCreate,
                                      LDAPDelete, LDAPUpdate, LDAPSearch,
@@ -39,7 +40,7 @@ from .baseldap import (LDAPQuery, LDAPObject, LDAPCreate,
                                      LDAPAddAttributeViaOption,
                                      LDAPRemoveAttributeViaOption)
 from .service import (
-    validate_realm, normalize_principal, validate_certificate,
+    validate_realm, normalize_principal,
     set_certificate_attrs, ticket_flags_params, update_krbticketflags,
     set_kerberos_attrs, rename_ipaallowedtoperform_from_ldap,
     rename_ipaallowedtoperform_to_ldap, revoke_certs)
@@ -47,7 +48,6 @@ from .dns import (dns_container_exists,
         add_records_for_host_validation, add_records_for_host,
         get_reverse_zone)
 from ipalib import _, ngettext
-from ipalib import x509
 from ipalib import output
 from ipalib.request import context
 from ipalib.util import (normalize_sshpubkey, validate_sshpubkey_no_options,
@@ -62,7 +62,7 @@ from ipalib.util import (normalize_sshpubkey, validate_sshpubkey_no_options,
 from ipapython.ipautil import (
     ipa_generate_password,
     CheckedIPAddress,
-    GEN_TMP_PWD_LEN
+    TMP_PWD_ENTROPY_BITS
 )
 from ipapython.dnsutil import DNSName
 from ipapython.ssh import SSHPublicKey
@@ -134,11 +134,9 @@ EXAMPLES:
    ipa host-allow-create-keytab test2 --users=tuser1
 """)
 
-register = Registry()
+logger = logging.getLogger(__name__)
 
-# Characters to be used by random password generator
-# The set was chosen to avoid the need for escaping the characters by user
-host_pwd_chars = string.digits + string.ascii_letters + '_,.@+-='
+register = Registry()
 
 
 def remove_ptr_rec(ipaddr, fqdn):
@@ -146,7 +144,7 @@ def remove_ptr_rec(ipaddr, fqdn):
     Remove PTR record of IP address (ipaddr)
     :return: True if PTR record was removed, False if record was not found
     """
-    api.log.debug('deleting PTR record of ipaddr %s', ipaddr)
+    logger.debug('deleting PTR record of ipaddr %s', ipaddr)
     try:
         revzone, revname = get_reverse_zone(ipaddr)
 
@@ -156,7 +154,7 @@ def remove_ptr_rec(ipaddr, fqdn):
 
         api.Command['dnsrecord_del'](revzone, revname, **delkw)
     except (errors.NotFound, errors.AttrValueNotFound):
-        api.log.debug('PTR record of ipaddr %s not found', ipaddr)
+        logger.debug('PTR record of ipaddr %s not found', ipaddr)
         return False
 
     return True
@@ -250,7 +248,7 @@ def validate_ipaddr(ugettext, ipaddr):
     Verify that we have either an IPv4 or IPv6 address.
     """
     try:
-        CheckedIPAddress(ipaddr, match_local=False)
+        CheckedIPAddress(ipaddr)
     except Exception as e:
         return unicode(e)
     return None
@@ -486,7 +484,7 @@ class host(LDAPObject):
             label=_('Random password'),
             flags=('no_create', 'no_update', 'no_search', 'virtual_attribute'),
         ),
-        Bytes('usercertificate*', validate_certificate,
+        Certificate('usercertificate*',
             cli_name='certificate',
             label=_('Certificate'),
             doc=_('Base-64 encoded host certificate'),
@@ -515,12 +513,12 @@ class host(LDAPObject):
             label=_('Not After'),
             flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
         ),
-        Str('md5_fingerprint',
-            label=_('Fingerprint (MD5)'),
-            flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
-        ),
         Str('sha1_fingerprint',
             label=_('Fingerprint (SHA1)'),
+            flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
+        ),
+        Str('sha256_fingerprint',
+            label=_('Fingerprint (SHA256)'),
             flags={'virtual_attribute', 'no_create', 'no_update', 'no_search'},
         ),
         Str('revocation_reason?',
@@ -688,12 +686,10 @@ class host_add(LDAPCreate):
                 entry_attrs['objectclass'].remove('krbprincipal')
         if options.get('random'):
             entry_attrs['userpassword'] = ipa_generate_password(
-                characters=host_pwd_chars, pwd_len=GEN_TMP_PWD_LEN)
+                entropy_bits=TMP_PWD_ENTROPY_BITS, special=None)
             # save the password so it can be displayed in post_callback
             setattr(context, 'randompassword', entry_attrs['userpassword'])
-        certs = options.get('usercertificate', [])
-        certs_der = [x509.normalize_certificate(c) for c in certs]
-        entry_attrs['usercertificate'] = certs_der
+
         entry_attrs['managedby'] = dn
         entry_attrs['objectclass'].append('ieee802device')
         entry_attrs['objectclass'].append('ipasshhost')
@@ -704,7 +700,6 @@ class host_add(LDAPCreate):
 
     def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
         assert isinstance(dn, DN)
-        exc = None
         if dns_container_exists(ldap):
             try:
                 parts = keys[-1].split('.')
@@ -723,18 +718,15 @@ class host_add(LDAPCreate):
 
                 update_sshfp_record(domain, unicode(parts[0]), entry_attrs)
             except Exception as e:
-                exc = e
+                self.add_message(messages.FailedToAddHostDNSRecords(reason=e))
         if options.get('random', False):
             try:
-                entry_attrs['randompassword'] = unicode(getattr(context, 'randompassword'))
+                entry_attrs['randompassword'] = unicode(
+                    getattr(context, 'randompassword'))
             except AttributeError:
                 # On the off-chance some other extension deletes this from the
                 # context, don't crash.
                 pass
-        if exc:
-            raise errors.NonFatalError(
-                reason=_('The host was added but the DNS update failed with: %(exc)s') % dict(exc=exc)
-            )
         set_certificate_attrs(entry_attrs)
         set_kerberos_attrs(entry_attrs, options)
         rename_ipaallowedtoperform_from_ldap(entry_attrs, options)
@@ -889,13 +881,13 @@ class host_mod(LDAPUpdate):
                 msg = 'Principal name already set, it is unchangeable.'
                 raise errors.ACIError(info=msg)
             obj_classes = entry_attrs_old['objectclass']
-            if 'krbprincipalaux' not in obj_classes:
+            if 'krbprincipalaux' not in (item.lower() for item in
+                                         obj_classes):
                 obj_classes.append('krbprincipalaux')
                 entry_attrs['objectclass'] = obj_classes
 
         # verify certificates
         certs = entry_attrs.get('usercertificate') or []
-        certs_der = [x509.normalize_certificate(c) for c in certs]
 
         # revoke removed certificates
         ca_is_enabled = self.api.Command.ca_is_enabled()['result']
@@ -903,19 +895,19 @@ class host_mod(LDAPUpdate):
             try:
                 entry_attrs_old = ldap.get_entry(dn, ['usercertificate'])
             except errors.NotFound:
-                self.obj.handle_not_found(*keys)
+                raise self.obj.handle_not_found(*keys)
             old_certs = entry_attrs_old.get('usercertificate', [])
-            old_certs_der = [x509.normalize_certificate(c) for c in old_certs]
-            removed_certs_der = set(old_certs_der) - set(certs_der)
-            for der in removed_certs_der:
-                rm_certs = api.Command.cert_find(certificate=der)['result']
+            removed_certs = set(old_certs) - set(certs)
+            for cert in removed_certs:
+                rm_certs = api.Command.cert_find(certificate=cert)['result']
                 revoke_certs(rm_certs)
 
         if certs:
-            entry_attrs['usercertificate'] = certs_der
+            entry_attrs['usercertificate'] = certs
 
         if options.get('random'):
-            entry_attrs['userpassword'] = ipa_generate_password(characters=host_pwd_chars)
+            entry_attrs['userpassword'] = ipa_generate_password(
+                entropy_bits=TMP_PWD_ENTROPY_BITS)
             setattr(context, 'randompassword', entry_attrs['userpassword'])
 
         if 'macaddress' in entry_attrs:
@@ -924,7 +916,7 @@ class host_mod(LDAPUpdate):
             else:
                 _entry_attrs = ldap.get_entry(dn, ['objectclass'])
                 obj_classes = _entry_attrs['objectclass']
-            if 'ieee802device' not in obj_classes:
+            if 'ieee802device' not in (item.lower() for item in obj_classes):
                 obj_classes.append('ieee802device')
                 entry_attrs['objectclass'] = obj_classes
 
@@ -935,7 +927,7 @@ class host_mod(LDAPUpdate):
                 result = api.Command['dnszone_show'](domain)['result']
                 domain = result['idnsname'][0]
             except errors.NotFound:
-                self.obj.handle_not_found(*keys)
+                raise self.obj.handle_not_found(*keys)
             update_sshfp_record(domain, unicode(parts[0]), entry_attrs)
 
         if 'ipasshpubkey' in entry_attrs:
@@ -944,7 +936,7 @@ class host_mod(LDAPUpdate):
             else:
                 _entry_attrs = ldap.get_entry(dn, ['objectclass'])
                 obj_classes = entry_attrs['objectclass'] = _entry_attrs['objectclass']
-            if 'ipasshhost' not in obj_classes:
+            if 'ipasshhost' not in (item.lower() for item in obj_classes):
                 obj_classes.append('ipasshhost')
 
         update_krbticketflags(ldap, entry_attrs, attrs_list, options, True)
@@ -953,14 +945,16 @@ class host_mod(LDAPUpdate):
             if 'objectclass' not in entry_attrs:
                 entry_attrs_old = ldap.get_entry(dn, ['objectclass'])
                 entry_attrs['objectclass'] = entry_attrs_old['objectclass']
-            if 'krbticketpolicyaux' not in entry_attrs['objectclass']:
+            if 'krbticketpolicyaux' not in (item.lower() for item in
+                                            entry_attrs['objectclass']):
                 entry_attrs['objectclass'].append('krbticketpolicyaux')
 
         if 'krbprincipalauthind' in entry_attrs:
             if 'objectclass' not in entry_attrs:
                 entry_attrs_old = ldap.get_entry(dn, ['objectclass'])
                 entry_attrs['objectclass'] = entry_attrs_old['objectclass']
-            if 'krbprincipalaux' not in entry_attrs['objectclass']:
+            if 'krbprincipalaux' not in (item.lower() for item in
+                                         entry_attrs['objectclass']):
                 entry_attrs['objectclass'].append('krbprincipalaux')
 
         add_sshpubkey_to_attrs_pre(self.context, attrs_list)
@@ -1022,7 +1016,7 @@ class host_find(LDAPSearch):
                     try:
                         entry_attrs = ldap.get_entry(dn, ['managedby'])
                     except errors.NotFound:
-                        self.obj.handle_not_found(pkey)
+                        raise self.obj.handle_not_found(pkey)
                     hosts.append(set(entry_attrs.get('managedby', '')))
                 hosts = list(reduce(lambda s1, s2: s1 & s2, hosts))
 
@@ -1039,7 +1033,7 @@ class host_find(LDAPSearch):
                     try:
                         entry_attrs = ldap.get_entry(dn, ['managedby'])
                     except errors.NotFound:
-                        self.obj.handle_not_found(pkey)
+                        raise self.obj.handle_not_found(pkey)
                     not_hosts += entry_attrs.get('managedby', [])
                 not_hosts = list(set(not_hosts))
 
@@ -1074,7 +1068,7 @@ class host_find(LDAPSearch):
                         reason=e,
                     )
                 )
-                self.log.error("Invalid certificate: {err}".format(err=e))
+                logger.error("Invalid certificate: %s", e)
                 del(entry_attrs['usercertificate'])
 
             set_kerberos_attrs(entry_attrs, options)
@@ -1193,7 +1187,7 @@ class host_disable(LDAPQuery):
         try:
             entry_attrs = ldap.get_entry(dn, ['usercertificate'])
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
         if self.api.Command.ca_is_enabled()['result']:
             certs = self.api.Command.cert_find(host=keys)['result']
 

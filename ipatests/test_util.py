@@ -35,6 +35,17 @@ if six.PY3:
 pytestmark = pytest.mark.tier0
 
 
+# pytest >= 2.10 supports yield based fixtures with pytest.fixture. In
+# pytest < 2.10 pytest.yield_fixture is required. But that function
+# also raises a deprecation warning in pytest >= 3.0.
+PYTEST_VERSION = tuple(int(p) for p in pytest.__version__.split('.'))
+
+if PYTEST_VERSION < (2, 10):
+    yield_fixture = pytest.yield_fixture
+else:
+    yield_fixture = pytest.fixture
+
+
 class Prop(object):
     def __init__(self, *ops):
         self.__ops = frozenset(ops)
@@ -140,8 +151,10 @@ class test_Fuzzy(object):
 
 def test_assert_deepequal():
     f = util.assert_deepequal
-    # pylint: disable=no-member
-    pretty = pytest.config.getoption("pretty_print")
+    try:  # pylint: disable=no-member
+        pretty = pytest.config.getoption("pretty_print")
+    except (AttributeError, ValueError):
+        pretty = False
 
     # LEN and KEYS formats use special function to pretty print structures
     # depending on a pytest environment settings

@@ -28,10 +28,11 @@ import gssapi
 import pytest
 
 from ipalib import api
-from ipalib import errors
+from ipaplatform.paths import paths
 from ipapython import ipautil, ipaldap
 from ipaserver.plugins.ldap2 import ldap2
 from ipatests.test_cmdline.cmdline import cmdline_test
+from ipatests.test_xmlrpc.tracker import host_plugin, service_plugin
 
 def use_keytab(principal, keytab):
     try:
@@ -53,104 +54,272 @@ def use_keytab(principal, keytab):
             shutil.rmtree(tmpdir)
 
 
+@pytest.fixture(scope='class')
+def test_host(request):
+    host_tracker = host_plugin.HostTracker(u'test-host')
+    return host_tracker.make_fixture(request)
+
+
+@pytest.fixture(scope='class')
+def test_service(request, test_host):
+    service_tracker = service_plugin.ServiceTracker(u'srv', test_host.name)
+    test_host.ensure_exists()
+    return service_tracker.make_fixture(request)
+
+
+@pytest.mark.needs_ipaapi
+class KeytabRetrievalTest(cmdline_test):
+    """
+    Base class for keytab retrieval tests
+    """
+    command = "ipa-getkeytab"
+    keytabname = None
+
+    @classmethod
+    def setup_class(cls):
+        super(KeytabRetrievalTest, cls).setup_class()
+
+        keytabfd, keytabname = tempfile.mkstemp()
+
+        os.close(keytabfd)
+        os.unlink(keytabname)
+
+        cls.keytabname = keytabname
+
+    @classmethod
+    def teardown_class(cls):
+        super(KeytabRetrievalTest, cls).teardown_class()
+
+        try:
+            os.unlink(cls.keytabname)
+        except OSError:
+            pass
+
+    def run_ipagetkeytab(self, service_principal, args=tuple(),
+                         raiseonerr=False):
+        new_args = [self.command,
+                    "-p", service_principal,
+                    "-k", self.keytabname]
+
+        if not args:
+            new_args.extend(['-s', api.env.host])
+        else:
+            new_args.extend(list(args))
+
+        return ipautil.run(
+            new_args,
+            stdin=None,
+            raiseonerr=raiseonerr,
+            capture_error=True)
+
+    def assert_success(self, *args, **kwargs):
+        result = self.run_ipagetkeytab(*args, **kwargs)
+        expected = 'Keytab successfully retrieved and stored in: %s\n' % (
+            self.keytabname)
+        assert expected in result.error_output, (
+            'Success message not in output:\n%s' % result.error_output)
+
+    def assert_failure(self, retcode, message, *args, **kwargs):
+        result = self.run_ipagetkeytab(*args, **kwargs)
+        err = result.error_output
+
+        assert message in err
+        rc = result.returncode
+        assert rc == retcode
+
+
 @pytest.mark.tier0
-class test_ipagetkeytab(cmdline_test):
+class test_ipagetkeytab(KeytabRetrievalTest):
     """
     Test `ipa-getkeytab`.
     """
     command = "ipa-getkeytab"
-    host_fqdn = u'ipatest.%s' % api.env.domain
-    service_princ = u'test/%s@%s' % (host_fqdn, api.env.realm)
-    [keytabfd, keytabname] = tempfile.mkstemp()
-    os.close(keytabfd)
+    keytabname = None
 
-    def test_0_setup(self):
-        """
-        Create a host to test against.
-        """
-        # Create the service
-        try:
-            api.Command['host_add'](self.host_fqdn, force=True)
-        except errors.DuplicateEntry:
-            # it already exists, no problem
-            pass
-
-    def test_1_run(self):
+    def test_1_run(self, test_service):
         """
         Create a keytab with `ipa-getkeytab` for a non-existent service.
         """
-        new_args = [self.command,
-                    "-s", api.env.host,
-                    "-p", "test/notfound.example.com",
-                    "-k", self.keytabname,
-                   ]
-        result = ipautil.run(new_args, stdin=None, raiseonerr=False,
-                             capture_error=True)
+        test_service.ensure_missing()
+        result = self.run_ipagetkeytab(test_service.name)
         err = result.error_output
+
         assert 'Failed to parse result: PrincipalName not found.\n' in err, err
         rc = result.returncode
         assert rc > 0, rc
 
-    def test_2_run(self):
+    def test_2_run(self, test_service):
         """
         Create a keytab with `ipa-getkeytab` for an existing service.
         """
-        # Create the service
-        try:
-            api.Command['service_add'](self.service_princ, force=True)
-        except errors.DuplicateEntry:
-            # it already exists, no problem
-            pass
+        test_service.ensure_exists()
 
-        os.unlink(self.keytabname)
-        new_args = [self.command,
-                    "-s", api.env.host,
-                    "-p", self.service_princ,
-                    "-k", self.keytabname,
-                   ]
-        try:
-            result = ipautil.run(new_args, None, capture_error=True)
-            expected = 'Keytab successfully retrieved and stored in: %s\n' % (
-                self.keytabname)
-            assert expected in result.error_output, (
-                'Success message not in output:\n%s' % result.error_output)
-        except ipautil.CalledProcessError:
-            assert (False)
+        self.assert_success(test_service.name, raiseonerr=True)
 
-    def test_3_use(self):
+    def test_3_use(self, test_service):
         """
         Try to use the service keytab.
         """
-        use_keytab(self.service_princ, self.keytabname)
+        use_keytab(test_service.name, self.keytabname)
 
-    def test_4_disable(self):
+    def test_4_disable(self, test_service):
         """
         Disable a kerberos principal
         """
+        retrieve_cmd = test_service.make_retrieve_command()
+        result = retrieve_cmd()
         # Verify that it has a principal key
-        entry = api.Command['service_show'](self.service_princ)['result']
-        assert(entry['has_keytab'] == True)
+        assert result[u'result'][u'has_keytab']
 
         # Disable it
-        api.Command['service_disable'](self.service_princ)
+        disable_cmd = test_service.make_disable_command()
+        disable_cmd()
 
         # Verify that it looks disabled
-        entry = api.Command['service_show'](self.service_princ)['result']
-        assert(entry['has_keytab'] == False)
+        result = retrieve_cmd()
+        assert not result[u'result'][u'has_keytab']
 
-    def test_5_use_disabled(self):
+    def test_5_use_disabled(self, test_service):
         """
         Try to use the disabled keytab
         """
         try:
-            use_keytab(self.service_princ, self.keytabname)
+            use_keytab(test_service.name, self.keytabname)
         except Exception as errmsg:
             assert('Unable to bind to LDAP. Error initializing principal' in str(errmsg))
 
-    def test_9_cleanup(self):
-        """
-        Clean up test data
-        """
-        # First create the host that will use this policy
-        os.unlink(self.keytabname)
-        api.Command['host_del'](self.host_fqdn)
+
+class TestBindMethods(KeytabRetrievalTest):
+    """
+    Class that tests '-c'/'-H'/'-Y' flags
+    """
+
+    dm_password = None
+    ca_cert = None
+
+    @classmethod
+    def setup_class(cls):
+        super(TestBindMethods, cls).setup_class()
+
+        dmpw_file = os.path.join(api.env.dot_ipa, '.dmpw')
+
+        if not os.path.isfile(dmpw_file):
+            pytest.skip('{} file required for this test'.format(dmpw_file))
+
+        with open(dmpw_file, 'r') as f:
+            cls.dm_password = f.read().strip()
+
+        tempfd, temp_ca_cert = tempfile.mkstemp()
+
+        os.close(tempfd)
+
+        shutil.copy(os.path.join(paths.IPA_CA_CRT), temp_ca_cert)
+
+        cls.ca_cert = temp_ca_cert
+
+    @classmethod
+    def teardown_class(cls):
+        super(TestBindMethods, cls).teardown_class()
+
+        try:
+            os.unlink(cls.ca_cert)
+        except OSError:
+            pass
+
+    def check_ldapi(self):
+        if not api.env.ldap_uri.startswith('ldapi://'):
+            pytest.skip("LDAP URI not pointing to LDAPI socket")
+
+    def test_retrieval_with_dm_creds(self, test_service):
+        test_service.ensure_exists()
+
+        self.assert_success(
+            test_service.name,
+            args=[
+                '-D', "cn=Directory Manager",
+                '-w', self.dm_password,
+                '-s', api.env.host])
+
+    def test_retrieval_using_plain_ldap(self, test_service):
+        test_service.ensure_exists()
+        ldap_uri = 'ldap://{}'.format(api.env.host)
+
+        self.assert_success(
+            test_service.name,
+            args=[
+                '-D', "cn=Directory Manager",
+                '-w', self.dm_password,
+                '-H', ldap_uri])
+
+    @pytest.mark.skipif(os.geteuid() != 0,
+                        reason="Must have root privileges to run this test")
+    def test_retrieval_using_ldapi_external(self, test_service):
+        test_service.ensure_exists()
+        self.check_ldapi()
+
+        self.assert_success(
+            test_service.name,
+            args=[
+                '-Y',
+                'EXTERNAL',
+                '-H', api.env.ldap_uri])
+
+    def test_retrieval_using_ldap_gssapi(self, test_service):
+        test_service.ensure_exists()
+        self.check_ldapi()
+
+        self.assert_success(
+            test_service.name,
+            args=[
+                '-Y',
+                'GSSAPI',
+                '-H', api.env.ldap_uri])
+
+    def test_retrieval_using_ldaps_ca_cert(self, test_service):
+        test_service.ensure_exists()
+
+        self.assert_success(
+            test_service.name,
+            args=[
+                '-D', "cn=Directory Manager",
+                '-w', self.dm_password,
+                '-H', 'ldaps://{}'.format(api.env.host),
+                '--cacert', self.ca_cert])
+
+    def test_ldap_uri_server_raises_error(self, test_service):
+        test_service.ensure_exists()
+
+        self.assert_failure(
+            2,
+            "Cannot specify server and LDAP uri simultaneously",
+            test_service.name,
+            args=[
+                '-H', 'ldaps://{}'.format(api.env.host),
+                '-s', api.env.host],
+            raiseonerr=False)
+
+    def test_invalid_mech_raises_error(self, test_service):
+        test_service.ensure_exists()
+
+        self.assert_failure(
+            2,
+            "Invalid SASL bind mechanism",
+            test_service.name,
+            args=[
+                '-H', 'ldaps://{}'.format(api.env.host),
+                '-Y', 'BOGUS'],
+            raiseonerr=False)
+
+    def test_mech_bind_dn_raises_error(self, test_service):
+        test_service.ensure_exists()
+
+        self.assert_failure(
+            2,
+            "Cannot specify both SASL mechanism and bind DN simultaneously",
+            test_service.name,
+            args=[
+                '-D', "cn=Directory Manager",
+                '-w', self.dm_password,
+                '-H', 'ldaps://{}'.format(api.env.host),
+                '-Y', 'EXTERNAL'],
+            raiseonerr=False)

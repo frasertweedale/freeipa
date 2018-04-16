@@ -37,12 +37,33 @@ var exp = {};
 
 exp.search_facet_control_buttons_pre_op = function(spec, context) {
 
-    spec.actions = spec.actions || [];
-    spec.actions.unshift(
-        'refresh',
-        'batch_remove',
-        'add');
+    var override_actions = function(cust_acts, def_acts) {
+        if (!cust_acts) return def_acts;
 
+        var new_default_actions = [];
+        for (var i=0, l=def_acts.length; i<l; i++) {
+            var d_action = def_acts[i];
+
+            var chosen_action = d_action;
+
+            for (var k=0, j=cust_acts.length; k<j; k++) {
+                var custom_act = cust_acts[k];
+                if (custom_act === d_action || (custom_act.$type && custom_act.$type === d_action)) {
+                    chosen_action = custom_act;
+                    break;
+                }
+            }
+
+            new_default_actions.push(chosen_action);
+        }
+
+        return new_default_actions;
+    };
+
+    var default_actions = ['refresh', 'batch_remove', 'add'];
+    var merged_actions = override_actions(spec.custom_actions, default_actions);
+
+    spec.actions = merged_actions.concat(spec.actions || []);
     spec.control_buttons = spec.control_buttons || [];
 
     if (!spec.no_update) {
@@ -192,7 +213,7 @@ IPA.search_facet = function(spec, no_init) {
         var title;
         if (!values.length) {
             title = text.get('@i18n:dialogs.remove_empty');
-            alert(title);
+            window.alert(title);
             return null;
         }
 
@@ -221,7 +242,11 @@ IPA.search_facet = function(spec, no_init) {
     that.show_remove_dialog = function() {
 
         var dialog = that.create_remove_dialog();
-        dialog.open();
+        if (dialog) {
+            dialog.open();
+        } else {
+            window.console.log("Remove dialog was not created properly.");
+        }
     };
 
     that.find = function() {
@@ -346,6 +371,15 @@ IPA.search_deleter_dialog = function(spec) {
     var that = IPA.deleter_dialog(spec);
     that.pkey_prefix = spec.pkey_prefix || [];
 
+    /**
+     * List of attributes from table from search facet, which
+     * are added to remove command as options. In case that there is not column
+     * with this name, then the option is skipped
+     *
+     * @property {String}
+     */
+    that.additional_table_attrs = spec.additional_table_attrs || [];
+
     that.create_command = function() {
         var batch = rpc.batch_command({
             error_message: '@i18n:search.partial_delete',
@@ -365,7 +399,8 @@ IPA.search_deleter_dialog = function(spec) {
                 for (var key in value) {
                     if (value.hasOwnProperty(key)) {
                         if (key === 'pkey'){
-                            command.add_arg(value[key]);
+                            value = value[key];
+                            command.add_arg(value);
                         } else {
                             command.set_option(key, value[key]);
                         }
@@ -373,6 +408,11 @@ IPA.search_deleter_dialog = function(spec) {
                 }
             } else {
                 command.add_arg(value);
+            }
+
+            var add_attrs = that.additional_table_attrs;
+            if (add_attrs && add_attrs.length && add_attrs.length > 0) {
+                command = that.extend_command(command, add_attrs, value);
             }
 
             batch.add_command(command);
@@ -399,6 +439,25 @@ IPA.search_deleter_dialog = function(spec) {
         };
 
         batch.execute();
+    };
+
+    that.extend_command = function(command, add_attrs, pkey) {
+        var records = that.facet.fetch_records();
+        var pkey_name = that.entity.metadata.primary_key;
+
+        for (var i=0,l=records.length; i<l; i++) {
+            var record = records[i];
+            var curr_pkey = record[pkey_name][0];
+            if (curr_pkey && curr_pkey === pkey) {
+                for (var j=0,k=add_attrs.length; j<k; j++) {
+                    var attr = add_attrs[j];
+                    var val = record[attr];
+                    if (val) command.set_option(attr, val);
+                }
+            }
+        }
+
+        return command;
     };
 
     that.search_deleter_dialog_create_command = that.create_command;

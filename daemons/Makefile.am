@@ -12,34 +12,21 @@ if HAVE_GCC
 endif
 export AM_CFLAGS
 
+nodist_noinst_HEADERS = ipa-version.h
+noinst_HEADERS = ipa-version.h.in
+
 SUBDIRS =			\
+	.			\
+	dnssec			\
 	ipa-kdb			\
 	ipa-slapi-plugins	\
 	ipa-sam			\
 	ipa-otpd		\
 	$(NULL)
 
-DISTCLEANFILES =		\
-	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	intltool-*.in		\
-	compile			\
-	configure		\
-	COPYING			\
-	INSTALL			\
-	install-sh		\
-	missing			\
-	mkinstalldirs		\
-	config.guess		\
-	ltmain.sh		\
-	config.sub		\
-	depcomp			\
-	Makefile.in		\
-	config.h.*		\
-	aclocal.m4		\
-	version.m4		\
-	ipa-client.spec		\
-	py-compile		\
-	$(NULL)
+ipa-version.h: ipa-version.h.in $(top_builddir)/$(CONFIG_STATUS)
+	$(AM_V_GEN)sed						\
+		-e 's|@DATA_VERSION[@]|$(DATA_VERSION)|g'	\
+		-e 's|@NUM_VERSION[@]|$(NUM_VERSION)|g'		\
+		-e 's|@VERSION[@]|$(VERSION)|g'			\
+		$< > $@

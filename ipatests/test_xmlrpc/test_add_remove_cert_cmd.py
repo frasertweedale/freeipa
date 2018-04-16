@@ -11,6 +11,30 @@ from ipapython.dn import DN
 from ipatests.util import assert_deepequal, raises
 from ipatests.test_xmlrpc.xmlrpc_test import XMLRPC_test
 from ipatests.test_xmlrpc.testcert import get_testcert
+from ipatests.test_xmlrpc.tracker.user_plugin import UserTracker
+from ipatests.test_xmlrpc.tracker.idview_plugin import IdviewTracker
+
+
+@pytest.fixture(scope='class')
+def idview(request):
+    tracker = IdviewTracker(cn=u'MyView')
+    return tracker.make_fixture(request)
+
+
+@pytest.fixture(scope='class')
+def testuser(request):
+    tracker = UserTracker(name=u'testuser', givenname=u'John', sn=u'Donne')
+    return tracker.make_fixture(request)
+
+
+@pytest.fixture(scope='class')
+def cert1(request):
+    return get_testcert(DN(('CN', u'testuser')), u'testuser')
+
+
+@pytest.fixture(scope='class')
+def cert2(request):
+    return get_testcert(DN(('CN', u'testuser')), u'testuser')
 
 
 @pytest.mark.tier1
@@ -89,15 +113,91 @@ class CertManipCmdTestBase(XMLRPC_test):
 
         # list of certificates to add to entry
         cls.certs = [
-            get_testcert(DN(('CN', cls.entity_subject)), cls.entity_principal)
-            for _i in range(3)
+            u"MIICszCCAZugAwIBAgICM24wDQYJKoZIhvcNAQELBQAwIzEUMBIGA1UEChML\r\n"
+            "RVhBTVBMRS5PUkcxCzAJBgNVBAMTAkNBMB4XDTE3MDExOTEwMjUyOVoXDTE3M\r\n"
+            "DQxOTEwMjUyOVowFjEUMBIGA1UEAxMLc3RhZ2V1c2VyLTEwggEiMA0GCSqGSI\r\n"
+            "b3DQEBAQUAA4IBDwAwggEKAoIBAQCq03FRQQBvq4HwYMKP8USLZuOkKzuIs2V\r\n"
+            "Pt8k/+nO1dADrzMogKDiUDjCwYoG2UM/sj6P+PJUUCNDLh5eRRI+aR5VE5y2a\r\n"
+            "K95iCsj1ByDWrugAUXgr8GUUr+UbaGc0XxHCMnQBkYhzbXY3u91KYRRh5l3lx\r\n"
+            "RSICcVeJFJ/tiMS14Vsor1DWykHGz1wm0Zjwg1XDV3oea+uwrSz5Pa6RNPlgC\r\n"
+            "+GGW6B7+8qC2XdSSEwvY7y1SAGgqyOxN/FLwvqqMDNU0uX7fww587uZ57IfYz\r\n"
+            "b8Xn5DAprRFNk40FDc46rMlkPBT+Tij1I0jedD8h2e6WEa7JRU6SGToYDbRm4\r\n"
+            "RL9xAgMBAAEwDQYJKoZIhvcNAQELBQADggEBAHqm1jXzYer9oSjYs9qh1jWpM\r\n"
+            "vTcN+0/z1uuX++Wezh3lG7IzYtypbZNxlXDECyrkUh+9oxzMJqdlZ562ko2br\r\n"
+            "uK6X5csbbM9uVsUva8NCsPPfZXDhrYaMKFvQGFY4pO3uhFGhccob037VN5Ifm\r\n"
+            "aKGM8aJ40cw2PQh38QPDdemizyVCThQ9Pcr+WgWKiG+t2Gd9NldJRLEhky0bW\r\n"
+            "2fc4zWZVbGq5nFXy1k+d/bgkHbVzf255eFZOKKy0NgZwig+uSlhVWPJjS4Z1w\r\n"
+            "LbpBKxTZp/xD0yEARs0u1ZcCELO/BkgQM50EDKmahIM4mdCs/7j1B/DdWs2i3\r\n"
+            "5lnbjxYYiUiyA=",
+            u"MIICszCCAZugAwIBAgICJGMwDQYJKoZIhvcNAQELBQAwIzEUMBIGA1UEChML\r\n"
+            "RVhBTVBMRS5PUkcxCzAJBgNVBAMTAkNBMB4XDTE3MDExOTEwMjcyN1oXDTE3M\r\n"
+            "DQxOTEwMjcyN1owFjEUMBIGA1UEAxMLc3RhZ2V1c2VyLTIwggEiMA0GCSqGSI\r\n"
+            "b3DQEBAQUAA4IBDwAwggEKAoIBAQDsEuTITzsRiUHXb8LxduokAEHwStCveKV\r\n"
+            "i8aVFBYQCRbpoXcoTfBISWvdmF3WOkIUfR1O0qrm0s3CPMAyWdTrnCI/45/Cc\r\n"
+            "FNDpGKPf+izN1t+WSrr6gCoz24y5ALyUEG5FSvHdDcIn+hY9Qvg3cRLxY9M4W\r\n"
+            "XmtR6p+d48v08nSSJXprgXS6ZiVvN7QGQfNRNDNoQZLmP9tQ/XvgJuiBMPj2N\r\n"
+            "aUFM8AwDnxGcvzExgaFlX0OKS6hymsUG60PeF0H0aYDgVH/0DKK+mZEA2FNbR\r\n"
+            "JIQt5Vk+c5aBvPrOfRLKrsQQ/zhtNOxk8Q0G+cwlzANCqbV7EzUFEFEtonnOP\r\n"
+            "tzY7AgMBAAEwDQYJKoZIhvcNAQELBQADggEBAIPcStKnxv6bdPiL2I7f4B/ME\r\n"
+            "BEV+kFnzu1msfkh1iouiKmM4ZkXLiqInKxEBwWNmhpRFoxKWaI3DjYtf/PYH/\r\n"
+            "guHipZvLIrVgfxlf/5ldXeoa7IHZ9hzvrG3WuYG6SHoJw6yaA6Vn8j8Q3r/kG\r\n"
+            "/1SLZpRpoq0EuhD7V/aHvxr/aiFnU4Fh2VaQd2ICOK2qBFQnoL5QyySVEJ7GA\r\n"
+            "RmajT3BqAASoixEqfMWYv2AqZnJ84JoI4reP0uZGjz5Cy32xQuenQckr8Faki\r\n"
+            "p28buFp46C34AWifbRERE396xocc9/Oc7dx9DyjeYqa9CuNo/pYlC4r8QCOkm\r\n"
+            "0xMWjoGcVUtUw=",
+            u"MIICszCCAZugAwIBAgICFpYwDQYJKoZIhvcNAQELBQAwIzEUMBIGA1UEChML\r\n"
+            "RVhBTVBMRS5PUkcxCzAJBgNVBAMTAkNBMB4XDTE3MDExOTEwMjczMVoXDTE3M\r\n"
+            "DQxOTEwMjczMVowFjEUMBIGA1UEAxMLc3RhZ2V1c2VyLTMwggEiMA0GCSqGSI\r\n"
+            "b3DQEBAQUAA4IBDwAwggEKAoIBAQDEIMvN8aElxMSyfqIj91nDuuvli/RKNhF\r\n"
+            "sIU32c7NJVF7kthvltmEwIVKKCE1Yji3GRWXBuZlSz5eSyDaqqpOpdYsVjYaz\r\n"
+            "XfWA5kjL8vGkoVt97SQ0TEkSOlinnjuo2unjU33RcruRp4rqeQE8EPBlAXYJr\r\n"
+            "+iK5Y+RF9Mz047ba097wUUX85QeEp1LWwYbLZleNFK1BwsmSL5Js+GcKEBEdi\r\n"
+            "KS/OfidTz7Hf7KICLo+iZlbG3lNLFQMvWFG8bzTeOgZ5OLDeBRzG6cSZK0Q3A\r\n"
+            "18uVg0jf0rv/nsOO/JQRK1FufvmOL2Xp7lqLFaAIuQqH1OuAq6MHfuaxwpdiU\r\n"
+            "yzVfAgMBAAEwDQYJKoZIhvcNAQELBQADggEBAAs0K12ugVJ4t7/iUdddTmS+v\r\n"
+            "8FEEL92fWgU1bQHR/gMa2by9SIqS1KZVBc5JpJePqVf/S35Gt4o7sE3rbbmZm\r\n"
+            "mhGDL8D+BmGHjxdhENLyk6rvHOm+TDgM7nQK0FbPekMzkbsFxfw9R7iq8cnZD\r\n"
+            "7Y1T5e2N+WMzx6Jf/ner32V9CTfFbGP84G0+kqyqo7vp59VIwyHpC0L/0bh8W\r\n"
+            "YjFKNCPMbnZpO3212dNCaIMp0Kugi9D4kXAeM3unQ2/p5pN7Vgo+Xl9hioN5g\r\n"
+            "As+3SQR2pArUmr8RtjvfH/PxE8scWtRCCH4aBhfklrCHK+rpUzh4PXqhXGYJC\r\n"
+            "TmYzsAw/Z7vnY=",
         ]
 
         # list of certificates for testing of removal of non-existent certs
         cls.nonexistent_certs = [
-            get_testcert(DN(('CN', cls.entity_subject)), cls.entity_principal)
-            for _j in range(2)
-            ]
+            u"MIICszCCAZugAwIBAgICYDAwDQYJKoZIhvcNAQELBQAwIzEUMBIGA1UEChML\r\n"
+            "RVhBTVBMRS5PUkcxCzAJBgNVBAMTAkNBMB4XDTE3MDExOTEwMjczNVoXDTE3M\r\n"
+            "DQxOTEwMjczNVowFjEUMBIGA1UEAxMLc3RhZ2V1c2VyLTQwggEiMA0GCSqGSI\r\n"
+            "b3DQEBAQUAA4IBDwAwggEKAoIBAQDAw12yHMBzQd27/Zv5STUlrkgGaClC4/U\r\n"
+            "+HxjHSHxFJLStYgK9DrXpRIqnkdwAr7rftlhFiRkqFE4GNGNAlhUlnkn0YTvD\r\n"
+            "59ucnpSRC7kjkrHAb1fWDNE3VYQOOF93CObOOAciNEl/K0HXqXxxYkhF6cz+m\r\n"
+            "N1gGd6oOtCu+G1vCoM25X3nlQdgOJtI8X2/MDvZ+nJVRqscsjeNnM0+A1Q1Cf\r\n"
+            "u2ukiqYgiQVYAa88hpADhXEF+hht3iIiw53GgD1Bb5xFm+OKpwBSegRJOjraj\r\n"
+            "XeWpr1ZN44JCTuFmAxwaNzynpYjrDbWXoLzbXEhyPbtT1jui6A1rRhEpc9Tyd\r\n"
+            "Wb4rAgMBAAEwDQYJKoZIhvcNAQELBQADggEBAMe/xoqCmmSV/8x+hawb216sv\r\n"
+            "5CX6+WKMlLJTsmB586fQoJWJecn3Wg7DB1vfLeffayh9b+7g0w0OZnaUJlPNH\r\n"
+            "T6x5P29jH9J6fGOu3CIafCpvEXyamJKyQD6tER3l4iRBzoqW74BQh3W6rQnVs\r\n"
+            "lvM07LlQA0PB9RXYNvEmTCJKOtzA7wcARukvss9VS9oBfxjFgcGDKfMPPNaH9\r\n"
+            "IGEZi8QwEnOsSpLUobWPhRENbxwTMwlMspk9QG7NvTfisqFRXkAov0R/rHPqr\r\n"
+            "AXJTZmkPP+MhrsrbnT0CV2f6bxPkvXknuf+7Xi3h900BLQOSY+jqmtmGrYjln\r\n"
+            "tsqX1gL4y2e98=",
+            u"MIICszCCAZugAwIBAgICeicwDQYJKoZIhvcNAQELBQAwIzEUMBIGA1UEChML\r\n"
+            "RVhBTVBMRS5PUkcxCzAJBgNVBAMTAkNBMB4XDTE3MDExOTEwMjczOVoXDTE3M\r\n"
+            "DQxOTEwMjczOVowFjEUMBIGA1UEAxMLc3RhZ2V1c2VyLTUwggEiMA0GCSqGSI\r\n"
+            "b3DQEBAQUAA4IBDwAwggEKAoIBAQCd1VDwUwkwieLqngX1q2HoOe/tKnPxnr/\r\n"
+            "DrjbXAwFxEDcp7lfIUXALy33YZTAUGaNhlKzL+5sL3O5RcebSywBvw9Cpg9O4\r\n"
+            "lLPeAwdgnCHpNMaBjFL9/ySnwrIH0Hpx7chUXt1zz+z4ia1i7ZfVWHlP3D+pu\r\n"
+            "dR8MdzKH+1irtLcVL8ESfIqVsLGf0qV3wi2znqFsul6+e1MLE/RVXFoCmEX7J\r\n"
+            "5mJ77aFm6GgpXR7O3UAGl1NAfbZUz1Itt/NSrx8lHAYur4tUPQPEEa8XSe/B8\r\n"
+            "hG5J1inw6jm94vvpi2a3GOU6eDz4q0nM0/Rbia212tdbpyKdkm4aCQkoyhrJR\r\n"
+            "+DhvAgMBAAEwDQYJKoZIhvcNAQELBQADggEBADd5V5BMVY4zBRQiLZ2x+7seD\r\n"
+            "oT7ewyYW6Kk9oMlk7JWXgNyAG5/561vSkKIBkQG2CTRD3dAX7SbUwkxP7/a9g\r\n"
+            "ozJN3VOrLBUDhxyesr3cMuIU9XVyPezT3KapQjXkxzmJKiRNPc/fope4Xx5uc\r\n"
+            "UwYa6lm9QVCD4gnNElf+RexpI3VwkjmAWS3cvsKRFFNbZCS5gpCM/rOX76m4l\r\n"
+            "YcBSA8B+jb0FkOJt3u9fwtoMbhv5kdjEDGNWmG1kJ86ybqeWj12BpKGh4G6m4\r\n"
+            "E8ROnyuBt8Bolk4jqR3uCPfD4T+HpkttqrznRaGvroD020pEjtU22sAKkhBZQ\r\n"
+            "2Wbfkc49wxqpY=",
+        ]
 
         # cert subset to remove from entry
         cls.certs_subset = cls.certs[:2]
@@ -303,6 +403,25 @@ class TestCertManipCmdUser(CertManipCmdTestBase):
 
 
 @pytest.mark.tier1
+class TestCertManipCmdStageuser(CertManipCmdTestBase):
+    entity_class = 'stageuser'
+    entity_pkey = u'suser'
+    entity_subject = entity_pkey
+    entity_principal = u'suser'
+    non_existent_entity = u'nonexistentstageuser'
+
+    cmd_options = dict(
+        entity_add=dict(givenname=u'Stage', sn=u'User'),
+    )
+
+    cert_add_cmd = api.Command.stageuser_add_cert
+    cert_del_cmd = api.Command.stageuser_remove_cert
+
+    cert_add_summary = u'Added certificates to stageuser "%s"'
+    cert_del_summary = u'Removed certificates from stageuser "%s"'
+
+
+@pytest.mark.tier1
 class TestCertManipCmdHost(CertManipCmdTestBase):
     entity_class = 'host'
     entity_pkey = u'host.example.com'
@@ -352,3 +471,61 @@ class TestCertManipCmdService(CertManipCmdTestBase):
             api.Command.host_del(TestCertManipCmdHost.entity_pkey)
         except errors.NotFound:
             pass
+
+
+@pytest.mark.tier1
+class TestCertManipIdOverride(XMLRPC_test):
+    entity_subject = u'testuser'
+    entity_principal = u'testuser'
+
+    def test_00_add_idoverrideuser(self, testuser, idview):
+        testuser.create()
+        idview.create()
+        idview.idoverrideuser_add(testuser)
+
+    def test_01_add_cert_to_idoverride(self, testuser, idview, cert1):
+        assert_deepequal(
+            dict(usercertificate=(base64.b64decode(cert1),),
+                 summary=u'Added certificates to'
+                         ' idoverrideuser \"%s\"' % testuser.name,
+                 value=testuser.name,
+                 ),
+            idview.add_cert_to_idoverrideuser(testuser.name, cert1)
+        )
+
+    def test_02_add_second_cert_to_idoverride(self, testuser,
+                                              idview, cert1, cert2):
+        assert_deepequal(
+            dict(
+                usercertificate=(base64.b64decode(cert1),
+                                 base64.b64decode(cert2)),
+                summary=u'Added certificates to'
+                        ' idoverrideuser \"%s\"' % testuser.name,
+                value=testuser.name,
+            ),
+            idview.add_cert_to_idoverrideuser(testuser.name, cert2)
+        )
+
+    def test_03_add_the_same_cert_to_idoverride(self, testuser,
+                                                idview, cert1, cert2):
+        pytest.raises(errors.ExecutionError,
+                      idview.add_cert_to_idoverrideuser,
+                      testuser.name, cert1)
+
+    def test_04_user_show_displays_cert(self, testuser, idview, cert1, cert2):
+        result = api.Command.idoverrideuser_show(idview.cn, testuser.name)
+        assert_deepequal((base64.b64decode(cert1),
+                          base64.b64decode(cert2)),
+                         result['result']['usercertificate']
+                         )
+
+    def test_05_remove_cert(self, testuser, idview, cert1, cert2):
+        assert_deepequal(
+            dict(
+                usercertificate=(base64.b64decode(cert2),),
+                value=testuser.name,
+                summary=u'Removed certificates from'
+                        ' idoverrideuser "%s"' % testuser.name
+            ),
+            idview.del_cert_from_idoverrideuser(testuser.name, cert1)
+        )

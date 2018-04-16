@@ -37,6 +37,7 @@ from ipatests.test_xmlrpc.xmlrpc_test import (
     XMLRPC_test, fuzzy_digits, fuzzy_uuid, fuzzy_password,
     Fuzzy, fuzzy_dergeneralizedtime, add_sid, add_oc, raises_exact)
 from ipapython.dn import DN
+from ipapython.ipaldap import ldap_initialize
 
 from ipatests.test_xmlrpc.tracker.base import Tracker
 from ipatests.test_xmlrpc.tracker.group_plugin import GroupTracker
@@ -55,7 +56,7 @@ sshpubkey = (u'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDGAX3xAeLeaJggwTqMjxNwa6X'
              'cSIn3JrXynlvui4MixvrtX6zx+O/bBo68o8/eZD26QrahVbA09fivrn/4h3TM01'
              '9Eu/c2jOdckfU3cHUV/3Tno5d6JicibyaoDDK7S/yjdn5jhaz8MSEayQvFkZkiF'
              '0L public key test')
-sshpubkeyfp = (u'13:67:6B:BF:4E:A2:05:8E:AE:25:8B:A1:31:DE:6F:1B '
+sshpubkeyfp = (u'SHA256:cStA9o5TRSARbeketEOooMUMSWRSsArIAXloBZ4vNsE '
                'public key test (ssh-rsa)')
 
 validlanguages = {
@@ -76,6 +77,13 @@ expired_expiration_string = "1991-12-07T19:54:13Z"
 
 # Date in ISO format (2013-12-10T12:00:00)
 isodate_re = re.compile('^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+
+
+@pytest.fixture(scope='class')
+def user_min(request):
+    """ User tracker fixture for testing user with uid no specified """
+    tracker = UserTracker(givenname=u'Testmin', sn=u'Usermin')
+    return tracker.make_fixture(request)
 
 
 @pytest.fixture(scope='class')
@@ -232,6 +240,44 @@ class TestFind(XMLRPC_test):
         )
         result = command()
         user.check_find(result, pkey_only=True)
+
+    def test_find_enabled_user(self, user):
+        """Test user-find --disabled=False with enabled user"""
+        user.ensure_exists()
+        command = user.make_find_command(
+            uid=user.uid, pkey_only=True, nsaccountlock=False)
+        result = command()
+        user.check_find(result, pkey_only=True)
+
+    def test_negative_find_enabled_user(self, user):
+        """Test user-find --disabled=True with enabled user, shouldn't
+        return any result"""
+        user.ensure_exists()
+        command = user.make_find_command(
+            uid=user.uid, pkey_only=True, nsaccountlock=True)
+        result = command()
+        user.check_find_nomatch(result)
+
+    def test_find_disabled_user(self, user):
+        """Test user-find --disabled=True with disabled user"""
+        user.ensure_exists()
+        user.disable()
+        command = user.make_find_command(
+            uid=user.uid, pkey_only=True, nsaccountlock=True)
+        result = command()
+        user.check_find(result, pkey_only=True)
+        user.enable()
+
+    def test_negative_find_disabled_user(self, user):
+        """Test user-find --disabled=False with disabled user, shouldn't
+        return any results"""
+        user.ensure_exists()
+        user.disable()
+        command = user.make_find_command(
+            uid=user.uid, pkey_only=True, nsaccountlock=False)
+        result = command()
+        user.check_find_nomatch(result)
+        user.enable()
 
 
 @pytest.mark.tier1
@@ -405,6 +451,12 @@ class TestUpdate(XMLRPC_test):
 
 @pytest.mark.tier1
 class TestCreate(XMLRPC_test):
+    def test_create_user_with_min_values(self, user_min):
+        """ Create user with uid not specified """
+        user_min.ensure_missing()
+        command = user_min.make_create_command()
+        command()
+
     def test_create_with_krb_ticket_policy(self):
         """ Try to create user with krbmaxticketlife set """
         testuser = UserTracker(
@@ -862,8 +914,9 @@ class TestDeniedBindWithExpiredPrincipal(XMLRPC_test):
     def setup_class(cls):
         super(TestDeniedBindWithExpiredPrincipal, cls).setup_class()
 
-        cls.connection = ldap.initialize('ldap://{host}'
-                                         .format(host=api.env.host))
+        cls.connection = ldap_initialize(
+            'ldap://{host}'.format(host=api.env.host)
+        )
 
     @classmethod
     def teardown_class(cls):

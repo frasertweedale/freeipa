@@ -1,4 +1,4 @@
-#! /usr/bin/python2 -E
+#!/usr/bin/python3 -E
 # Authors: Martin Nagy <mnagy@redhat.com>
 # Based on ipa-server-install by Karl MacMillan <kmacmillan@mentalrootkit.com>
 #
@@ -21,37 +21,36 @@
 
 from __future__ import print_function
 
+import logging
 import os
 import sys
 
-from optparse import SUPPRESS_HELP
-
-from ipaserver.install import bindinstance, httpinstance
+from ipaserver.install import bindinstance
 from ipaserver.install import installutils
-from ipaserver.install import service
 from ipapython import version
 from ipalib import api
 from ipaplatform.paths import paths
 from ipapython import ipautil
-from ipapython import sysrestore
 from ipapython.config import IPAOptionParser
-from ipapython.ipa_log_manager import standard_logging_setup, root_logger
+from ipapython.ipa_log_manager import standard_logging_setup
 
 from ipaserver.install import dns as dns_installer
+
+logger = logging.getLogger(os.path.basename(__file__))
 
 log_file_name = paths.IPASERVER_INSTALL_LOG
 
 def parse_options():
     parser = IPAOptionParser(version=version.VERSION)
-    parser.add_option("-p", "--ds-password", dest="dm_password",
-                      sensitive=True, help=SUPPRESS_HELP)
     parser.add_option("-d", "--debug", dest="debug", action="store_true",
                       default=False, help="print debugging information")
     parser.add_option("--ip-address", dest="ip_addresses", metavar="IP_ADDRESS",
                       default=[], action="append",
-                      type="ip", ip_local=True, help="Master Server IP Address. This option can be used multiple times")
+                      type="ip",
+                      help="Master Server IP Address. This option can be used "
+                           "multiple times")
     parser.add_option("--forwarder", dest="forwarders", action="append",
-                      type="ip", help="Add a DNS forwarder. This option can be used multiple times")
+                      type="ip_with_loopback", help="Add a DNS forwarder. This option can be used multiple times")
     parser.add_option("--no-forwarders", dest="no_forwarders", action="store_true",
                       default=False, help="Do not add any DNS forwarders, use root servers instead")
     parser.add_option("--auto-forwarders", dest="auto_forwarders",
@@ -110,12 +109,9 @@ def parse_options():
             parser.error("You must specify at least one option: "
                 "--forwarder or --no-forwarders or --auto-forwarders")
 
-    if options.kasp_db_file and not ipautil.file_exists(options.kasp_db_file):
+    if options.kasp_db_file and not os.path.isfile(options.kasp_db_file):
         parser.error("File %s does not exist" % options.kasp_db_file)
 
-    if options.dm_password:
-        print ("WARNING: Option -p/--ds-password is deprecated "
-               "and should not be used anymore.")
     return safe_options, options
 
 def main():
@@ -127,37 +123,30 @@ def main():
     standard_logging_setup(log_file_name, debug=options.debug, filemode='a')
     print("\nThe log file for this installation can be found in %s" % log_file_name)
 
-    root_logger.debug('%s was invoked with options: %s' % (sys.argv[0], safe_options))
-    root_logger.debug("missing options might be asked for interactively later\n")
-    root_logger.debug('IPA version %s' % version.VENDOR_VERSION)
+    logger.debug('%s was invoked with options: %s', sys.argv[0], safe_options)
+    logger.debug("missing options might be asked for interactively later\n")
+    logger.debug('IPA version %s', version.VENDOR_VERSION)
 
     installutils.check_server_configuration()
 
     # Initialize the ipalib api
-    cfg = dict(
-        in_server=True,
-        debug=options.debug,
+    api.bootstrap(
+        context='install', confdir=paths.ETC_IPA,
+        in_server=True, debug=options.debug,
     )
-    api.bootstrap(**cfg)
     api.finalize()
-
-    api.Backend.ldap2.connect(autobind=True)
+    api.Backend.ldap2.connect()
 
     options.setup_ca = None  # must be None to enable autodetection
 
     dns_installer.install_check(True, api, False, options, hostname=api.env.host)
     dns_installer.install(True, False, options)
 
-    # Restart http instance to make sure that python-dns has the right resolver
-    # https://bugzilla.redhat.com/show_bug.cgi?id=800368
-    fstore = sysrestore.FileStore(paths.SYSRESTORE)
-    http = httpinstance.HTTPInstance(fstore)
-    service.print_msg("Restarting the web server")
-    http.restart()
-
     # execute ipactl to refresh services status
-    ipautil.run(['ipactl', 'start', '--ignore-service-failures'],
+    ipautil.run([paths.IPACTL, 'start', '--ignore-service-failures'],
                 raiseonerr=False)
+
+    api.Backend.ldap2.disconnect()
 
     return 0
 

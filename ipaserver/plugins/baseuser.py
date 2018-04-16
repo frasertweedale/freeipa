@@ -17,25 +17,25 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import string
-
 import six
 
 from ipalib import api, errors
-from ipalib import Flag, Int, Password, Str, Bool, StrEnum, DateTime, Bytes
-from ipalib.parameters import Principal
+from ipalib import (
+    Flag, Int, Password, Str, Bool, StrEnum, DateTime, DNParam)
+from ipalib.parameters import Principal, Certificate
 from ipalib.plugable import Registry
 from .baseldap import (
     DN, LDAPObject, LDAPCreate, LDAPUpdate, LDAPSearch, LDAPDelete,
-    LDAPRetrieve, LDAPAddAttribute, LDAPRemoveAttribute, LDAPAddMember,
-    LDAPRemoveMember)
-from ipaserver.plugins.service import (
-   validate_certificate, validate_realm, normalize_principal)
+    LDAPRetrieve, LDAPAddAttribute, LDAPModAttribute, LDAPRemoveAttribute,
+    LDAPAddMember, LDAPRemoveMember,
+    LDAPAddAttributeViaOption, LDAPRemoveAttributeViaOption,
+    add_missing_object_class)
+from ipaserver.plugins.service import (validate_realm, normalize_principal)
 from ipalib.request import context
 from ipalib import _
 from ipalib.constants import PATTERN_GROUPUSER_NAME
 from ipapython import kerberos
-from ipapython.ipautil import ipa_generate_password, GEN_TMP_PWD_LEN
+from ipapython.ipautil import ipa_generate_password, TMP_PWD_ENTROPY_BITS
 from ipapython.ipavalidate import Email
 from ipalib.util import (
     normalize_sshpubkey,
@@ -75,8 +75,6 @@ UPG_DEFINITION_DN = DN(('cn', 'UPG Definition'),
                        ('cn', 'etc'),
                        api.env.basedn)
 
-# characters to be used for generating random user passwords
-baseuser_pwdchars = string.digits + string.ascii_letters + '_,.@+-='
 
 def validate_nsaccountlock(entry_attrs):
     if 'nsaccountlock' in entry_attrs:
@@ -138,7 +136,7 @@ class baseuser(LDAPObject):
     object_class_config = 'ipauserobjectclasses'
     possible_objectclasses = [
         'meporiginentry', 'ipauserauthtypeclass', 'ipauser',
-        'ipatokenradiusproxyuser'
+        'ipatokenradiusproxyuser', 'ipacertmapobject'
     ]
     disallow_object_classes = ['krbticketpolicyaux']
     permission_filter_objectclasses = ['posixaccount']
@@ -150,7 +148,8 @@ class baseuser(LDAPObject):
         'memberofindirect', 'ipauserauthtype', 'userclass',
         'ipatokenradiusconfiglink', 'ipatokenradiususername',
         'krbprincipalexpiration', 'usercertificate;binary',
-        'krbprincipalname', 'krbcanonicalname'
+        'krbprincipalname', 'krbcanonicalname',
+        'ipacertmapdata'
     ]
     search_display_attributes = [
         'uid', 'givenname', 'sn', 'homedirectory', 'krbcanonicalname',
@@ -164,7 +163,7 @@ class baseuser(LDAPObject):
         'memberof': ['group', 'netgroup', 'role', 'hbacrule', 'sudorule'],
         'memberofindirect': ['group', 'netgroup', 'role', 'hbacrule', 'sudorule'],
     }
-    rdn_is_primary_key = True
+    allow_rename = True
     bindable = True
     password_attributes = [('userpassword', 'has_password'),
                            ('krbprincipalkey', 'has_keytab')]
@@ -238,6 +237,10 @@ class baseuser(LDAPObject):
         DateTime('krbprincipalexpiration?',
             cli_name='principal_expiration',
             label=_('Kerberos principal expiration'),
+        ),
+        DateTime('krbpasswordexpiration?',
+            cli_name='password_expiration',
+            label=_('User password expiration'),
         ),
         Str('mail*',
             cli_name='email',
@@ -359,10 +362,17 @@ class baseuser(LDAPObject):
              + '(\s*,\s*[a-zA-Z]{1,8}(-[a-zA-Z]{1,8})?(;q\=((0(\.[0-9]{0,3})?)|(1(\.0{0,3})?)))?)*)|(\*))$',
             pattern_errmsg='must match RFC 2068 - 14.4, e.g., "da, en-gb;q=0.8, en;q=0.7"',
         ),
-        Bytes('usercertificate*', validate_certificate,
+        Certificate('usercertificate*',
             cli_name='certificate',
             label=_('Certificate'),
             doc=_('Base-64 encoded user certificate'),
+        ),
+        Str(
+            'ipacertmapdata*',
+            cli_name='certmapdata',
+            label=_('Certificate mapping data'),
+            doc=_('Certificate mapping data'),
+            flags=['no_create', 'no_update', 'no_search'],
         ),
     )
 
@@ -517,7 +527,7 @@ class baseuser_mod(LDAPUpdate):
             if 'krbcanonicalname' not in old_entry:
                 return
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         self.context.krbprincipalname = old_entry.get(
             'krbprincipalname', [])
@@ -554,7 +564,7 @@ class baseuser_mod(LDAPUpdate):
     def check_userpassword(self, entry_attrs, **options):
         if 'userpassword' not in entry_attrs and options.get('random'):
             entry_attrs['userpassword'] = ipa_generate_password(
-                baseuser_pwdchars, pwd_len=GEN_TMP_PWD_LEN)
+                entropy_bits=TMP_PWD_ENTROPY_BITS)
             # save the password so it can be displayed in post_callback
             setattr(context, 'randompassword', entry_attrs['userpassword'])
 
@@ -698,3 +708,187 @@ class baseuser_remove_principal(LDAPRemoveAttribute):
     def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
         ensure_last_krbprincipalname(ldap, entry_attrs, *keys)
         return dn
+
+
+class baseuser_add_cert(LDAPAddAttributeViaOption):
+    attribute = 'usercertificate'
+
+    def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys,
+                     **options):
+        self.obj.convert_usercertificate_pre(entry_attrs)
+
+        return dn
+
+    def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
+        assert isinstance(dn, DN)
+
+        self.obj.convert_usercertificate_post(entry_attrs, **options)
+
+        return dn
+
+
+class baseuser_remove_cert(LDAPRemoveAttributeViaOption):
+    attribute = 'usercertificate'
+
+    def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys,
+                     **options):
+        self.obj.convert_usercertificate_pre(entry_attrs)
+
+        return dn
+
+    def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
+        assert isinstance(dn, DN)
+
+        self.obj.convert_usercertificate_post(entry_attrs, **options)
+
+        return dn
+
+
+class ModCertMapData(LDAPModAttribute):
+    attribute = 'ipacertmapdata'
+    takes_options = (
+        DNParam(
+            'issuer?',
+            cli_name='issuer',
+            label=_('Issuer'),
+            doc=_('Issuer of the certificate'),
+            flags=['virtual_attribute']
+        ),
+        DNParam(
+            'subject?',
+            cli_name='subject',
+            label=_('Subject'),
+            doc=_('Subject of the certificate'),
+            flags=['virtual_attribute']
+        ),
+        Certificate(
+            'certificate*',
+            cli_name='certificate',
+            label=_('Certificate'),
+            doc=_('Base-64 encoded user certificate'),
+            flags=['virtual_attribute']
+        ),
+    )
+
+    @staticmethod
+    def _build_mapdata(subject, issuer):
+        return u'X509:<I>{issuer}<S>{subject}'.format(
+            issuer=issuer.x500_text(), subject=subject.x500_text())
+
+    @classmethod
+    def _convert_options_to_certmap(cls, entry_attrs, issuer=None,
+                                    subject=None, certificates=()):
+        """
+        Converts options to ipacertmapdata
+
+        When --subject --issuer or --certificate options are used,
+        the value for ipacertmapdata is built from extracting subject and
+        issuer,
+        converting their values to X500 ordering and using the format
+        X509:<I>issuer<S>subject
+        For instance:
+        X509:<I>O=DOMAIN,CN=Certificate Authority<S>O=DOMAIN,CN=user
+        A list of values can be returned if --certificate is used multiple
+        times, or in conjunction with --subject --issuer.
+        """
+        data = []
+        data.extend(entry_attrs.get(cls.attribute, list()))
+
+        if issuer or subject:
+            data.append(cls._build_mapdata(subject, issuer))
+
+        for cert in certificates:
+            issuer = DN(cert.issuer)
+            subject = DN(cert.subject)
+            if not subject:
+                raise errors.ValidationError(
+                    name='certificate',
+                    error=_('cannot have an empty subject'))
+            data.append(cls._build_mapdata(subject, issuer))
+
+        entry_attrs[cls.attribute] = data
+
+    def get_args(self):
+        # ipacertmapdata is not mandatory as it can be built
+        # from the values subject+issuer or from reading certificate
+        for arg in super(ModCertMapData, self).get_args():
+            if arg.name == 'ipacertmapdata':
+                yield arg.clone(required=False, alwaysask=False)
+            else:
+                yield arg.clone()
+
+    def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys,
+                     **options):
+        # The 3 valid calls are
+        # ipa user-add-certmapdata LOGIN --subject xx --issuer yy
+        # ipa user-add-certmapdata LOGIN [DATA] --certificate xx
+        # ipa user-add-certmapdata LOGIN DATA
+        # Check that at least one of the 3 formats is used
+
+        try:
+            certmapdatas = keys[1] or []
+        except IndexError:
+            certmapdatas = []
+        issuer = options.get('issuer')
+        subject = options.get('subject')
+        certificates = options.get('certificate', [])
+
+        # If only LOGIN is supplied, then we need either subject or issuer or
+        # certificate
+        if (not certmapdatas and not issuer and not subject and
+                not certificates):
+            raise errors.RequirementError(name='ipacertmapdata')
+
+        # If subject or issuer is provided, other options are not allowed
+        if subject or issuer:
+            if certificates:
+                raise errors.MutuallyExclusiveError(
+                    reason=_('cannot specify both subject/issuer '
+                             'and certificate'))
+            if certmapdatas:
+                raise errors.MutuallyExclusiveError(
+                    reason=_('cannot specify both subject/issuer '
+                             'and ipacertmapdata'))
+            # If subject or issuer is provided, then the other one is required
+            if not subject:
+                raise errors.RequirementError(name='subject')
+            if not issuer:
+                raise errors.RequirementError(name='issuer')
+
+        # if the command is called with --subject --issuer or --certificate
+        # we need to add ipacertmapdata to the attrs_list in order to
+        # display the resulting value in the command output
+        if 'ipacertmapdata' not in attrs_list:
+            attrs_list.append('ipacertmapdata')
+
+        self._convert_options_to_certmap(
+            entry_attrs,
+            issuer=issuer,
+            subject=subject,
+            certificates=certificates)
+
+        return dn
+
+
+class baseuser_add_certmapdata(ModCertMapData, LDAPAddAttribute):
+    __doc__ = _("Add one or more certificate mappings to the user entry.")
+    msg_summary = _('Added certificate mappings to user "%(value)s"')
+
+    def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys,
+                     **options):
+
+        dn = super(baseuser_add_certmapdata, self).pre_callback(
+            ldap, dn, entry_attrs, attrs_list, *keys, **options)
+
+        # The objectclass ipacertmapobject may not be present on
+        # existing user entries. We need to add it if we define a new
+        # value for ipacertmapdata
+        add_missing_object_class(ldap, u'ipacertmapobject', dn)
+
+        return dn
+
+
+class baseuser_remove_certmapdata(ModCertMapData,
+                                  LDAPRemoveAttribute):
+    __doc__ = _("Remove one or more certificate mappings from the user entry.")
+    msg_summary = _('Removed certificate mappings from user "%(value)s"')

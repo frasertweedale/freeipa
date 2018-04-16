@@ -46,9 +46,12 @@
 #include <time.h>
 
 #include <nss.h>
+#include <blapit.h>
 #include <pk11pub.h>
 #include <hasht.h>
+#include <prerror.h>
 #include <prnetdb.h>
+#include <syslog.h>
 
 struct digest_buffer {
     uint8_t buf[SHA512_LENGTH];
@@ -65,6 +68,59 @@ static const struct {
     { "sha512", CKM_SHA512_HMAC },
     { }
 };
+
+static PK11SymKey *
+import_key(PK11SlotInfo *slot, CK_MECHANISM_TYPE mech, SECItem *key)
+{
+    uint8_t ct[(key->len / AES_BLOCK_SIZE + 1) * AES_BLOCK_SIZE];
+    uint8_t iv[AES_BLOCK_SIZE] = {};
+    SECItem ivitem = { .data = iv, .len = sizeof(iv), .type = siBuffer };
+    SECItem ctitem = { .data = ct, .len = sizeof(ct), .type = siBuffer };
+    PK11SymKey *ekey = NULL;
+    PK11SymKey *skey = NULL;
+
+    /* Try to import the key directly. */
+    skey = PK11_ImportSymKey(slot, mech, PK11_OriginUnwrap,
+                             CKA_SIGN, key, NULL);
+    if (skey)
+        return skey;
+
+    /* If we get here, we are probably in FIPS mode. Let's encrypt the key so
+     * that we can unseal it instead of loading it directly. */
+
+    /* Generate an ephemeral key. */
+    ekey = PK11_TokenKeyGenWithFlags(slot, CKM_AES_CBC_PAD, NULL,
+                                     AES_128_KEY_LENGTH, NULL,
+                                     CKF_ENCRYPT | CKF_UNWRAP,
+                                     PK11_ATTR_SESSION |
+                                     PK11_ATTR_PRIVATE |
+                                     PK11_ATTR_SENSITIVE, NULL);
+    if (!ekey) {
+        syslog(LOG_ERR, "libotp: in FIPS, PK11_TokenKeyGenWithFlags failed: %d",
+               PR_GetError());
+        goto egress;
+    }
+
+    /* Encrypt the input key. */
+    if (PK11_Encrypt(ekey, CKM_AES_CBC_PAD, &ivitem, ctitem.data, &ctitem.len,
+                     ctitem.len, key->data, key->len) != SECSuccess) {
+        syslog(LOG_ERR, "libotp: in FIPS, PK11_Encrypt failed: %d",
+               PR_GetError());
+        goto egress;
+    }
+
+    /* Unwrap the input key. */
+    skey = PK11_UnwrapSymKey(ekey, CKM_AES_CBC_PAD, &ivitem,
+                             &ctitem, mech, CKA_SIGN, key->len);
+    if (!skey) {
+        syslog(LOG_ERR, "libotp: in FIPS, PK11_UnwrapSymKey failed: %d",
+               PR_GetError());
+    }
+
+egress:
+    PK11_FreeSymKey(ekey);
+    return skey;
+}
 
 /*
  * This code is mostly cargo-cult taken from here:
@@ -90,8 +146,7 @@ static bool hmac(SECItem *key, CK_MECHANISM_TYPE mech, const SECItem *in,
         }
     }
 
-    symkey = PK11_ImportSymKey(slot, mech, PK11_OriginUnwrap,
-                               CKA_SIGN, key, NULL);
+    symkey = import_key(slot, mech, key);
     if (symkey == NULL)
         goto done;
 

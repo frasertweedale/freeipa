@@ -441,7 +441,8 @@ IPA.hbac.test_rules_facet = function(spec) {
 
         $('<label/>', {
             'for': 'hbactest-rules-include-enabled',
-            text: text.get('@i18n:objects.hbactest.include_enabled')
+            text: text.get('@i18n:objects.hbactest.include_enabled'),
+            title: text.get('@mc-opt:hbactest:enabled:doc')
         }).appendTo(header);
 
         that.disabled = $('<input/>', {
@@ -452,7 +453,8 @@ IPA.hbac.test_rules_facet = function(spec) {
 
         $('<label/>', {
             'for': 'hbactest-rules-include-disabled',
-            text: text.get('@i18n:objects.hbactest.include_disabled')
+            text: text.get('@i18n:objects.hbactest.include_disabled'),
+            title: text.get('@mc-opt:hbactest:disabled:doc')
         }).appendTo(header);
 
         var content = $('<div/>', {
@@ -706,12 +708,15 @@ IPA.hbac.test_run_facet = function(spec) {
     that.get_records_map = function(data) {
 
         var records_map = $.ordered_map();
+        var pkeys_map = $.ordered_map();
 
         var matched = data.result.matched;
         if (that.show_matched && matched) {
             for (var i=0; i<matched.length; i++) {
                 var pkey = matched[i];
-                records_map.put(pkey, { matched: true });
+                var compound_pkey = pkey + i;
+                records_map.put(compound_pkey, { matched: true });
+                pkeys_map.put(compound_pkey, pkey);
             }
         }
 
@@ -719,11 +724,16 @@ IPA.hbac.test_run_facet = function(spec) {
         if (that.show_unmatched && notmatched) {
             for (i=0; i<notmatched.length; i++) {
                 pkey = notmatched[i];
-                records_map.put(pkey, { matched: false });
+                compound_pkey = pkey + i;
+                records_map.put(compound_pkey, { matched: false });
+                pkeys_map.put(compound_pkey, pkey);
             }
         }
 
-        return records_map;
+        return {
+            records_map: records_map,
+            pkeys_map: pkeys_map
+        };
     };
 
     that.get_records_command_name = function() {

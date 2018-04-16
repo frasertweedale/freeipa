@@ -24,14 +24,14 @@ The classes in this module make heavy use of Python container emulation. If
 you are unfamiliar with this Python feature, see
 http://docs.python.org/ref/sequence-types.html
 """
-
-from distutils.version import LooseVersion
+import logging
 import operator
+import re
 import sys
 import threading
 import os
 from os import path
-import optparse
+import optparse  # pylint: disable=deprecated-module
 import textwrap
 import collections
 import importlib
@@ -44,7 +44,7 @@ from ipalib.text import _
 from ipalib.util import classproperty
 from ipalib.base import ReadOnly, lock, islocked
 from ipalib.constants import DEFAULT_CONFIG
-from ipapython import ipautil
+from ipapython import ipa_log_manager, ipautil
 from ipapython.ipa_log_manager import (
     log_mgr,
     LOGGING_FORMAT_FILE,
@@ -53,6 +53,8 @@ from ipapython.version import VERSION, API_VERSION, DEFAULT_PLUGINS
 
 if six.PY3:
     unicode = str
+
+logger = logging.getLogger(__name__)
 
 # FIXME: Updated constants.TYPE_ERROR to use this clearer format from wehjit:
 TYPE_ERROR = '%s: need a %r; got a %r: %r'
@@ -430,9 +432,7 @@ class API(ReadOnly):
         Initialize environment variables and logging.
         """
         self.__doing('bootstrap')
-        self.log_mgr = log_mgr
-        log = log_mgr.root_logger
-        self.log = log
+        self.log = log_mgr.get_logger(self)
         self.env._bootstrap(**overrides)
         self.env._finalize_core(**dict(DEFAULT_CONFIG))
 
@@ -441,30 +441,54 @@ class API(ReadOnly):
             parser = self.build_global_parser()
         self.parser = parser
 
+        root_logger = logging.getLogger()
+
         # If logging has already been configured somewhere else (like in the
         # installer), don't add handlers or change levels:
-        if log_mgr.configure_state != 'default' or self.env.validate_api:
+        if root_logger.handlers or self.env.validate_api:
             return
 
-        log_mgr.default_level = 'info'
-        log_mgr.configure_from_env(self.env, configure_state='api')
-        # Add stderr handler:
-        level = 'info'
         if self.env.debug:
-            level = 'debug'
+            level = logging.DEBUG
+        else:
+            level = logging.INFO
+        root_logger.setLevel(level)
+
+        for attr in self.env:
+            match = re.match(r'^log_logger_level_'
+                             r'(debug|info|warn|warning|error|critical|\d+)$',
+                             attr)
+            if not match:
+                continue
+
+            level = ipa_log_manager.convert_log_level(match.group(1))
+
+            value = getattr(self.env, attr)
+            regexps = re.split('\s*,\s*', value)
+
+            # Add the regexp, it maps to the configured level
+            for regexp in regexps:
+                root_logger.addFilter(ipa_log_manager.Filter(regexp, level))
+
+        # Add stderr handler:
+        level = logging.INFO
+        if self.env.debug:
+            level = logging.DEBUG
         else:
             if self.env.context == 'cli':
                 if self.env.verbose > 0:
-                    level = 'info'
+                    level = logging.INFO
                 else:
-                    level = 'warning'
+                    level = logging.WARNING
+        handler = logging.StreamHandler()
+        handler.setLevel(level)
+        handler.setFormatter(ipa_log_manager.Formatter(LOGGING_FORMAT_STDERR))
+        root_logger.addHandler(handler)
 
-        if 'console' in log_mgr.handlers:
-            log_mgr.remove_handler('console')
-        log_mgr.create_log_handlers([dict(name='console',
-                                          stream=sys.stderr,
-                                          level=level,
-                                          format=LOGGING_FORMAT_STDERR)])
+        # check after logging is set up but before we create files.
+        fse = sys.getfilesystemencoding()
+        if fse.lower() not in {'utf-8', 'utf8'}:
+            raise errors.SystemEncodingError(encoding=fse)
 
         # Add file handler:
         if self.env.mode in ('dummy', 'unit_test'):
@@ -476,27 +500,27 @@ class API(ReadOnly):
             try:
                 os.makedirs(log_dir)
             except OSError:
-                log.error('Could not create log_dir %r', log_dir)
+                logger.error('Could not create log_dir %r', log_dir)
                 return
 
-        level = 'info'
+        level = logging.INFO
         if self.env.debug:
-            level = 'debug'
+            level = logging.DEBUG
         try:
-            log_mgr.create_log_handlers([dict(name='file',
-                                              filename=self.env.log,
-                                              level=level,
-                                              format=LOGGING_FORMAT_FILE)])
+            handler = logging.FileHandler(self.env.log)
         except IOError as e:
-            log.error('Cannot open log file %r: %s', self.env.log, e)
+            logger.error('Cannot open log file %r: %s', self.env.log, e)
             return
+        handler.setLevel(level)
+        handler.setFormatter(ipa_log_manager.Formatter(LOGGING_FORMAT_FILE))
+        root_logger.addHandler(handler)
 
     def build_global_parser(self, parser=None, context=None):
         """
         Add global options to an optparse.OptionParser instance.
         """
         def config_file_callback(option, opt, value, parser):
-            if not ipautil.file_exists(value):
+            if not os.path.isfile(value):
                 parser.error(
                     _("%(filename)s: file not found") % dict(filename=value))
 
@@ -508,15 +532,15 @@ class API(ReadOnly):
                 formatter=IPAHelpFormatter(),
                 usage='%prog [global-options] COMMAND [command-options]',
                 description='Manage an IPA domain',
-                version=('VERSION: %s, API_VERSION: %s'
-                                % (VERSION, API_VERSION)),
+                version=('VERSION: %s, API_VERSION: %s' %
+                            (VERSION, API_VERSION)),
                 epilog='\n'.join([
                     'See "ipa help topics" for available help topics.',
-                    'See "ipa help <TOPIC>" for more information on a '
-                        'specific topic.',
+                    'See "ipa help <TOPIC>" for more information on '
+                    + 'a specific topic.',
                     'See "ipa help commands" for the full list of commands.',
-                    'See "ipa <COMMAND> --help" for more information on a '
-                        'specific command.',
+                    'See "ipa <COMMAND> --help" for more information on '
+                    + 'a specific command.',
                 ]))
             parser.disable_interspersed_args()
             parser.add_option("-h", "--help", action="help",
@@ -612,28 +636,26 @@ class API(ReadOnly):
                 name=package_name, file=package_file
             )
 
-        self.log.debug("importing all plugin modules in %s...", package_name)
+        logger.debug("importing all plugin modules in %s...", package_name)
         modules = getattr(package, 'modules', find_modules_in_dir(package_dir))
         modules = ['.'.join((package_name, name)) for name in modules]
 
         for name in modules:
-            self.log.debug("importing plugin module %s", name)
+            logger.debug("importing plugin module %s", name)
             try:
                 module = importlib.import_module(name)
             except errors.SkipPluginModule as e:
-                self.log.debug("skipping plugin module %s: %s", name, e.reason)
+                logger.debug("skipping plugin module %s: %s", name, e.reason)
                 continue
             except Exception as e:
                 if self.env.startup_traceback:
-                    import traceback
-                    self.log.error("could not load plugin module %s\n%s", name,
-                                   traceback.format_exc())
+                    logger.exception("could not load plugin module %s", name)
                 raise
 
             try:
                 self.add_module(module)
             except errors.PluginModuleError as e:
-                self.log.debug("%s", e)
+                logger.debug("%s", e)
 
     def add_module(self, module):
         """
@@ -715,6 +737,11 @@ class API(ReadOnly):
         self.__doing('finalize')
         self.__do_if_not_done('load_plugins')
 
+        if self.env.env_confdir is not None:
+            if self.env.env_confdir == self.env.confdir:
+                logger.info(
+                    "IPA_CONFDIR env sets confdir to '%s'.", self.env.confdir)
+
         for plugin in self.__plugins:
             if not self.env.validate_api:
                 if plugin.full_name not in DEFAULT_PLUGINS:
@@ -725,8 +752,11 @@ class API(ReadOnly):
                 except KeyError:
                     pass
                 else:
-                    version = LooseVersion(plugin.version)
-                    default_version = LooseVersion(default_version)
+                    # Technicall plugin.version is not an API version. The
+                    # APIVersion class can handle plugin versions. It's more
+                    # lean than pkg_resource.parse_version().
+                    version = ipautil.APIVersion(plugin.version)
+                    default_version = ipautil.APIVersion(default_version)
                     if version < default_version:
                         continue
             self.__default_map[plugin.name] = plugin.version

@@ -19,19 +19,21 @@
 
 from __future__ import print_function
 
+import logging
 import os
 import re
 import contextlib
 
-from ipaplatform.constants import constants
-from ipapython.ipa_log_manager import log_mgr
+from ipaplatform.paths import paths
 from ipapython.dn import DN
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.test_integration import tasks
+from ipatests.pytest_plugins.integration import tasks
 from ipatests.test_integration.test_dnssec import wait_until_record_is_signed
+from ipatests.test_integration.test_simple_replication import check_replication
 from ipatests.util import assert_deepequal
 
-log = log_mgr.get_logger(__name__)
+
+logger = logging.getLogger(__name__)
 
 
 def assert_entries_equal(a, b):
@@ -58,7 +60,7 @@ def check_admin_in_ldap(host):
     assert entry.dn == user_dn
     assert entry['uid'] == ['admin']
 
-    del entry['krbLastSuccessfulAuth']
+    entry.pop('krbLastSuccessfulAuth', None)
 
     return entry
 
@@ -66,6 +68,15 @@ def check_admin_in_ldap(host):
 def check_admin_in_cli(host):
     result = host.run_command(['ipa', 'user-show', 'admin'])
     assert 'User login: admin' in result.stdout_text, result.stdout_text
+
+    # LDAP do not guarantee any order, so the test cannot assume it. Based on
+    # that, the code bellow order the 'Member of groups' field to able to
+    # assert it latter.
+    data = dict(re.findall("\W*(.+):\W*(.+)\W*", result.stdout_text))
+    data["Member of groups"] = ', '.join(sorted(data["Member of groups"]
+                                                .split(", ")))
+    result.stdout_text = ''.join([' {}: {}\n'.format(k, v)
+                                  for k, v in data.items()])
     return result
 
 
@@ -93,6 +104,13 @@ def check_kinit(host):
     return result
 
 
+def check_custodia_files(host):
+    """regression test for https://pagure.io/freeipa/issue/7247"""
+    assert host.transport.file_exists(paths.IPA_CUSTODIA_KEYS)
+    assert host.transport.file_exists(paths.IPA_CUSTODIA_CONF)
+    return True
+
+
 CHECKS = [
     (check_admin_in_ldap, assert_entries_equal),
     (check_admin_in_cli, assert_results_equal),
@@ -100,6 +118,7 @@ CHECKS = [
     (check_certs, assert_results_equal),
     (check_dns, assert_results_equal),
     (check_kinit, assert_results_equal),
+    (check_custodia_files, assert_deepequal)
 ]
 
 
@@ -110,13 +129,13 @@ def restore_checker(host):
 
     results = []
     for check, assert_func in CHECKS:
-        log.info('Storing result for %s', check)
+        logger.info('Storing result for %s', check.__name__)
         results.append(check(host))
 
     yield
 
     for (check, assert_func), expected in zip(CHECKS, results):
-        log.info('Checking result for %s', check)
+        logger.info('Checking result for %s', check.__name__)
         got = check(host)
         assert_func(expected, got)
 
@@ -127,15 +146,13 @@ def backup(host):
 
     # Get the backup location from the command's output
     for line in result.stderr_text.splitlines():
-        prefix = ('ipa.ipaserver.install.ipa_backup.Backup: '
-                  'INFO: Backed up to ')
+        prefix = 'ipaserver.install.ipa_backup: INFO: Backed up to '
         if line.startswith(prefix):
             backup_path = line[len(prefix):].strip()
-            log.info('Backup path for %s is %s', host, backup_path)
+            logger.info('Backup path for %s is %s', host.hostname, backup_path)
             return backup_path
     else:
         raise AssertionError('Backup directory not found in output')
-
 
 
 class TestBackupAndRestore(IntegrationTest):
@@ -149,6 +166,10 @@ class TestBackupAndRestore(IntegrationTest):
             self.master.run_command(['ipa-server-install',
                                      '--uninstall',
                                      '-U'])
+            assert not self.master.transport.file_exists(
+                paths.IPA_CUSTODIA_KEYS)
+            assert not self.master.transport.file_exists(
+                paths.IPA_CUSTODIA_CONF)
 
             dirman_password = self.master.config.dirman_password
             self.master.run_command(['ipa-restore', backup_path],
@@ -159,14 +180,11 @@ class TestBackupAndRestore(IntegrationTest):
         with restore_checker(self.master):
             backup_path = backup(self.master)
 
-            self.log.info('Backup path for %s is %s', self.master, backup_path)
+            logger.info('Backup path for %s is %s', self.master, backup_path)
 
             self.master.run_command(['ipa-server-install',
                                      '--uninstall',
                                      '-U'])
-
-            self.master.run_command(['userdel', constants.DS_USER])
-            self.master.run_command(['userdel', constants.PKI_USER])
 
             homedir = os.path.join(self.master.config.test_dir,
                                    'testuser_homedir')
@@ -185,7 +203,7 @@ class TestBackupAndRestore(IntegrationTest):
         with restore_checker(self.master):
             backup_path = backup(self.master)
 
-            self.log.info('Backup path for %s is %s', self.master, backup_path)
+            logger.info('Backup path for %s is %s', self.master, backup_path)
 
             self.master.run_command(['ipa-server-install',
                                      '--uninstall',
@@ -299,8 +317,10 @@ class BaseBackupAndRestoreWithDNSSEC(IntegrationTest):
                 '--dnssec', 'true',
             ])
 
-            assert wait_until_record_is_signed(self.master.ip,
-                self.example_test_zone, self.log), "Zone is not signed"
+            assert (
+                wait_until_record_is_signed(
+                    self.master.ip, self.example_test_zone)
+            ), "Zone is not signed"
 
             backup_path = backup(self.master)
 
@@ -315,9 +335,10 @@ class BaseBackupAndRestoreWithDNSSEC(IntegrationTest):
             self.master.run_command(['ipa-restore', backup_path],
                                     stdin_text=dirman_password + '\nyes')
 
-            assert wait_until_record_is_signed(self.master.ip,
-                self.example_test_zone, self.log), ("Zone is not signed after "
-                                                    "restore")
+            assert (
+                wait_until_record_is_signed(
+                    self.master.ip, self.example_test_zone)
+            ), "Zone is not signed after restore"
 
             tasks.kinit_admin(self.master)
             self.master.run_command([
@@ -326,8 +347,10 @@ class BaseBackupAndRestoreWithDNSSEC(IntegrationTest):
                 '--dnssec', 'true',
             ])
 
-            assert wait_until_record_is_signed(self.master.ip,
-                self.example2_test_zone, self.log), "A new zone is not signed"
+            assert (
+                wait_until_record_is_signed(
+                    self.master.ip, self.example2_test_zone)
+            ), "A new zone is not signed"
 
 
 class TestBackupAndRestoreWithDNSSEC(BaseBackupAndRestoreWithDNSSEC):
@@ -408,7 +431,115 @@ class TestBackupAndRestoreWithKRA(BaseBackupAndRestoreWithKRA):
         """backup, uninstall, restore"""
         self._full_backup_restore_with_vault(reinstall=False)
 
+
 class TestBackupReinstallRestoreWithKRA(BaseBackupAndRestoreWithKRA):
     def test_full_backup_reinstall_restore_with_vault(self):
         """backup, uninstall, reinstall, restore"""
         self._full_backup_restore_with_vault(reinstall=True)
+
+
+class TestBackupAndRestoreWithReplica(IntegrationTest):
+    """Regression test for https://pagure.io/freeipa/issue/7234"""
+    num_replicas = 1
+    topology = "star"
+
+    @classmethod
+    def install(cls, mh):
+        if cls.domain_level is None:
+            domain_level = cls.master.config.domain_level
+        else:
+            domain_level = cls.domain_level
+
+        if cls.topology is None:
+            return
+        else:
+            tasks.install_topo(
+                cls.topology, cls.master, [],
+                cls.clients, domain_level
+            )
+
+    def test_full_backup_and_restore_with_replica(self):
+        replica = self.replicas[0]
+
+        with restore_checker(self.master):
+            backup_path = backup(self.master)
+
+            logger.info("Backup path for %s is %s", self.master, backup_path)
+
+            self.master.run_command([
+                "ipa-server-install", "--uninstall", "-U"
+            ])
+
+            logger.info("Stopping and disabling oddjobd service")
+            self.master.run_command([
+                "systemctl", "stop", "oddjobd"
+            ])
+            self.master.run_command([
+                "systemctl", "disable", "oddjobd"
+            ])
+
+            dirman_password = self.master.config.dirman_password
+            self.master.run_command(
+                ["ipa-restore", backup_path],
+                stdin_text=dirman_password + '\nyes'
+            )
+
+            status = self.master.run_command([
+                "systemctl", "status", "oddjobd"
+            ])
+            assert "active (running)" in status.stdout_text
+
+        tasks.install_replica(self.master, replica)
+        check_replication(self.master, replica, "testuser1")
+
+
+class TestUserrootFilesOwnership(IntegrationTest):
+    """Test to check if userroot.ldif have proper ownership.
+
+    Before the fix, when ipa-backup was called for the first time,
+    the LDAP database exported to
+    /var/lib/dirsrv/slapd-<instance>/ldif/<instance>-userRoot.ldif.
+    db2ldif is called for this and it runs under root, hence files
+    were owned by root.
+
+    When ipa-backup called the next time, the db2ldif fails,
+    because the tool does not have permissions to write to the ldif
+    file which was owned by root (instead of dirsrv).
+
+    This test check if files are owned by dirsrv and db2ldif doesn't
+    fail
+
+    related ticket: https://pagure.io/freeipa/issue/7010
+    """
+
+    def test_userroot_ldif_files_ownership(self):
+        """backup, uninstall, restore, backup"""
+        tasks.install_master(self.master)
+        backup_path = backup(self.master)
+
+        self.master.run_command(['ipa-server-install',
+                                 '--uninstall',
+                                 '-U'])
+
+        dirman_password = self.master.config.dirman_password
+        self.master.run_command(['ipa-restore', backup_path],
+                                stdin_text=dirman_password + '\nyes')
+
+        # check if files have proper owner and group.
+        dashed_domain = self.master.domain.realm.replace(".", '-')
+        arg = ['stat',
+               '-c', '%U%G',
+               '/var/lib/dirsrv/slapd-' + dashed_domain + '/ldif']
+        cmd = self.master.run_command(arg)
+        assert 'dirsrvdirsrv' in cmd.stdout_text
+
+        arg = ['stat',
+               '-c', '%U%G',
+               '/var/lib/dirsrv/slapd-' + dashed_domain + '/ldif/']
+        cmd = self.master.run_command(arg)
+        assert 'dirsrvdirsrv' in cmd.stdout_text
+
+        cmd = self.master.run_command(['ipa-backup', '-d'])
+        unexp_str = "CRITICAL: db2ldif failed:"
+        assert cmd.returncode == 0
+        assert unexp_str not in cmd.stdout_text

@@ -23,11 +23,12 @@ Functionality for Command Line Interface.
 from __future__ import print_function
 
 import importlib
+import logging
 import textwrap
 import sys
 import getpass
 import code
-import optparse
+import optparse  # pylint: disable=deprecated-module
 import fcntl
 import termios
 import struct
@@ -37,12 +38,16 @@ import traceback
 import six
 from six.moves import input
 
+from ipalib.util import (
+    check_client_configuration, get_terminal_height, open_in_pager
+)
+
 if six.PY3:
     unicode = str
 
 if six.PY2:
-    reload(sys)                         # pylint: disable=reload-builtin
-    sys.setdefaultencoding('utf-8')     # pylint: disable=no-member
+    reload(sys)  # pylint: disable=reload-builtin, undefined-variable
+    sys.setdefaultencoding('utf-8')  # pylint: disable=no-member
 
 from ipalib import frontend
 from ipalib import backend
@@ -55,8 +60,11 @@ from ipalib.parameters import File, Str, Enum, Any, Flag
 from ipalib.text import _
 from ipalib import api  # pylint: disable=unused-import
 from ipapython.dnsutil import DNSName
+from ipapython.admintool import ScriptError
 
 import datetime
+
+logger = logging.getLogger(__name__)
 
 
 def to_cli(name):
@@ -95,7 +103,8 @@ class textui(backend.Backend):
                                       struct.pack('HHHH', 0, 0, 0, 0))
                 return struct.unpack('HHHH', winsize)[1]
             except IOError:
-                return None
+                pass
+        return None
 
     def max_col_width(self, rows, col=None):
         """
@@ -599,6 +608,8 @@ class textui(backend.Backend):
             elif default is not None and data == u'':
                 return default
 
+        return default  # pylint consinstent return statements
+
     def prompt_password(self, label, confirm=True):
         """
         Prompt user for a password or read it in via stdin depending
@@ -614,7 +625,8 @@ class textui(backend.Backend):
                 pw2 = self.prompt_helper(repeat_prompt, label, prompt_func=getpass.getpass)
                 if pw1 == pw2:
                     return pw1
-                self.print_error( _('Passwords do not match!'))
+                else:
+                    self.print_error(_('Passwords do not match!'))
         else:
             return self.decode(sys.stdin.readline().strip())
 
@@ -675,10 +687,39 @@ class textui(backend.Backend):
         self.print_line('')
         return selection
 
+
 class help(frontend.Local):
     """
     Display help for a command or topic.
     """
+    class Writer(object):
+        """
+        Writer abstraction
+        """
+        def __init__(self, outfile):
+            self.outfile = outfile
+            self.buffer = []
+
+        @property
+        def buffer_length(self):
+            length = 0
+            for line in self.buffer:
+                length += len(line.split("\n"))
+            return length
+
+        def append(self, string=u""):
+            self.buffer.append(unicode(string))
+
+        def write(self):
+            if self.buffer_length > get_terminal_height():
+                data = "\n".join(self.buffer).encode("utf-8")
+                open_in_pager(data)
+            else:
+                try:
+                    for line in self.buffer:
+                        print(line, file=self.outfile)
+                except IOError:
+                    pass
 
     takes_args = (
         Str('command?', cli_name='topic', label=_('Topic or Command'),
@@ -697,7 +738,7 @@ class help(frontend.Local):
         parent_topic = None
 
         for package in self.api.packages:
-            module_name = '%s.%s' % (package.__name__, topic)
+            module_name = '{0}.{1}'.format(package.__name__, topic)
             try:
                 module = sys.modules[module_name]
             except KeyError:
@@ -720,7 +761,8 @@ class help(frontend.Local):
         self._topics[topic_name][1] = mcl
 
     def _on_finalize(self):
-        # {topic: ["description", mcl, {"subtopic": ["description", mcl, [commands]]}]}
+        # {topic: ["description", mcl, {
+        #     "subtopic": ["description", mcl, [commands]]}]}
         # {topic: ["description", mcl, [commands]]}
         self._topics = {}
         # [builtin_commands]
@@ -744,22 +786,26 @@ class help(frontend.Local):
                         self._topics[topic_name] = [doc, 0, [c]]
                     mcl = max((self._topics[topic_name][1], len(c.name)))
                     self._topics[topic_name][1] = mcl
-                else: # a module grouped in a topic
+                else:  # a module grouped in a topic
                     topic = self._get_topic(topic_name)
                     mod_name = c.topic
                     if topic_name in self._topics:
                         if mod_name in self._topics[topic_name][2]:
                             self._topics[topic_name][2][mod_name][2].append(c)
                         else:
-                            self._topics[topic_name][2][mod_name] = [doc, 0, [c]]
+                            self._topics[topic_name][2][mod_name] = [
+                                doc, 0, [c]]
                             self._count_topic_mcl(topic_name, mod_name)
                         # count mcl for for the subtopic
-                        mcl = max((self._topics[topic_name][2][mod_name][1], len(c.name)))
+                        mcl = max((
+                            self._topics[topic_name][2][mod_name][1],
+                            len(c.name)))
                         self._topics[topic_name][2][mod_name][1] = mcl
                     else:
-                        self._topics[topic_name] = [topic[0].split('\n', 1)[0],
-                                                    0,
-                                                    {mod_name: [doc, 0, [c]]}]
+                        self._topics[topic_name] = [
+                            topic[0].split('\n', 1)[0],
+                            0,
+                            {mod_name: [doc, 0, [c]]}]
                         self._count_topic_mcl(topic_name, mod_name)
             else:
                 self._builtins.append(c)
@@ -773,8 +819,10 @@ class help(frontend.Local):
     def run(self, key=None, outfile=None, **options):
         if outfile is None:
             outfile = sys.stdout
-        writer = self._writer(outfile)
+
+        writer = self.Writer(outfile)
         name = from_cli(key)
+
         if key is None:
             self.api.parser.print_help(outfile)
             return
@@ -799,33 +847,30 @@ class help(frontend.Local):
                 if cmd_plugin.NO_CLI:
                     continue
                 mcl = max(mcl, len(cmd_plugin.name))
-                writer('%s  %s' % (to_cli(cmd_plugin.name).ljust(mcl),
-                                   cmd_plugin.summary))
+                writer.append('{0}  {1}'.format(
+                    to_cli(cmd_plugin.name).ljust(mcl), cmd_plugin.summary))
         else:
             raise HelpError(topic=name)
-
-    def _writer(self, outfile):
-        def writer(string=''):
-            try:
-                print(unicode(string), file=outfile)
-            except IOError:
-                pass
-        return writer
+        writer.write()
 
     def print_topics(self, outfile):
-        writer = self._writer(outfile)
+        writer = self.Writer(outfile)
 
         for t, topic in sorted(self._topics.items()):
-            writer('%s  %s' % (to_cli(t).ljust(self._mtl), topic[0]))
+            writer.append('{0}  {1}'.format(
+                to_cli(t).ljust(self._mtl), topic[0]))
+        writer.write()
 
     def print_commands(self, topic, outfile):
-        writer = self._writer(outfile)
+        writer = self.Writer(outfile)
+
         if topic in self._topics and type(self._topics[topic][2]) is dict:
             # we want to display topic which has subtopics
             for subtopic in self._topics[topic][2]:
                 doc = self._topics[topic][2][subtopic][0]
                 mcl = self._topics[topic][1]
-                writer('  %s  %s' % (to_cli(subtopic).ljust(mcl), doc))
+                writer.append('  {0}  {1}'.format(
+                    to_cli(subtopic).ljust(mcl), doc))
         else:
             # we want to display subtopic or a topic which has no subtopics
             if topic in self._topics:
@@ -847,17 +892,20 @@ class help(frontend.Local):
             if topic not in self.Command and len(commands) == 0:
                 raise HelpError(topic=topic)
 
-            writer(doc)
+            writer.append(doc)
             if commands:
-                writer()
-                writer(_('Topic commands:'))
+                writer.append()
+                writer.append(_('Topic commands:'))
                 for c in commands:
-                    writer(
-                        '  %s  %s' % (to_cli(c.name).ljust(mcl), c.summary))
-                writer()
-                writer(_('To get command help, use:'))
-                writer(_('  ipa <command> --help'))
-            writer()
+                    writer.append(
+                        '  {0}  {1}'.format(
+                            to_cli(c.name).ljust(mcl), c.summary))
+                writer.append()
+                writer.append(_('To get command help, use:'))
+                writer.append(_('  ipa <command> --help'))
+            writer.append()
+        writer.write()
+
 
 class show_mappings(frontend.Command):
     """
@@ -907,13 +955,13 @@ class console(frontend.Command):
             try:
                 script = open(filename)
             except IOError as e:
-                exit("%s: %s" % (e.filename, e.strerror))
+                sys.exit("%s: %s" % (e.filename, e.strerror))
             try:
                 with script:
                     exec(script, globals(), local)
             except Exception:
                 traceback.print_exc()
-                exit(1)
+                sys.exit(1)
         else:
             code.interact(
                 '(Custom IPA interactive Python console)',
@@ -994,7 +1042,9 @@ class Collector(object):
                 value = v + (value,)
             else:
                 value = (v, value)
+        # pylint: disable=unsupported-assignment-operation
         self.__options[name] = value
+        # pylint: enable=unsupported-assignment-operation
         object.__setattr__(self, name, value)
 
     def __todict__(self):
@@ -1070,7 +1120,7 @@ class cli(backend.Executioner):
             self.Command.help(outfile=sys.stderr)
             print(file=sys.stderr)
             print('Error: Command not specified', file=sys.stderr)
-            exit(2)
+            sys.exit(2)
         (key, argv) = (argv[0], argv[1:])
         name = from_cli(key)
         if name not in self.Command and len(argv) == 0:
@@ -1100,7 +1150,7 @@ class cli(backend.Executioner):
     def run(self, argv):
         cmd = self.get_command(argv)
         if cmd is None:
-            return
+            return None
         name = cmd.full_name
         kw = self.parse(cmd, argv[1:])
         if not isinstance(cmd, frontend.Local):
@@ -1120,6 +1170,7 @@ class cli(backend.Executioner):
                     return 0
         finally:
             self.destroy_context()
+        return None
 
     def parse(self, cmd, argv):
         parser = self.build_parser(cmd)
@@ -1203,7 +1254,7 @@ class cli(backend.Executioner):
 
     def __get_arg_name(self, arg, format_name=True):
         if arg.password:
-            return
+            return None
 
         name = to_cli(arg.cli_name).upper()
         if not format_name:
@@ -1343,6 +1394,12 @@ def run(api):
     error = None
     try:
         (_options, argv) = api.bootstrap_with_global_options(context='cli')
+
+        try:
+            check_client_configuration()
+        except ScriptError as e:
+            sys.exit(e)
+
         for klass in cli_plugins:
             api.add_plugin(klass)
         api.finalize()
@@ -1351,13 +1408,13 @@ def run(api):
         sys.exit(api.Backend.cli.run(argv))
     except KeyboardInterrupt:
         print('')
-        api.log.info('operation aborted')
+        logger.info('operation aborted')
     except PublicError as e:
         error = e
     except Exception as e:
-        api.log.exception('%s: %s', e.__class__.__name__, str(e))
+        logger.exception('%s: %s', e.__class__.__name__, str(e))
         error = InternalError()
     if error is not None:
         assert isinstance(error, PublicError)
-        api.log.error(error.strerror)
+        logger.error(error.strerror)
         sys.exit(error.rval)

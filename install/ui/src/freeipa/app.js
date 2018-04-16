@@ -32,6 +32,8 @@ define([
     './plugins/ca',
     './plugins/caacl',
     './plugins/certprofile',
+    './plugins/certmap',
+    './plugins/certmapmatch',
     './dns',
     './group',
     './hbac',
@@ -49,11 +51,12 @@ define([
     './selinux',
     './serverconfig',
     './service',
+    './stageuser',
     './sudo',
     './trust',
     './topology',
     './user',
-    './stageuser',
+    './vault',
     'dojo/domReady!'
 ],function(app_container) {
     return app_container;

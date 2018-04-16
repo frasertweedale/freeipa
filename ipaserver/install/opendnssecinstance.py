@@ -2,6 +2,7 @@
 # Copyright (C) 2014  FreeIPA Contributors see COPYING for license
 #
 
+import logging
 import os
 import pwd
 import grp
@@ -9,19 +10,21 @@ import stat
 import shutil
 from subprocess import CalledProcessError
 
+from ipalib.install import sysrestore
 from ipaserver.install import service
 from ipaserver.install import installutils
-from ipapython.ipa_log_manager import root_logger
 from ipapython.dn import DN
-from ipapython import sysrestore, ipautil, ipaldap, p11helper
+from ipapython import ipautil
 from ipaplatform import services
 from ipaplatform.constants import constants
 from ipaplatform.paths import paths
 from ipalib import errors, api
-from ipaserver.install import dnskeysyncinstance
+from ipaserver import p11helper
+from ipalib.constants import SOFTHSM_DNSSEC_TOKEN_LABEL
+
+logger = logging.getLogger(__name__)
 
 KEYMASTER = u'dnssecKeyMaster'
-softhsm_slot = 0
 
 
 def get_dnssec_key_masters(conn):
@@ -57,22 +60,16 @@ def get_dnssec_key_masters(conn):
 
 
 class OpenDNSSECInstance(service.Service):
-    def __init__(self, fstore=None, dm_password=None, ldapi=False,
-                 start_tls=False, autobind=ipaldap.AUTOBIND_ENABLED):
+    def __init__(self, fstore=None):
         service.Service.__init__(
             self, "ods-enforcerd",
             service_desc="OpenDNSSEC enforcer daemon",
-            dm_password=dm_password,
-            ldapi=ldapi,
-            autobind=autobind,
-            start_tls=start_tls
         )
-        self.dm_password = dm_password
         self.ods_uid = None
         self.ods_gid = None
         self.conf_file_dict = {
             'SOFTHSM_LIB': paths.LIBSOFTHSM2_SO,
-            'TOKEN_LABEL': dnskeysyncinstance.softhsm_token_label,
+            'TOKEN_LABEL': SOFTHSM_DNSSEC_TOKEN_LABEL,
             'KASP_DB': paths.OPENDNSSEC_KASP_DB,
             'ODS_USER': constants.ODS_USER,
             'ODS_GROUP': constants.ODS_GROUP,
@@ -88,9 +85,7 @@ class OpenDNSSECInstance(service.Service):
     suffix = ipautil.dn_attribute_property('_suffix')
 
     def get_masters(self):
-        if not self.admin_conn:
-            self.ldap_connect()
-        return get_dnssec_key_masters(self.admin_conn)
+        return get_dnssec_key_masters(api.Backend.ldap2)
 
     def create_instance(self, fqdn, realm_name, generate_master_key=True,
                         kasp_db_file=None):
@@ -108,9 +103,6 @@ class OpenDNSSECInstance(service.Service):
         except Exception:
             pass
 
-        # get a connection to the DS
-        if not self.admin_conn:
-            self.ldap_connect()
         # checking status must be first
         self.step("checking status", self.__check_dnssec_status)
         self.step("setting up configuration files", self.__setup_conf_files)
@@ -146,25 +138,25 @@ class OpenDNSSECInstance(service.Service):
 
     def __enable(self):
         try:
-            self.ldap_enable('DNSSEC', self.fqdn, self.dm_password,
+            self.ldap_enable('DNSSEC', self.fqdn, None,
                              self.suffix, self.extra_config)
         except errors.DuplicateEntry:
-            root_logger.error("DNSSEC service already exists")
+            logger.error("DNSSEC service already exists")
 
         # add the KEYMASTER identifier into ipaConfigString
         # this is needed for the re-enabled DNSSEC master
         dn = DN(('cn', 'DNSSEC'), ('cn', self.fqdn), api.env.container_masters,
                 api.env.basedn)
         try:
-            entry = self.admin_conn.get_entry(dn, ['ipaConfigString'])
+            entry = api.Backend.ldap2.get_entry(dn, ['ipaConfigString'])
         except errors.NotFound as e:
-            root_logger.error(
+            logger.error(
                 "DNSSEC service entry not found in the LDAP (%s)", e)
         else:
             config = entry.setdefault('ipaConfigString', [])
             if KEYMASTER not in config:
                 config.append(KEYMASTER)
-                self.admin_conn.update_entry(entry)
+                api.Backend.ldap2.update_entry(entry)
 
     def __setup_conf_files(self):
         if not self.fstore.has_file(paths.OPENDNSSEC_CONF_FILE):
@@ -185,7 +177,8 @@ class OpenDNSSECInstance(service.Service):
         sub_conf_dict['PIN'] = pin
 
         ods_conf_txt = ipautil.template_file(
-            ipautil.SHARE_DIR + "opendnssec_conf.template", sub_conf_dict)
+            os.path.join(paths.USR_SHARE_IPA_DIR, "opendnssec_conf.template"),
+            sub_conf_dict)
         ods_conf_fd = open(paths.OPENDNSSEC_CONF_FILE, 'w')
         ods_conf_fd.seek(0)
         ods_conf_fd.truncate(0)
@@ -193,7 +186,8 @@ class OpenDNSSECInstance(service.Service):
         ods_conf_fd.close()
 
         ods_kasp_txt = ipautil.template_file(
-            ipautil.SHARE_DIR + "opendnssec_kasp.template", self.kasp_file_dict)
+            os.path.join(paths.USR_SHARE_IPA_DIR, "opendnssec_kasp.template"),
+            self.kasp_file_dict)
         ods_kasp_fd = open(paths.OPENDNSSEC_KASP_FILE, 'w')
         ods_kasp_fd.seek(0)
         ods_kasp_fd.truncate(0)
@@ -244,14 +238,15 @@ class OpenDNSSECInstance(service.Service):
             pin = f.read()
 
         os.environ["SOFTHSM2_CONF"] = paths.DNSSEC_SOFTHSM2_CONF
-        p11 = p11helper.P11_Helper(softhsm_slot, pin, paths.LIBSOFTHSM2_SO)
+        p11 = p11helper.P11_Helper(
+            SOFTHSM_DNSSEC_TOKEN_LABEL, pin, paths.LIBSOFTHSM2_SO)
         try:
             # generate master key
-            root_logger.debug("Creating master key")
+            logger.debug("Creating master key")
             p11helper.generate_master_key(p11)
 
             # change tokens mod/owner
-            root_logger.debug("Changing ownership of token files")
+            logger.debug("Changing ownership of token files")
             for (root, dirs, files) in os.walk(paths.DNSSEC_TOKENS_DIR):
                 for directory in dirs:
                     dir_path = os.path.join(root, directory)
@@ -268,7 +263,7 @@ class OpenDNSSECInstance(service.Service):
     def __setup_dnssec(self):
         # run once only
         if self.get_state("kasp_db_configured") and not self.kasp_db_file:
-            root_logger.debug("Already configured, skipping step")
+            logger.debug("Already configured, skipping step")
             return
 
         self.backup_state("kasp_db_configured", True)
@@ -328,7 +323,7 @@ class OpenDNSSECInstance(service.Service):
         except Exception:
             pass
 
-        ods_exporter = services.service('ipa-ods-exporter')
+        ods_exporter = services.service('ipa-ods-exporter', api)
         try:
             ods_exporter.stop()
         except Exception:
@@ -343,7 +338,7 @@ class OpenDNSSECInstance(service.Service):
         restore_list = [paths.OPENDNSSEC_CONF_FILE, paths.OPENDNSSEC_KASP_FILE,
                         paths.SYSCONFIG_ODS, paths.OPENDNSSEC_ZONELIST_FILE]
 
-        if ipautil.file_exists(paths.OPENDNSSEC_KASP_DB):
+        if os.path.isfile(paths.OPENDNSSEC_KASP_DB):
 
             # force to export data
             cmd = [paths.IPA_ODS_EXPORTER, 'ipa-full-update']
@@ -351,18 +346,18 @@ class OpenDNSSECInstance(service.Service):
                 self.print_msg("Exporting DNSSEC data before uninstallation")
                 ipautil.run(cmd, runas=constants.ODS_USER)
             except CalledProcessError:
-                root_logger.error("DNSSEC data export failed")
+                logger.error("DNSSEC data export failed")
 
             try:
                 shutil.copy(paths.OPENDNSSEC_KASP_DB,
                             paths.IPA_KASP_DB_BACKUP)
             except IOError as e:
-                root_logger.error(
+                logger.error(
                     "Unable to backup OpenDNSSEC database %s, "
                     "restore will be skipped: %s", paths.OPENDNSSEC_KASP_DB, e)
             else:
-                root_logger.info("OpenDNSSEC database backed up in %s",
-                                 paths.IPA_KASP_DB_BACKUP)
+                logger.info("OpenDNSSEC database backed up in %s",
+                            paths.IPA_KASP_DB_BACKUP)
                 # restore OpenDNSSEC's KASP DB only if backup succeeded
                 # removing the file without backup could totally break DNSSEC
                 restore_list.append(paths.OPENDNSSEC_KASP_DB)
@@ -371,7 +366,7 @@ class OpenDNSSECInstance(service.Service):
             try:
                 self.fstore.restore_file(f)
             except ValueError as error:
-                root_logger.debug(error)
+                logger.debug("%s", error)
 
         self.restore_state("kasp_db_configured")  # just eat state
 

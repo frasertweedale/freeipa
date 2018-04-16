@@ -422,6 +422,7 @@ from __future__ import print_function
 import sys
 import functools
 
+import cryptography.x509
 from ldap.dn import str2dn, dn2str
 from ldap import DECODING_ERROR
 import six
@@ -451,7 +452,7 @@ def _adjust_indices(start, end, length):
 
 def _normalize_ava_input(val):
     if six.PY3 and isinstance(val, bytes):
-        raise TypeError('expected str, got bytes: %s' % val)
+        raise TypeError('expected str, got bytes: %r' % val)
     elif not isinstance(val, six.string_types):
         val = val_encode(six.text_type(val))
     elif six.PY2 and isinstance(val, unicode):
@@ -976,6 +977,8 @@ class DN(object):
       to yield one or more RDN's which will be appended in order to
       the DN. The parsing recognizes the DN syntax escaping rules.
 
+    * A single ``cryptography.x509.name.Name`` object.
+
     * A RDN object, the RDN will copied respecting the constructors
       keyword configuration parameters and appended in order.
 
@@ -1125,9 +1128,17 @@ class DN(object):
             rdns = [[ava]]
         elif isinstance(value, RDN):
             rdns = [value.to_openldap()]
+        elif isinstance(value, cryptography.x509.name.Name):
+            rdns = list(reversed([
+                [get_ava(
+                    ATTR_NAME_BY_OID.get(ava.oid, ava.oid.dotted_string),
+                    ava.value)]
+                for ava in value
+            ]))
         else:
-            raise TypeError("must be str, unicode, tuple, or RDN or DN, got %s instead" %
-                            type(value))
+            raise TypeError(
+                "must be str, unicode, tuple, Name, RDN or DN, got %s instead"
+                % type(value))
         return rdns
 
     def _rdns_from_sequence(self, seq):
@@ -1144,8 +1155,14 @@ class DN(object):
     def _get_rdn(self, rdn):
         return self.RDN_type(*rdn, **{'raw': True})
 
-    def __str__(self):
+    def ldap_text(self):
         return dn2str(self.rdns)
+
+    def x500_text(self):
+        return dn2str(reversed(self.rdns))
+
+    def __str__(self):
+        return self.ldap_text()
 
     def __repr__(self):
         return "%s.%s('%s')" % (self.__module__, self.__class__.__name__, self.__str__())
@@ -1303,9 +1320,11 @@ class DN(object):
             return not self._cmp_sequence(pattern, start, pat_len)
         return 0
 
-
     def __contains__(self, other):
-        'Return the outcome of the test other in self. Note the reversed operands.'
+        """Return the outcome of the test other in self.
+
+        Note the reversed operands.
+        """
 
         if isinstance(other, RDN):
             other = DN(other)
@@ -1319,9 +1338,9 @@ class DN(object):
                     return True
                 i += 1
             return False
-        else:
-            raise TypeError("expected DN or RDN but got %s" % (other.__class__.__name__))
-
+        raise TypeError(
+            "expected DN or RDN but got %s" % other.__class__.__name__
+        )
 
     def find(self, pattern, start=None, end=None):
         '''
@@ -1407,3 +1426,32 @@ class DN(object):
         if i == -1:
             raise ValueError("pattern not found")
         return i
+
+
+ATTR_NAME_BY_OID = {
+    cryptography.x509.oid.NameOID.COMMON_NAME: 'CN',
+    cryptography.x509.oid.NameOID.COUNTRY_NAME: 'C',
+    cryptography.x509.oid.NameOID.LOCALITY_NAME: 'L',
+    cryptography.x509.oid.NameOID.STATE_OR_PROVINCE_NAME: 'ST',
+    cryptography.x509.oid.NameOID.ORGANIZATION_NAME: 'O',
+    cryptography.x509.oid.NameOID.ORGANIZATIONAL_UNIT_NAME: 'OU',
+    cryptography.x509.oid.NameOID.SERIAL_NUMBER: 'serialNumber',
+    cryptography.x509.oid.NameOID.SURNAME: 'SN',
+    cryptography.x509.oid.NameOID.GIVEN_NAME: 'givenName',
+    cryptography.x509.oid.NameOID.TITLE: 'title',
+    cryptography.x509.oid.NameOID.GENERATION_QUALIFIER: 'generationQualifier',
+    cryptography.x509.oid.NameOID.DN_QUALIFIER: 'dnQualifier',
+    cryptography.x509.oid.NameOID.PSEUDONYM: 'pseudonym',
+    cryptography.x509.oid.NameOID.DOMAIN_COMPONENT: 'DC',
+    cryptography.x509.oid.NameOID.EMAIL_ADDRESS: 'E',
+    cryptography.x509.oid.NameOID.JURISDICTION_COUNTRY_NAME:
+        'incorporationCountry',
+    cryptography.x509.oid.NameOID.JURISDICTION_LOCALITY_NAME:
+        'incorporationLocality',
+    cryptography.x509.oid.NameOID.JURISDICTION_STATE_OR_PROVINCE_NAME:
+        'incorporationState',
+    cryptography.x509.oid.NameOID.BUSINESS_CATEGORY: 'businessCategory',
+    cryptography.x509.ObjectIdentifier('2.5.4.9'): 'STREET',
+    cryptography.x509.ObjectIdentifier('2.5.4.17'): 'postalCode',
+    cryptography.x509.ObjectIdentifier('0.9.2342.19200300.100.1.1'): 'UID',
+}

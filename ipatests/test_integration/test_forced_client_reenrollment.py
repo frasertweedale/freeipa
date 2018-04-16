@@ -16,13 +16,17 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import logging
 import os
 import subprocess
 from ipaplatform.paths import paths
 import pytest
 
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.test_integration import tasks
+from ipatests.pytest_plugins.integration import tasks
+
+logger = logging.getLogger(__name__)
 
 CLIENT_KEYTAB = paths.KRB5_KEYTAB
 
@@ -39,6 +43,19 @@ class TestForcedClientReenrollment(IntegrationTest):
     def install(cls, mh):
         super(TestForcedClientReenrollment, cls).install(mh)
         tasks.install_master(cls.master)
+
+        cls.client_dom = cls.clients[0].hostname.split('.', 1)[1]
+        if cls.client_dom != cls.master.domain.name:
+            # In cases where client is managed by upstream DNS server we
+            # overlap its zone so we can save DNS records (e.g. SSHFP) for
+            # comparison.
+            servers = [cls.master] + cls.replicas
+            tasks.add_dns_zone(cls.master, cls.client_dom,
+                               skip_overlap_check=True,
+                               dynamic_update=True,
+                               add_a_record_hosts=servers
+                               )
+
         tasks.install_replica(cls.master, cls.replicas[0], setup_ca=False)
         cls.BACKUP_KEYTAB = os.path.join(
             cls.master.config.test_dir,
@@ -158,13 +175,14 @@ class TestForcedClientReenrollment(IntegrationTest):
             '-p', 'tcp',
             '--dport', '22'
         ])
-        client.run_command([
-            'iptables',
-            '-A', 'INPUT',
-            '-j', 'REJECT',
-            '-p', 'all',
-            '--source', self.master.ip
-        ])
+        for host in [self.master] + self.replicas:
+            client.run_command([
+                'iptables',
+                '-A', 'INPUT',
+                '-j', 'REJECT',
+                '-p', 'all',
+                '--source', host.ip
+            ])
         self.uninstall_client()
         client.run_command(['iptables', '-F'])
 
@@ -242,7 +260,7 @@ class TestForcedClientReenrollment(IntegrationTest):
         client_host = self.clients[0].hostname.split('.')[0]
 
         result = self.master.run_command(
-            ['ipa', 'dnsrecord-show', self.master.domain.name, client_host]
+            ['ipa', 'dnsrecord-show', self.client_dom, client_host]
         )
 
         lines = result.stdout_text.splitlines()
@@ -253,7 +271,8 @@ class TestForcedClientReenrollment(IntegrationTest):
         assert sshfp_record, 'SSHFP record not found'
 
         sshfp_record = set(sshfp_record.split(', '))
-        self.log.debug("SSHFP record for host %s: %s", client_host, str(sshfp_record))
+        logger.debug("SSHFP record for host %s: %s",
+                     client_host, str(sshfp_record))
 
         return sshfp_record
 
@@ -265,11 +284,13 @@ class TestForcedClientReenrollment(IntegrationTest):
         contents = self.master.get_file_contents(self.BACKUP_KEYTAB)
         self.clients[0].put_file_contents(self.BACKUP_KEYTAB, contents)
 
-    def fix_resolv_conf(self, client, server):
+    @classmethod
+    def fix_resolv_conf(cls, client, server):
         """
         Put server's ip address at the top of resolv.conf
         """
-        contents = client.get_file_contents(paths.RESOLV_CONF)
+        contents = client.get_file_contents(paths.RESOLV_CONF,
+                                            encoding='utf-8')
         nameserver = 'nameserver %s\n' % server.ip
 
         if not contents.startswith(nameserver):
@@ -279,6 +300,9 @@ class TestForcedClientReenrollment(IntegrationTest):
 
 @pytest.fixture()
 def client(request):
+    # Here we call "fix_resolv_conf" method before every ipa-client-install so
+    # we get the client pointing to ipa master as DNS server.
+    request.cls.fix_resolv_conf(request.cls.clients[0], request.cls.master)
     tasks.install_client(request.cls.master, request.cls.clients[0])
 
     def teardown_client():

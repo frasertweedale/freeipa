@@ -52,11 +52,26 @@ var nav = {};
                         }
                     ]
                 },
-                { entity: 'group' },
                 { entity: 'host' },
-                { entity: 'hostgroup' },
-                { entity: 'netgroup' },
                 { entity: 'service' },
+                {
+                    entity: 'group',
+                    label: '@i18n:objects.group.groups',
+                    facet: 'search',
+                    children: [
+                        {
+                            entity: 'hostgroup',
+                            facet: 'search',
+                            hidden: true
+                        },
+                        {
+                            entity: 'netgroup',
+                            facet: 'search',
+                            hidden: true
+                        }
+                    ]
+                },
+                { entity: 'idview' },
                 {
                     name: 'automember',
                     label: '@i18n:tabs.automember',
@@ -151,7 +166,25 @@ var nav = {};
                     ]
                 },
                 { entity: 'otptoken' },
-                { entity: 'radiusproxy' }
+                { entity: 'radiusproxy' },
+                {
+                    entity: 'certmaprule',
+                    facet: 'search',
+                    children: [
+                        {
+                            entity: 'certmaprule',
+                            facet: 'search'
+                        },
+                        {
+                            entity: 'certmapconfig',
+                            facet: 'details'
+                        },
+                        {
+                            label: '@i18n:objects.certmap_match.facet_label',
+                            entity: 'certmap_match'
+                        }
+                    ]
+                }
             ]
         },
         {
@@ -182,6 +215,32 @@ var nav = {};
                         { entity: 'dnsserver' },
                         { entity: 'dnsconfig' }
                     ]
+                },
+                {
+                    name: 'vault',
+                    entity: 'vault',
+                    facet: 'search',
+                    children: [
+                        {
+                            entity: 'vault',
+                            facet: 'user_search',
+                            hidden: true
+                        },
+                        {
+                            entity: 'vault',
+                            facet: 'service_search',
+                            hidden: true
+                        },
+                        {
+                            entity: 'vault',
+                            facet: 'shared_search',
+                            hidden: true
+                        },
+                        {
+                            entity: 'vaultconfig',
+                            hidden: true
+                        }
+                    ]
                 }
             ]
         },
@@ -201,7 +260,6 @@ var nav = {};
                     ]
                 },
                 { entity: 'idrange' },
-                { entity: 'idview' },
                 { entity: 'realmdomains' },
                 {
                     name: 'trusts',
@@ -266,7 +324,43 @@ nav.self_service = {
     name: 'self-service',
     items: [
         { entity: 'user' },
-        { entity: 'otptoken' }
+        { entity: 'otptoken' },
+        {
+            name: 'vault',
+            entity: 'vault',
+            facet: 'search',
+            children: [
+                {
+                    entity: 'vault',
+                    facet: 'user_search',
+                    hidden: true
+                },
+                {
+                    entity: 'vault',
+                    facet: 'service_search',
+                    hidden: true
+                },
+                {
+                    entity: 'vault',
+                    facet: 'shared_search',
+                    hidden: true
+                },
+                {
+                    entity: 'vaultconfig',
+                    hidden: true
+                }
+            ]
+        }
+    ]
+};
+
+nav.ad_self_service = {
+    name: 'ad_self_service',
+    items: [
+        {
+            entity: 'idoverrideuser',
+            label: 'Profile'
+        }
     ]
 };
 

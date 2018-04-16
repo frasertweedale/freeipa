@@ -11,6 +11,8 @@ class BaseConstantsNamespace(object):
     DS_USER = 'dirsrv'
     DS_GROUP = 'dirsrv'
     HTTPD_USER = "apache"
+    HTTPD_GROUP = "apache"
+    GSSPROXY_USER = "root"
     IPA_DNS_PACKAGE_NAME = "freeipa-server-dns"
     KDCPROXY_USER = "kdcproxy"
     NAMED_USER = "named"
@@ -25,4 +27,22 @@ class BaseConstantsNamespace(object):
     ODS_GROUP = "ods"
     # nfsd init variable used to enable kerberized NFS
     SECURE_NFS_VAR = "SECURE_NFS"
+    SELINUX_BOOLEAN_ADTRUST = {
+        'samba_portmapper': 'on',
+    }
+    SELINUX_BOOLEAN_HTTPD = {
+        'httpd_can_network_connect': 'on',
+        'httpd_manage_ipa': 'on',
+        'httpd_run_ipa': 'on',
+        'httpd_dbus_sssd': 'on',
+    }
     SSSD_USER = "sssd"
+    # WSGI module override, only used on Fedora
+    MOD_WSGI_PYTHON2 = None
+    MOD_WSGI_PYTHON3 = None
+    # high ciphers without RC4, MD5, TripleDES, pre-shared key, secure
+    # remote password, and DSA cert authentication.
+    TLS_HIGH_CIPHERS = "HIGH:!aNULL:!eNULL:!MD5:!RC4:!3DES:!PSK:!SRP:!aDSS"
+
+
+constants = BaseConstantsNamespace()

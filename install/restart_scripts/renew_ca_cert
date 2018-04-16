@@ -1,4 +1,4 @@
-#!/usr/bin/python2 -E
+#!/usr/bin/python3 -E
 #
 # Authors:
 #   Rob Crittenden <rcritten@redhat.com>
@@ -27,18 +27,22 @@ import tempfile
 import shutil
 import traceback
 
+from ipalib.install import certstore
 from ipapython import ipautil
-from ipalib import api, errors, x509, certstore
+from ipalib import api, errors
+from ipalib import x509
+from ipalib.install.kinit import kinit_keytab
 from ipaserver.install import certs, cainstance, installutils
 from ipaserver.plugins.ldap2 import ldap2
 from ipaplatform import services
 from ipaplatform.paths import paths
+from ipapython.certdb import TrustFlags
 
 
 def _main():
     nickname = sys.argv[1]
 
-    api.bootstrap(in_server=True, context='restart')
+    api.bootstrap(in_server=True, context='restart', confdir=paths.ETC_IPA)
     api.finalize()
 
     dogtag_service = services.knownservices['pki_tomcatd']
@@ -62,7 +66,7 @@ def _main():
 
     # Fetch the new certificate
     db = certs.CertDB(api.env.realm, nssdir=paths.PKI_TOMCAT_ALIAS_DIR)
-    cert = db.get_cert_from_db(nickname, pem=False)
+    cert = db.get_cert_from_db(nickname)
     if not cert:
         syslog.syslog(syslog.LOG_ERR, 'No certificate %s found.' % nickname)
         sys.exit(1)
@@ -71,10 +75,12 @@ def _main():
     try:
         principal = str('host/%s@%s' % (api.env.host, api.env.realm))
         ccache_filename = os.path.join(tmpdir, 'ccache')
-        ipautil.kinit_keytab(principal, paths.KRB5_KEYTAB, ccache_filename)
+        kinit_keytab(principal, paths.KRB5_KEYTAB, ccache_filename)
         os.environ['KRB5CCNAME'] = ccache_filename
 
-        ca = cainstance.CAInstance(host_name=api.env.host, ldapi=False)
+        api.Backend.ldap2.connect()
+
+        ca = cainstance.CAInstance(host_name=api.env.host)
         ca.update_cert_config(nickname, cert)
         if ca.is_renewal_master():
             cainstance.update_people_entry(cert)
@@ -102,7 +108,7 @@ def _main():
                 cfg_path, 'subsystem.select', '=')
             if config == 'New':
                 syslog.syslog(syslog.LOG_NOTICE, "Updating CS.cfg")
-                if x509.is_self_signed(cert, x509.DER):
+                if cert.is_self_signed():
                     installutils.set_directive(
                         cfg_path, 'hierarchy.select', 'Root',
                         quotes=False, separator='=')
@@ -121,7 +127,7 @@ def _main():
 
             # Remove old external CA certificates
             for ca_nick, ca_flags in db.list_certs():
-                if 'u' in ca_flags:
+                if ca_flags.has_key:
                     continue
                 # Delete *all* certificates that use the nickname
                 while True:
@@ -176,11 +182,17 @@ def _main():
                 # Pass Dogtag's self-tests
                 for ca_nick in db.find_root_cert(nickname)[-2:-1]:
                     ca_flags = dict(cc[1:] for cc in ca_certs)[ca_nick]
-                    db.trust_root_cert(ca_nick, 'C' + ca_flags)
+                    usages = ca_flags.usages or set()
+                    ca_flags_modified = TrustFlags(ca_flags.has_key,
+                        True, True,
+                        usages | {x509.EKU_SERVER_AUTH})
+                    db.trust_root_cert(ca_nick, ca_flags_modified)
             finally:
                 if conn is not None and conn.isconnected():
                     conn.disconnect()
     finally:
+        if api.Backend.ldap2.isconnected():
+            api.Backend.ldap2.disconnect()
         shutil.rmtree(tmpdir)
 
     # Now we can start the CA. Using the services start should fire

@@ -7,8 +7,8 @@ import re
 import pytest
 
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.test_integration import tasks
-from ipatests.test_integration.env_config import get_global_config
+from ipatests.pytest_plugins.integration import tasks
+from ipatests.pytest_plugins.integration.env_config import get_global_config
 from ipalib.constants import DOMAIN_SUFFIX_NAME
 from ipatests.util import assert_deepequal
 
@@ -25,26 +25,6 @@ def find_segment(master, replica):
     for segment in allsegments:
         if master.hostname in segment and replica.hostname in segment:
             return '-to-'.join(segment)
-
-
-def remove_segment(master, host1, host2):
-    """
-    This removes a segment between host1 and host2 on master. The function is
-    needed because test_add_remove_segment expects only one segment, but due to
-    track tickete N 6250, the test_topology_updated_on_replica_install_remove
-    leaves 2 topology segments
-    """
-    def wrapper(func):
-        def wrapped(*args, **kwargs):
-            try:
-                func(*args, **kwargs)
-            finally:
-                segment = find_segment(host1, host2)
-                master.run_command(['ipa', 'topologysegment-del',
-                                    DOMAIN_SUFFIX_NAME, segment],
-                                   raiseonerr=False)
-        return wrapped
-    return wrapper
 
 
 @pytest.mark.skipif(config.domain_level == 0, reason=reasoning)
@@ -84,10 +64,7 @@ class TestTopologyOptions(IntegrationTest):
                               )
         return result
 
-    @pytest.mark.xfail(reason="Trac 6250", strict=True)
-    @remove_segment(config.domains[0].master,
-                    config.domains[0].master,
-                    config.domains[0].replicas[1])
+
     def test_topology_updated_on_replica_install_remove(self):
         """
         Install and remove a replica and make sure topology information is
@@ -120,8 +97,11 @@ class TestTopologyOptions(IntegrationTest):
         assert_deepequal(result3.stdout_text,  result4.stdout_text)
         # Now let's check that uninstalling the replica will update the topology
         # info on the rest of replicas.
-        tasks.uninstall_master(self.replicas[1])
+        # first step of uninstallation is removal of the replica on other
+        # master, then it can be uninstalled. Doing it the other way is also
+        # possible, but not reliable - some data might not be replicated.
         tasks.clean_replication_agreement(self.master, self.replicas[1])
+        tasks.uninstall_master(self.replicas[1])
         result5 = self.master.run_command(['ipa', 'topologysegment-find',
                                            DOMAIN_SUFFIX_NAME])
         num_entries = self.noentries_re.search(result5.stdout_text).group(1)
@@ -193,3 +173,146 @@ class TestTopologyOptions(IntegrationTest):
         assert err == "", err
         returncode, error = tasks.destroy_segment(self.master, "%s-to-%s" % replicas)
         assert returncode == 0, error
+
+
+@pytest.mark.skipif(config.domain_level == 0, reason=reasoning)
+class TestCASpecificRUVs(IntegrationTest):
+    num_replicas = 2
+    topology = 'star'
+    username = 'testuser'
+    user_firstname = 'test'
+    user_lastname = 'user'
+
+    def test_delete_ruvs(self):
+        """
+        http://www.freeipa.org/page/V4/Manage_replication_topology_4_4/
+        Test_Plan#Test_case:_clean-ruv_subcommand
+        """
+        replica = self.replicas[0]
+        master = self.master
+        res1 = master.run_command(['ipa-replica-manage', 'list-ruv', '-p',
+                                  master.config.dirman_password])
+        assert(res1.stdout_text.count(replica.hostname) == 2 and
+               "Certificate Server Replica"
+               " Update Vectors" in res1.stdout_text), (
+               "CA-specific RUVs are not displayed")
+        ruvid_re = re.compile(".*%s:389: (\d+).*" % replica.hostname)
+        replica_ruvs = ruvid_re.findall(res1.stdout_text)
+        # Find out the number of RUVids
+        assert(len(replica_ruvs) == 2), (
+            "The output should display 2 RUV ids of the selected replica")
+
+        # Block replication to preserve replica-specific RUVs
+        dashed_domain = master.domain.realm.replace(".", '-')
+        dirsrv_service = "dirsrv@%s.service" % dashed_domain
+        replica.run_command(['systemctl', 'stop', dirsrv_service])
+        try:
+            master.run_command(['ipa-replica-manage', 'clean-ruv',
+                                replica_ruvs[1], '-p',
+                                master.config.dirman_password, '-f'])
+            res2 = master.run_command(['ipa-replica-manage',
+                                       'list-ruv', '-p',
+                                       master.config.dirman_password])
+
+            assert(res2.stdout_text.count(replica.hostname) == 1), (
+                "CA RUV of the replica is still displayed")
+            master.run_command(['ipa-replica-manage', 'clean-ruv',
+                                replica_ruvs[0], '-p',
+                                master.config.dirman_password, '-f'])
+            res3 = master.run_command(['ipa-replica-manage', 'list-ruv', '-p',
+                                       master.config.dirman_password])
+            assert(replica.hostname not in res3.stdout_text), (
+                "replica's RUV is still displayed")
+        finally:
+            replica.run_command(['systemctl', 'start', dirsrv_service])
+
+    def test_replica_uninstall_deletes_ruvs(self):
+        """
+        http://www.freeipa.org/page/V4/Manage_replication_topology_4_4/Test_Plan
+        #Test_case:_.2A-ruv_subcommands_of_ipa-replica-manage_are_extended
+        _to_handle_CA-specific_RUVs
+        """
+        master = self.master
+        replica = self.replicas[1]
+        res1 = master.run_command(['ipa-replica-manage', 'list-ruv', '-p',
+                                  master.config.dirman_password]).stdout_text
+        assert(res1.count(replica.hostname) == 2), (
+            "Did not find proper number of replica hostname (%s) occurrencies"
+            " in the command output: %s" % (replica.hostname, res1))
+        tasks.uninstall_master(replica)
+        res2 = master.run_command(['ipa-replica-manage', 'list-ruv', '-p',
+                                  master.config.dirman_password]).stdout_text
+        assert(replica.hostname not in res2), (
+            "Replica RUVs were not clean during replica uninstallation")
+
+
+class TestReplicaManageDel(IntegrationTest):
+    domain_level = 0
+    topology = 'star'
+    num_replicas = 3
+
+    def test_replica_managed_del_domlevel0(self):
+        """
+        http://www.freeipa.org/page/V4/Manage_replication_topology_4_4/
+        Test_Plan#Test_case:_ipa-replica-manage_del_with_turned_off_replica
+        _under_domain_level_0_keeps_ca-related_RUVs
+        """
+        master = self.master
+        replica = self.replicas[0]
+        replica.run_command(['ipactl', 'stop'])
+        master.run_command(['ipa-replica-manage', 'del', '-f', '-p',
+                            master.config.dirman_password, replica.hostname])
+        result = master.run_command(['ipa-replica-manage', 'list-ruv',
+                                     '-p', master.config.dirman_password])
+        num_ruvs = result.stdout_text.count(replica.hostname)
+        assert(num_ruvs == 1), ("Expected to find 1 replica's RUV, found %s" %
+                                num_ruvs)
+        ruvid_re = re.compile(".*%s:389: (\d+).*" % replica.hostname)
+        replica_ruvs = ruvid_re.findall(result.stdout_text)
+        master.run_command(['ipa-replica-manage', 'clean-ruv', '-f',
+                            '-p', master.config.dirman_password,
+                            replica_ruvs[0]])
+        result2 = master.run_command(['ipa-replica-manage', 'list-ruv',
+                                      '-p', master.config.dirman_password])
+        assert(replica.hostname not in result2.stdout_text), (
+            "Replica's RUV was not properly removed")
+
+    def test_clean_dangling_ruv_multi_ca(self):
+        """
+        http://www.freeipa.org/page/V4/Manage_replication_topology_4_4/
+        Test_Plan#Test_case:_ipa-replica-manage_clean-dangling-ruv_in_a
+        _multi-CA_setup
+        """
+        master = self.master
+        replica = self.replicas[1]
+        replica.run_command(['ipa-server-install', '--uninstall', '-U'])
+        master.run_command(['ipa-replica-manage', 'del', '-f', '-p',
+                            master.config.dirman_password, replica.hostname])
+        result1 = master.run_command(['ipa-replica-manage', 'list-ruv', '-p',
+                                      master.config.dirman_password])
+        ruvid_re = re.compile(".*%s:389: (\d+).*" % replica.hostname)
+        assert(ruvid_re.search(result1.stdout_text)), (
+            "Replica's RUV should not be removed under domain level 0")
+        master.run_command(['ipa-replica-manage', 'clean-dangling-ruv', '-p',
+                            master.config.dirman_password], stdin_text="yes\n")
+        result2 = master.run_command(['ipa-replica-manage', 'list-ruv', '-p',
+                                      master.config.dirman_password])
+        assert(replica.hostname not in result2.stdout_text), (
+            "Replica's RUV was not removed by a clean-dangling-ruv command")
+
+    def test_replica_managed_del_domlevel1(self):
+        """
+        http://www.freeipa.org/page/V4/Manage_replication_topology_4_4/
+        Test_Plan#Test_case:_ipa-replica-manage_del_with_turned_off_replica
+        _under_domain_level_1_removes_ca-related_RUVs
+        """
+        master = self.master
+        replica = self.replicas[2]
+        master.run_command(['ipa', 'domainlevel-set', '1'])
+        replica.run_command(['ipactl', 'stop'])
+        master.run_command(['ipa-replica-manage', 'del', '-f', '-p',
+                            master.config.dirman_password, replica.hostname])
+        result = master.run_command(['ipa-replica-manage', 'list-ruv',
+                                     '-p', master.config.dirman_password])
+        assert(replica.hostname not in result.stdout_text), (
+            "Replica's RUV was not properly removed")

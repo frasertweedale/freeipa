@@ -2,6 +2,7 @@
 # Copyright (C) 2014  FreeIPA Contributors see COPYING for license
 #
 
+import logging
 import os
 import pwd
 import grp
@@ -10,35 +11,28 @@ import ldap
 
 from ipaserver.install import service
 from ipaserver.install import installutils
-from ipapython.ipa_log_manager import root_logger
 from ipapython.dn import DN
-from ipapython import sysrestore, ipautil, ipaldap
+from ipapython import ipautil
 from ipaplatform.constants import constants
 from ipaplatform.paths import paths
 from ipaplatform import services
 from ipalib import errors, api
 
+logger = logging.getLogger(__name__)
+
 
 class ODSExporterInstance(service.Service):
-    def __init__(self, fstore=None, dm_password=None, ldapi=False,
-                 start_tls=False, autobind=ipaldap.AUTOBIND_ENABLED):
-        service.Service.__init__(
-            self, "ipa-ods-exporter",
+    def __init__(self, fstore=None):
+        super(ODSExporterInstance, self).__init__(
+            "ipa-ods-exporter",
             service_desc="IPA OpenDNSSEC exporter daemon",
-            dm_password=dm_password,
-            ldapi=ldapi,
-            autobind=autobind,
-            start_tls=start_tls
+            fstore=fstore,
+            keytab=paths.IPA_ODS_EXPORTER_KEYTAB,
+            service_prefix=u'ipa-ods-exporter'
         )
-        self.dm_password = dm_password
         self.ods_uid = None
         self.ods_gid = None
         self.enable_if_exists = False
-
-        if fstore:
-            self.fstore = fstore
-        else:
-            self.fstore = sysrestore.FileStore(paths.SYSRESTORE)
 
     suffix = ipautil.dn_attribute_property('_suffix')
 
@@ -54,8 +48,6 @@ class ODSExporterInstance(service.Service):
         except Exception:
             pass
 
-        # get a connection to the DS
-        self.ldap_connect()
         # checking status step must be first
         self.step("checking status", self.__check_dnssec_status)
         self.step("setting up DNS Key Exporter", self.__setup_key_exporter)
@@ -79,10 +71,10 @@ class ODSExporterInstance(service.Service):
     def __enable(self):
 
         try:
-            self.ldap_enable('DNSKeyExporter', self.fqdn, self.dm_password,
+            self.ldap_enable('DNSKeyExporter', self.fqdn, None,
                              self.suffix)
         except errors.DuplicateEntry:
-            root_logger.error("DNSKeyExporter service already exists")
+            logger.error("DNSKeyExporter service already exists")
 
     def __setup_key_exporter(self):
         installutils.set_directive(paths.SYSCONFIG_IPA_ODS_EXPORTER,
@@ -93,41 +85,41 @@ class ODSExporterInstance(service.Service):
     def __setup_principal(self):
         assert self.ods_uid is not None
 
-        for f in [paths.IPA_ODS_EXPORTER_CCACHE, paths.IPA_ODS_EXPORTER_KEYTAB]:
+        for f in [paths.IPA_ODS_EXPORTER_CCACHE, self.keytab]:
             try:
                 os.remove(f)
             except OSError:
                 pass
 
-        dns_exporter_principal = "ipa-ods-exporter/" + self.fqdn + "@" + self.realm
-        installutils.kadmin_addprinc(dns_exporter_principal)
+        installutils.kadmin_addprinc(self.principal)
 
         # Store the keytab on disk
-        installutils.create_keytab(paths.IPA_ODS_EXPORTER_KEYTAB, dns_exporter_principal)
-        p = self.move_service(dns_exporter_principal)
+        installutils.create_keytab(paths.IPA_ODS_EXPORTER_KEYTAB,
+                                   self.principal)
+        p = self.move_service(self.principal)
         if p is None:
             # the service has already been moved, perhaps we're doing a DNS reinstall
             dns_exporter_principal_dn = DN(
-                ('krbprincipalname', dns_exporter_principal),
+                ('krbprincipalname', self.principal),
                 ('cn', 'services'), ('cn', 'accounts'), self.suffix)
         else:
             dns_exporter_principal_dn = p
 
         # Make sure access is strictly reserved to the ods user
-        os.chmod(paths.IPA_ODS_EXPORTER_KEYTAB, 0o440)
-        os.chown(paths.IPA_ODS_EXPORTER_KEYTAB, 0, self.ods_gid)
+        os.chmod(self.keytab, 0o440)
+        os.chown(self.keytab, 0, self.ods_gid)
 
         dns_group = DN(('cn', 'DNS Servers'), ('cn', 'privileges'),
                        ('cn', 'pbac'), self.suffix)
         mod = [(ldap.MOD_ADD, 'member', dns_exporter_principal_dn)]
 
         try:
-            self.admin_conn.modify_s(dns_group, mod)
+            api.Backend.ldap2.modify_s(dns_group, mod)
         except ldap.TYPE_OR_VALUE_EXISTS:
             pass
         except Exception as e:
-            root_logger.critical("Could not modify principal's %s entry: %s"
-                                 % (dns_exporter_principal_dn, str(e)))
+            logger.critical("Could not modify principal's %s entry: %s",
+                            dns_exporter_principal_dn, str(e))
             raise
 
         # limit-free connection
@@ -137,10 +129,10 @@ class ODSExporterInstance(service.Service):
                (ldap.MOD_REPLACE, 'nsIdleTimeout', '-1'),
                (ldap.MOD_REPLACE, 'nsLookThroughLimit', '-1')]
         try:
-            self.admin_conn.modify_s(dns_exporter_principal_dn, mod)
+            api.Backend.ldap2.modify_s(dns_exporter_principal_dn, mod)
         except Exception as e:
-            root_logger.critical("Could not set principal's %s LDAP limits: %s"
-                                 % (dns_exporter_principal_dn, str(e)))
+            logger.critical("Could not set principal's %s LDAP limits: %s",
+                            dns_exporter_principal_dn, str(e))
             raise
 
     def __disable_signerd(self):
@@ -158,10 +150,8 @@ class ODSExporterInstance(service.Service):
         self.start()
 
     def remove_service(self):
-        dns_exporter_principal = ("ipa-ods-exporter/%s@%s" % (self.fqdn,
-                                                              self.realm))
         try:
-            api.Command.service_del(dns_exporter_principal)
+            api.Command.service_del(self.principal)
         except errors.NotFound:
             pass
 
@@ -193,5 +183,5 @@ class ODSExporterInstance(service.Service):
         if signerd_running:
             signerd_service.start()
 
-        installutils.remove_keytab(paths.IPA_ODS_EXPORTER_KEYTAB)
+        installutils.remove_keytab(self.keytab)
         installutils.remove_ccache(ccache_path=paths.IPA_ODS_EXPORTER_CCACHE)

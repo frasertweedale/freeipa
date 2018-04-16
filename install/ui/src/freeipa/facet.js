@@ -25,12 +25,14 @@ define([
         'dojo/_base/declare',
         'dojo/_base/lang',
         'dojo/dom-construct',
+        'dojo/topic',
         'dojo/on',
         'dojo/Stateful',
         'dojo/Evented',
         './_base/Singleton_registry',
         './_base/construct',
         './builder',
+        './config',
         './ipa',
         './jquery',
         './navigation',
@@ -43,8 +45,8 @@ define([
         './dialog',
         './field',
         './widget'
-       ], function(declare, lang, construct, on, Stateful, Evented,
-                   Singleton_registry, construct_utils, builder, IPA, $,
+    ], function(declare, lang, construct, topic, on, Stateful, Evented,
+                   Singleton_registry, construct_utils, builder, config, IPA, $,
                    navigation, phases, reg, rpc, su, text, ActionDropdownWidget) {
 
 /**
@@ -1642,6 +1644,20 @@ exp.FacetGroupsWidget = declare([], {
         return el;
     },
 
+    hide_tab: function(tab_name) {
+        var tab = this.get_tab_el(tab_name);
+        if (tab) tab.css('display', 'none');
+    },
+
+    show_tab: function(tab_name) {
+        var tab = this.get_tab_el(tab_name);
+        if (tab) tab.css('display', '');
+    },
+
+    get_tab_el: function(tab_name) {
+        return this.tab_els[tab_name];
+    },
+
     on_click: function(facet) {
         if (this.facet.get_pkeys) {
             var pkeys = this.facet.get_pkeys();
@@ -1819,6 +1835,14 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
     var that = IPA.facet(spec, no_init);
 
     /**
+     * Sets whether table on the facet will or will not show items with the
+     * same key.
+     *
+     * @property {boolean}
+     */
+    that.show_values_with_dup_key = spec.show_values_with_dup_key || false;
+
+    /**
      * Names of additional row attributes which will be send to another facet
      * during navigation as URL parameters.
      *
@@ -1843,6 +1867,14 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
      * Get complete records on search, otherwise pkeys only.
      */
     that.search_all_entries = spec.search_all_entries;
+
+    /**
+     * Attribute from *_find command which will be used in batch *_show command
+     * which is called for each row.
+     *
+     * @property {String}
+     */
+    that.show_command_additional_attr = spec.show_command_additional_attr || null;
 
     /**
      * Member resolution(no_member: true ) in rpc request is skipped by default
@@ -2050,11 +2082,13 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
      *
      * @protected
      * @param {Object} data RPC command data
-     * @return {ordered_map} record map
+     * @return {Object} ordered_maps with records and with pkeys. keys
+     *                              are composed from pkey and index.
      */
     that.get_records_map = function(data) {
 
         var records_map = $.ordered_map();
+        var pkeys_map = $.ordered_map();
 
         var result = data.result.result;
         var pkey_name = that.managed_entity.metadata.primary_key ||
@@ -2065,11 +2099,21 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
             var record = result[i];
             var pkey = adapter.load(record, pkey_name)[0];
             if (that.filter_records(records_map, pkey, record)) {
-                records_map.put(pkey, record);
+                // This solution allows to show tables where are the same
+                // primary keys. (i.e. {User|Service} Vaults)
+                var compound_pkey = pkey;
+                if (that.show_values_with_dup_key) {
+                    compound_pkey = pkey + i;
+                }
+                records_map.put(compound_pkey, record);
+                pkeys_map.put(compound_pkey, pkey);
             }
         }
 
-        return records_map;
+        return {
+            records_map: records_map,
+            pkeys_map: pkeys_map
+        };
     };
 
     /**
@@ -2086,7 +2130,9 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
     that.load_page = function(data) {
 
         // get primary keys (and the complete records if search_all_entries is true)
-        var records_map = that.get_records_map(data);
+        var records = that.get_records_map(data);
+        var records_map = records.records_map;
+        var pkeys_map = records.pkeys_map;
 
         var total = records_map.length;
         that.table.total_pages = total ? Math.ceil(total / that.table.page_length) : 1;
@@ -2122,11 +2168,11 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
 
         // sort map based on primary keys
         if (that.sort_enabled) {
-            records_map = records_map.sort();
+            pkeys_map = pkeys_map.sort();
         }
 
         // trim map leaving the entries visible in the current page only
-        records_map = records_map.slice(start-1, end);
+        pkeys_map = pkeys_map.slice(start-1, end);
 
         var columns = that.table.columns.values;
         if (columns.length == 1) { // show primary keys only
@@ -2142,17 +2188,20 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
 
         // get the complete records
         that.get_records(
-            records_map.keys,
+            records_map,
+            pkeys_map,
             function(data, text_status, xhr) {
                 var results = data.result.results;
-                for (var i=0; i<records_map.length; i++) {
-                    var pkey = records_map.keys[i];
+                var show_records_map = $.ordered_map();
+                for (var i=0; i<pkeys_map.length; i++) {
+                    var pkey = pkeys_map.keys[i];
                     var record = records_map.get(pkey);
                     // merge the record obtained from the refresh()
                     // with the record obtained from get_records()
                     $.extend(record, results[i].result);
+                    show_records_map.put(pkey, record);
                 }
-                that.load_records(records_map.values);
+                that.load_records(show_records_map.values);
             },
             function(xhr, text_status, error_thrown) {
                 that.load_records([]);
@@ -2225,7 +2274,9 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
      * @param {Function} on_success command success handler
      * @param {Function} on_failure command error handler
      */
-    that.create_get_records_command = function(pkeys, on_success, on_error) {
+    that.create_get_records_command = function(records, pkeys_list, on_success, on_error) {
+
+        var pkeys = pkeys_list.keys;
 
         var batch = rpc.batch_command({
             name: that.get_records_command_name(),
@@ -2235,12 +2286,17 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
 
         for (var i=0; i<pkeys.length; i++) {
             var pkey = pkeys[i];
+            var call_pkey = pkeys_list.get(pkey);
 
             var command = rpc.command({
                 entity: that.table.entity.name,
                 method: 'show',
-                args: [pkey]
+                args: [call_pkey]
             });
+
+            if (that.show_command_additional_attr) {
+                that.extend_get_records_command(command, records, pkey);
+            }
 
             if (!that.always_request_members && that.table.entity.has_members()) {
                 command.set_options({no_members: true});
@@ -2252,17 +2308,35 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
         return batch;
     };
 
+
+    /**
+     * This allows to use pagination in situations when for loading whole search
+     * page you need *_show command with
+     *
+     */
+    that.extend_get_records_command = function(command, records, pkey) {
+        var record = records.get(pkey);
+        var item = record[that.show_command_additional_attr];
+        if (item) {
+            var temp_option = {};
+            temp_option[that.show_command_additional_attr] = item;
+            command.set_options(temp_option);
+        }
+    };
+
+
+
     /**
      * Execute command for obtaining complete records
      *
      * @protected
-     * @param {Array.<string>} pkeys primary keys
+     * @param records_map of all records
      * @param {Function} on_success command success handler
      * @param {Function} on_failure command error handler
      */
-    that.get_records = function(pkeys, on_success, on_error) {
+    that.get_records = function(records, pkeys, on_success, on_error) {
 
-        var batch = that.create_get_records_command(pkeys, on_success, on_error);
+        var batch = that.create_get_records_command(records, pkeys, on_success, on_error);
 
         batch.execute();
     };
@@ -2359,6 +2433,14 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
             selectable: that.selectable && !that.read_only
         });
 
+        topic.subscribe("change-pagination", function() {
+            that.table.page_length = config.get('table_page_size');
+
+            that.set_expired_flag();
+
+            if (that.is_shown) that.refresh();
+        });
+
         var columns = that.columns.values;
         for (var i=0; i<columns.length; i++) {
             var column = columns[i];
@@ -2419,6 +2501,12 @@ exp.table_facet = IPA.table_facet = function(spec, no_init) {
         for (var i=0; i<columns.length; i++) {
             that.create_column(columns[i]);
         }
+    };
+
+    that.fetch_records = function() {
+        if (!that.table) return null;
+
+        return that.table.records;
     };
 
     if (!no_init) that.init_table_columns();

@@ -25,15 +25,14 @@ from __future__ import print_function
 import os
 import shutil
 import tempfile
+import unittest
 
-import nose
 import six
 import pytest
 
 from ipatests.i18n import create_po, po_file_iterate
 from ipalib.request import context
 from ipalib import text
-from ipapython.ipautil import file_exists
 
 if six.PY3:
     unicode = str
@@ -52,11 +51,36 @@ def test_create_translation():
 
 
 class test_TestLang(object):
+    lang_env_vars = {'LC_ALL', 'LC_MESSAGES', 'LANGUAGE', 'LANG'}
+
+    def setup_lang(self):
+        """
+        Set all env variables used by gettext to localize translation files
+        to xh_ZA
+        """
+        self.lang = 'xh_ZA'
+        self.saved_locale = {
+            k: v for k, v in os.environ.items() if k in self.lang_env_vars}
+
+        os.environ.update(
+            {env_var: self.lang for env_var in self.lang_env_vars}
+        )
+
+    def teardown_lang(self):
+        """
+        Revert the locale settings to original values. If the original env
+        variable was not set before, it will be popped off os.environ
+        """
+        for env_var in self.lang_env_vars:
+            if env_var not in self.saved_locale:
+                os.environ.pop(env_var, None)
+
+        os.environ.update(self.saved_locale)
+
     def setup(self):
         self.tmp_dir = None
-        self.saved_lang  = None
+        self.setup_lang()
 
-        self.lang = 'xh_ZA'
         self.domain = 'ipa'
 
         self.pot_basename = '%s.pot' % self.domain
@@ -64,7 +88,6 @@ class test_TestLang(object):
         self.mo_basename = '%s.mo' % self.domain
 
         self.tmp_dir = tempfile.mkdtemp()
-        self.saved_lang  = os.environ['LANG']
 
         self.locale_dir = os.path.join(self.tmp_dir, 'test_locale')
         self.msg_dir = os.path.join(self.locale_dir, self.lang, 'LC_MESSAGES')
@@ -79,22 +102,23 @@ class test_TestLang(object):
 
         result = create_po(self.pot_file, self.po_file, self.mo_file)
         if result:
-            raise nose.SkipTest('Unable to create po file "%s" & mo file "%s" from pot file "%s"' %
-                                (self.po_file, self.mo_file, self.pot_file))
+            raise unittest.SkipTest(
+                'Unable to create po file "%s" & mo file "%s" from pot '
+                'file "%s"' % (self.po_file, self.mo_file, self.pot_file)
+            )
 
-        if not file_exists(self.po_file):
-            raise nose.SkipTest(
+        if not os.path.isfile(self.po_file):
+            raise unittest.SkipTest(
                 'Test po file unavailable: {}'.format(self.po_file))
 
-        if not file_exists(self.mo_file):
-            raise nose.SkipTest(
+        if not os.path.isfile(self.mo_file):
+            raise unittest.SkipTest(
                 'Test mo file unavailable: {}'.format(self.mo_file))
 
         self.po_file_iterate = po_file_iterate
 
     def teardown(self):
-        if self.saved_lang is not None:
-            os.environ['LANG'] = self.saved_lang
+        self.teardown_lang()
 
         if self.tmp_dir is not None:
             shutil.rmtree(self.tmp_dir)
@@ -107,7 +131,6 @@ class test_TestLang(object):
         # but the setlocale function demands the locale be a valid
         # known locale, Zambia Xhosa is a reasonable choice :)
 
-        os.environ['LANG'] = self.lang
 
         # Create a gettext translation object specifying our domain as
         # 'ipa' and the locale_dir as 'test_locale' (i.e. where to

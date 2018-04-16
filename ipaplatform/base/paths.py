@@ -21,20 +21,16 @@
 This base platform module exports default filesystem paths.
 '''
 
-import os
-
 
 class BasePathNamespace(object):
     BASH = "/bin/bash"
-    BIN_FALSE = "/bin/false"
     BIN_HOSTNAMECTL = "/bin/hostnamectl"
+    ECHO = "/bin/echo"
+    GZIP = "/usr/bin/gzip"
     LS = "/bin/ls"
     SH = "/bin/sh"
     SYSTEMCTL = "/bin/systemctl"
     TAR = "/bin/tar"
-    BIN_TRUE = "/bin/true"
-    DEV_NULL = "/dev/null"
-    DEV_STDIN = "/dev/stdin"
     AUTOFS_LDAP_AUTH_CONF = "/etc/autofs_ldap_auth.conf"
     ETC_DIRSRV = "/etc/dirsrv"
     DS_KEYTAB = "/etc/dirsrv/ds.keytab"
@@ -45,8 +41,8 @@ class BasePathNamespace(object):
     HOSTS = "/etc/hosts"
     ETC_HTTPD_DIR = "/etc/httpd"
     HTTPD_ALIAS_DIR = "/etc/httpd/alias"
-    ALIAS_CACERT_ASC = "/etc/httpd/alias/cacert.asc"
-    ALIAS_PWDFILE_TXT = "/etc/httpd/alias/pwdfile.txt"
+    GSSAPI_SESSION_KEY = "/etc/httpd/alias/ipasession.key"
+    OLD_KRA_AGENT_PEM = "/etc/httpd/alias/kra-agent.pem"
     HTTPD_CONF_D_DIR = "/etc/httpd/conf.d/"
     HTTPD_IPA_KDCPROXY_CONF = "/etc/ipa/kdcproxy/ipa-kdc-proxy.conf"
     HTTPD_IPA_KDCPROXY_CONF_SYMLINK = "/etc/httpd/conf.d/ipa-kdc-proxy.conf"
@@ -55,7 +51,13 @@ class BasePathNamespace(object):
     HTTPD_IPA_CONF = "/etc/httpd/conf.d/ipa.conf"
     HTTPD_NSS_CONF = "/etc/httpd/conf.d/nss.conf"
     HTTPD_SSL_CONF = "/etc/httpd/conf.d/ssl.conf"
-    IPA_KEYTAB = "/etc/httpd/conf/ipa.keytab"
+    HTTPD_CERT_FILE = "/var/lib/ipa/certs/httpd.crt"
+    HTTPD_KEY_FILE = "/var/lib/ipa/private/httpd.key"
+    HTTPD_PASSWD_FILE_FMT = "/var/lib/ipa/passwds/{host}-443-RSA"
+    # only used on Fedora
+    HTTPD_IPA_WSGI_MODULES_CONF = None
+    OLD_IPA_KEYTAB = "/etc/httpd/conf/ipa.keytab"
+    HTTP_KEYTAB = "/var/lib/ipa/gssproxy/http.keytab"
     HTTPD_PASSWORD_CONF = "/etc/httpd/conf/password.conf"
     IDMAPD_CONF = "/etc/idmapd.conf"
     ETC_IPA = "/etc/ipa"
@@ -82,9 +84,11 @@ class BasePathNamespace(object):
     NAMED_ROOT_KEY = "/etc/named.root.key"
     NAMED_BINDKEYS_FILE = "/etc/named.iscdlv.key"
     NAMED_MANAGED_KEYS_DIR = "/var/named/dynamic"
+    NAMED_CRYPTO_POLICY_FILE = None
     NSLCD_CONF = "/etc/nslcd.conf"
     NSS_LDAP_CONF = "/etc/nss_ldap.conf"
     NSSWITCH_CONF = "/etc/nsswitch.conf"
+    CHRONY_CONF = "/etc/chrony.conf"
     NTP_CONF = "/etc/ntp.conf"
     NTP_STEP_TICKERS = "/etc/ntp/step-tickers"
     ETC_OPENDNSSEC_DIR = "/etc/opendnssec"
@@ -99,12 +103,14 @@ class BasePathNamespace(object):
     NSS_DB_DIR = "/etc/pki/nssdb"
     PKI_TOMCAT = "/etc/pki/pki-tomcat"
     PKI_TOMCAT_ALIAS_DIR = "/etc/pki/pki-tomcat/alias"
+    PKI_TOMCAT_ALIAS_PWDFILE_TXT = "/etc/pki/pki-tomcat/alias/pwdfile.txt"
     PKI_TOMCAT_PASSWORD_CONF = "/etc/pki/pki-tomcat/password.conf"
     ETC_REDHAT_RELEASE = "/etc/redhat-release"
     RESOLV_CONF = "/etc/resolv.conf"
     SAMBA_KEYTAB = "/etc/samba/samba.keytab"
     SMB_CONF = "/etc/samba/smb.conf"
     LIMITS_CONF = "/etc/security/limits.conf"
+    SSH_CONFIG_DIR = "/etc/ssh"
     SSH_CONFIG = "/etc/ssh/ssh_config"
     SSHD_CONFIG = "/etc/ssh/sshd_config"
     SSSD_CONF = "/etc/sssd/sssd.conf"
@@ -141,7 +147,8 @@ class BasePathNamespace(object):
     ROOT_IPA_CACHE = "/root/.ipa_cache"
     ROOT_PKI = "/root/.pki"
     DOGTAG_ADMIN_P12 = "/root/ca-agent.p12"
-    KRA_AGENT_PEM = "/etc/httpd/alias/kra-agent.pem"
+    RA_AGENT_PEM = "/var/lib/ipa/ra-agent.pem"
+    RA_AGENT_KEY = "/var/lib/ipa/ra-agent.key"
     CACERT_P12 = "/root/cacert.p12"
     ROOT_IPA_CSR = "/root/ipa.csr"
     NAMED_PID = "/run/named/named.pid"
@@ -157,17 +164,19 @@ class BasePathNamespace(object):
     PKCS12EXPORT = "/usr/bin/PKCS12Export"
     CERTUTIL = "/usr/bin/certutil"
     CHROMIUM_BROWSER = "/usr/bin/chromium-browser"
-    DS_NEWINST_PL = "/usr/bin/ds_newinst.pl"
     FIREFOX = "/usr/bin/firefox"
     GETCERT = "/usr/bin/getcert"
     GPG = "/usr/bin/gpg"
     GPG_AGENT = "/usr/bin/gpg-agent"
     IPA_GETCERT = "/usr/bin/ipa-getcert"
+    KADMIN_LOCAL = '/usr/sbin/kadmin.local'
     KDESTROY = "/usr/bin/kdestroy"
     KINIT = "/usr/bin/kinit"
+    KLIST = "/usr/bin/klist"
     BIN_KVNO = "/usr/bin/kvno"
     LDAPMODIFY = "/usr/bin/ldapmodify"
     LDAPPASSWD = "/usr/bin/ldappasswd"
+    MODUTIL = "/usr/bin/modutil"
     NET = "/usr/bin/net"
     BIN_NISDOMAINNAME = "/usr/bin/nisdomainname"
     NSUPDATE = "/usr/bin/nsupdate"
@@ -175,8 +184,6 @@ class BasePathNamespace(object):
     ODS_SIGNER = "/usr/sbin/ods-signer"
     OPENSSL = "/usr/bin/openssl"
     PK12UTIL = "/usr/bin/pk12util"
-    SETPASSWD = "/usr/bin/setpasswd"
-    SIGNTOOL = "/usr/bin/signtool"
     SOFTHSM2_UTIL = "/usr/bin/softhsm2-util"
     SSLGET = "/usr/bin/sslget"
     SSS_SSH_AUTHORIZEDKEYS = "/usr/bin/sss_ssh_authorizedkeys"
@@ -199,16 +206,20 @@ class BasePathNamespace(object):
     PAM_KRB5_SO_64 = "/usr/lib64/security/pam_krb5.so"
     DOGTAG_IPA_CA_RENEW_AGENT_SUBMIT = "/usr/libexec/certmonger/dogtag-ipa-ca-renew-agent-submit"
     DOGTAG_IPA_RENEW_AGENT_SUBMIT = "/usr/libexec/certmonger/dogtag-ipa-renew-agent-submit"
+    CERTMONGER_DOGTAG_SUBMIT = "/usr/libexec/certmonger/dogtag-submit"
     IPA_SERVER_GUARD = "/usr/libexec/certmonger/ipa-server-guard"
     GENERATE_RNDC_KEY = "/usr/libexec/generate-rndc-key.sh"
     IPA_DNSKEYSYNCD_REPLICA = "/usr/libexec/ipa/ipa-dnskeysync-replica"
     IPA_DNSKEYSYNCD = "/usr/libexec/ipa/ipa-dnskeysyncd"
     IPA_HTTPD_KDCPROXY = "/usr/libexec/ipa/ipa-httpd-kdcproxy"
     IPA_ODS_EXPORTER = "/usr/libexec/ipa/ipa-ods-exporter"
+    IPA_HTTPD_PASSWD_READER = "/usr/libexec/ipa/ipa-httpd-pwdreader"
     DNSSEC_KEYFROMLABEL = "/usr/sbin/dnssec-keyfromlabel-pkcs11"
     GETSEBOOL = "/usr/sbin/getsebool"
     GROUPADD = "/usr/sbin/groupadd"
+    USERMOD = "/usr/sbin/usermod"
     HTTPD = "/usr/sbin/httpd"
+    IPA_CLIENT_AUTOMOUNT = "/usr/sbin/ipa-client-automount"
     IPA_CLIENT_INSTALL = "/usr/sbin/ipa-client-install"
     IPA_DNS_INSTALL = "/usr/sbin/ipa-dns-install"
     SBIN_IPA_JOIN = "/usr/sbin/ipa-join"
@@ -217,7 +228,8 @@ class BasePathNamespace(object):
     IPACTL = "/usr/sbin/ipactl"
     NAMED = "/usr/sbin/named"
     NAMED_PKCS11 = "/usr/sbin/named-pkcs11"
-    NTPD = "/usr/sbin/ntpd"
+    CHRONYC = "/usr/bin/chronyc"
+    CHRONYD = "/usr/sbin/chronyd"
     PKIDESTROY = "/usr/sbin/pkidestroy"
     PKISPAWN = "/usr/sbin/pkispawn"
     PKI = "/usr/bin/pki"
@@ -228,6 +240,7 @@ class BasePathNamespace(object):
     SETUP_DS_PL = "/usr/sbin/setup-ds.pl"
     SMBD = "/usr/sbin/smbd"
     USERADD = "/usr/sbin/useradd"
+    FONTS_DIR = "/usr/share/fonts"
     USR_SHARE_IPA_DIR = "/usr/share/ipa/"
     CA_TOPOLOGY_ULDIF = "/usr/share/ipa/ca-topology.uldif"
     IPA_HTML_DIR = "/usr/share/ipa/html"
@@ -237,8 +250,8 @@ class BasePathNamespace(object):
     HTML_KRBREALM_CON = "/usr/share/ipa/html/krbrealm.con"
     NIS_ULDIF = "/usr/share/ipa/nis.uldif"
     NIS_UPDATE_ULDIF = "/usr/share/ipa/nis-update.uldif"
-    IPA_PLUGINS = "/usr/share/ipa/plugins"
-    SCHEMA_COMPAT_ULDIF = "/usr/share/ipa/schema_compat.uldif"
+    SCHEMA_COMPAT_ULDIF = "/usr/share/ipa/updates/91-schema_compat.update"
+    SCHEMA_COMPAT_POST_ULDIF = "/usr/share/ipa/schema_compat_post.uldif"
     IPA_JS_PLUGINS_DIR = "/usr/share/ipa/ui/js/plugins"
     UPDATES_DIR = "/usr/share/ipa/updates/"
     DICT_WORDS = "/usr/share/dict/words"
@@ -249,7 +262,8 @@ class BasePathNamespace(object):
     KRB5KDC_KADM5_ACL = "/var/kerberos/krb5kdc/kadm5.acl"
     KRB5KDC_KADM5_KEYTAB = "/var/kerberos/krb5kdc/kadm5.keytab"
     KRB5KDC_KDC_CONF = "/var/kerberos/krb5kdc/kdc.conf"
-    KDC_PEM = "/var/kerberos/krb5kdc/kdc.pem"
+    KDC_CERT = "/var/kerberos/krb5kdc/kdc.crt"
+    KDC_KEY = "/var/kerberos/krb5kdc/kdc.key"
     VAR_LIB = "/var/lib"
     AUTHCONFIG_LAST = "/var/lib/authconfig/last"
     VAR_LIB_CERTMONGER_DIR = "/var/lib/certmonger"
@@ -272,6 +286,8 @@ class BasePathNamespace(object):
     DNSSEC_TOKENS_DIR = "/var/lib/ipa/dnssec/tokens"
     DNSSEC_SOFTHSM_PIN = "/var/lib/ipa/dnssec/softhsm_pin"
     IPA_CA_CSR = "/var/lib/ipa/ca.csr"
+    IPA_CACERT_MANAGE = "/usr/sbin/ipa-cacert-manage"
+    IPA_CERTUPDATE = "/usr/sbin/ipa-certupdate"
     PKI_CA_PUBLISH_DIR = "/var/lib/ipa/pki-ca/publish"
     REPLICA_INFO_TEMPLATE = "/var/lib/ipa/replica-info-%s"
     REPLICA_INFO_GPG_TEMPLATE = "/var/lib/ipa/replica-info-%s.gpg"
@@ -284,8 +300,6 @@ class BasePathNamespace(object):
     CA_BACKUP_KEYS_P12 = "/var/lib/pki/pki-tomcat/alias/ca_backup_keys.p12"
     KRA_BACKUP_KEYS_P12 = "/var/lib/pki/pki-tomcat/alias/kra_backup_keys.p12"
     CA_CS_CFG_PATH = "/var/lib/pki/pki-tomcat/conf/ca/CS.cfg"
-    CAJARSIGNINGCERT_CFG = (
-        "/var/lib/pki/pki-tomcat/ca/profiles/ca/caJarSigningCert.cfg")
     CASIGNEDLOGCERT_CFG = (
         "/var/lib/pki/pki-tomcat/ca/profiles/ca/caSignedLogCert.cfg")
     KRA_CS_CFG_PATH = "/var/lib/pki/pki-tomcat/conf/kra/CS.cfg"
@@ -296,6 +310,7 @@ class BasePathNamespace(object):
     SSSD_MC_PASSWD = "/var/lib/sss/mc/passwd"
     SSSD_PUBCONF_KNOWN_HOSTS = "/var/lib/sss/pubconf/known_hosts"
     SSSD_PUBCONF_KRB5_INCLUDE_D_DIR = "/var/lib/sss/pubconf/krb5.include.d/"
+    VAR_LOG_AUDIT = "/var/log/audit/audit.log"
     DIRSRV_LOCK_DIR = "/var/lock/dirsrv"
     VAR_LOG_DIRSRV_INSTANCE_TEMPLATE = "/var/log/dirsrv/slapd-%s"
     SLAPD_INSTANCE_ACCESS_LOG_TEMPLATE = "/var/log/dirsrv/slapd-%s/access"
@@ -311,10 +326,10 @@ class BasePathNamespace(object):
     IPARESTORE_LOG = "/var/log/iparestore.log"
     IPASERVER_INSTALL_LOG = "/var/log/ipaserver-install.log"
     IPASERVER_KRA_INSTALL_LOG = "/var/log/ipaserver-kra-install.log"
-    IPASERVER_KRA_UNINSTALL_LOG = "/var/log/ipaserver-kra-uninstall.log"
     IPASERVER_UNINSTALL_LOG = "/var/log/ipaserver-uninstall.log"
     IPAUPGRADE_LOG = "/var/log/ipaupgrade.log"
     KADMIND_LOG = "/var/log/kadmind.log"
+    KRB5KDC_LOG = "/var/log/krb5kdc.log"
     MESSAGES = "/var/log/messages"
     VAR_LOG_PKI_DIR = "/var/log/pki/"
     TOMCAT_TOPLEVEL_DIR = "/var/log/pki/pki-tomcat"
@@ -331,11 +346,12 @@ class BasePathNamespace(object):
     OPENDNSSEC_KASP_DB = "/var/opendnssec/kasp.db"
     IPA_ODS_EXPORTER_CCACHE = "/var/opendnssec/tmp/ipa-ods-exporter.ccache"
     VAR_RUN_DIRSRV_DIR = "/var/run/dirsrv"
-    KRB5CC_HTTPD = "/var/run/httpd/ipa/krbcache/krb5ccache"
+    IPA_CCACHES = "/var/run/ipa/ccaches"
+    HTTP_CCACHE = "/var/lib/ipa/gssproxy/http.ccache"
+    CA_BUNDLE_PEM = "/var/lib/ipa-client/pki/ca-bundle.pem"
+    KDC_CA_BUNDLE_PEM = "/var/lib/ipa-client/pki/kdc-ca-bundle.pem"
     IPA_RENEWAL_LOCK = "/var/run/ipa/renewal.lock"
     SVC_LIST_FILE = "/var/run/ipa/services.list"
-    IPA_MEMCACHED_DIR = "/var/run/ipa_memcached"
-    VAR_RUN_IPA_MEMCACHED = "/var/run/ipa_memcached/ipa_memcached"
     KRB5CC_SAMBA = "/var/run/samba/krb5cc_samba"
     SLAPD_INSTANCE_SOCKET_TEMPLATE = "/var/run/slapd-%s.socket"
     ALL_SLAPD_INSTANCE_SOCKETS = "/var/run/slapd-*.socket"
@@ -350,22 +366,21 @@ class BasePathNamespace(object):
     NETWORK_MANAGER_CONFIG_DIR = '/etc/NetworkManager/conf.d'
     IPA_CUSTODIA_CONF_DIR = '/etc/ipa/custodia'
     IPA_CUSTODIA_CONF = '/etc/ipa/custodia/custodia.conf'
+    IPA_CUSTODIA_KEYS = '/etc/ipa/custodia/server.keys'
     IPA_CUSTODIA_SOCKET = '/run/httpd/ipa-custodia.sock'
     IPA_CUSTODIA_AUDIT_LOG = '/var/log/ipa-custodia.audit.log'
     IPA_GETKEYTAB = '/usr/sbin/ipa-getkeytab'
     EXTERNAL_SCHEMA_DIR = '/usr/share/ipa/schema.d'
+    GSSPROXY_CONF = '/etc/gssproxy/10-ipa.conf'
+    KRB5CC_HTTPD = '/tmp/krb5cc-httpd'
+    IF_INET6 = '/proc/net/if_inet6'
+    WSGI_PREFIX_DIR = "/run/httpd/wsgi"
+    AUTHCONFIG = None
+    IPA_SERVER_UPGRADE = '/usr/sbin/ipa-server-upgrade'
+    KEYCTL = '/usr/bin/keyctl'
+    GETENT = '/usr/bin/getent'
+    SSHD = '/usr/sbin/sshd'
+    SSSCTL = '/usr/sbin/sssctl'
 
-    @property
-    def USER_CACHE_PATH(self):
-        return (
-            os.environ.get('XDG_CACHE_HOME') or
-            os.path.join(
-                os.environ.get(
-                    'HOME',
-                    os.path.expanduser('~')
-                ),
-                '.cache'
-            )
-        )
 
-path_namespace = BasePathNamespace
+paths = BasePathNamespace()

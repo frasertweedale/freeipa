@@ -1,17 +1,16 @@
 NULL =
 
-PLUGIN_COMMON_DIR=../common
+PLUGIN_COMMON_DIR = $(srcdir)/../common
 
 AM_CPPFLAGS =							\
-	-I.							\
 	-I$(srcdir)						\
 	-I$(PLUGIN_COMMON_DIR)					\
-	-I/usr/include/dirsrv					\
 	-DPREFIX=\""$(prefix)"\" 				\
 	-DBINDIR=\""$(bindir)"\"				\
 	-DLIBDIR=\""$(libdir)"\" 				\
 	-DLIBEXECDIR=\""$(libexecdir)"\"			\
 	-DDATADIR=\""$(datadir)"\"				\
+	$(DIRSRV_CFLAGS)					\
 	$(LDAP_CFLAGS)					\
 	$(WARN_CFLAGS)						\
 	$(NULL)
@@ -44,6 +43,9 @@ libipa_sidgen_task_la_LIBADD = 	\
 	$(LDAP_LIBS)		\
 	$(NULL)
 
+noinst_HEADERS =	\
+	ipa_sidgen.h
+
 appdir = $(IPA_DATA_DIR)
 app_DATA =				\
 	ipa-sidgen-conf.ldif		\
@@ -54,7 +56,3 @@ app_DATA =				\
 EXTRA_DIST =			\
 	$(app_DATA)		\
 	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	Makefile.in

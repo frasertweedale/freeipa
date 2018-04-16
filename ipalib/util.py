@@ -26,6 +26,7 @@ from __future__ import (
     print_function,
 )
 
+import logging
 import os
 import socket
 import re
@@ -33,7 +34,11 @@ import decimal
 import dns
 import encodings
 import sys
-from weakref import WeakKeyDictionary
+import ssl
+import termios
+import fcntl
+import struct
+import subprocess
 
 import netaddr
 from dns import resolver, rdatatype
@@ -42,17 +47,38 @@ from dns.resolver import NXDOMAIN
 from netaddr.core import AddrFormatError
 import six
 
+try:
+    from httplib import HTTPSConnection
+except ImportError:
+    # Python 3
+    from http.client import HTTPSConnection
+
 from ipalib import errors, messages
-from ipalib.constants import DOMAIN_LEVEL_0
+from ipalib.constants import (
+    DOMAIN_LEVEL_0,
+    TLS_VERSIONS, TLS_VERSION_MINIMAL
+)
 from ipalib.text import _
+from ipaplatform.constants import constants
+from ipaplatform.paths import paths
 from ipapython.ssh import SSHPublicKey
 from ipapython.dn import DN, RDN
 from ipapython.dnsutil import DNSName
 from ipapython.dnsutil import resolve_ip_addresses
-from ipapython.ipa_log_manager import root_logger
+from ipapython.admintool import ScriptError
+
+if sys.version_info >= (3, 2):
+    import reprlib  # pylint: disable=import-error
+else:
+    reprlib = None
 
 if six.PY3:
     unicode = str
+
+_IPA_CLIENT_SYSRESTORE = "/var/lib/ipa-client/sysrestore"
+_IPA_DEFAULT_CONF = "/etc/ipa/default.conf"
+
+logger = logging.getLogger(__name__)
 
 
 def json_serialize(obj):
@@ -118,7 +144,8 @@ def normalize_name(name):
 
 def isvalid_base64(data):
     """
-    Validate the incoming data as valid base64 data or not.
+    Validate the incoming data as valid base64 data or not. This is only
+    used in the ipalib.Parameters module which expects ``data`` to be unicode.
 
     The character set must only include of a-z, A-Z, 0-9, + or / and
     be padded with = to be a length divisible by 4 (so only 0-2 =s are
@@ -136,6 +163,23 @@ def isvalid_base64(data):
         return False
     else:
         return True
+
+
+def strip_csr_header(csr):
+    """
+    Remove the header and footer (and surrounding material) from a CSR.
+    """
+    headerlen = 40
+    s = csr.find(b"-----BEGIN NEW CERTIFICATE REQUEST-----")
+    if s == -1:
+        headerlen = 36
+        s = csr.find(b"-----BEGIN CERTIFICATE REQUEST-----")
+    if s >= 0:
+        e = csr.find(b"-----END")
+        csr = csr[s + headerlen:e]
+
+    return csr
+
 
 def validate_ipaddr(ipaddr):
     """
@@ -160,7 +204,7 @@ def check_writable_file(filename):
     if filename is None:
         raise errors.FileError(reason=_('Filename is empty'))
     try:
-        if os.path.exists(filename):
+        if os.path.isfile(filename):
             if not os.access(filename, os.W_OK):
                 raise errors.FileError(reason=_('Permission denied: %(file)s') % dict(file=filename))
         else:
@@ -185,6 +229,141 @@ def normalize_zone(zone):
         return zone + '.'
     else:
         return zone
+
+
+def get_proper_tls_version_span(tls_version_min, tls_version_max):
+    """
+    This function checks whether the given TLS versions are known in
+    FreeIPA and that these versions fulfill the requirements for minimal
+    TLS version (see
+    `ipalib.constants: TLS_VERSIONS, TLS_VERSION_MINIMAL`).
+
+    :param tls_version_min:
+        the lower value in the TLS min-max span, raised to the lowest
+        allowed value if too low
+    :param tls_version_max:
+        the higher value in the TLS min-max span, raised to tls_version_min
+        if lower than TLS_VERSION_MINIMAL
+    :raises: ValueError
+    """
+    min_allowed_idx = TLS_VERSIONS.index(TLS_VERSION_MINIMAL)
+
+    try:
+        min_version_idx = TLS_VERSIONS.index(tls_version_min)
+    except ValueError:
+        raise ValueError("tls_version_min ('{val}') is not a known "
+                         "TLS version.".format(val=tls_version_min))
+
+    try:
+        max_version_idx = TLS_VERSIONS.index(tls_version_max)
+    except ValueError:
+        raise ValueError("tls_version_max ('{val}') is not a known "
+                         "TLS version.".format(val=tls_version_max))
+
+    if min_version_idx > max_version_idx:
+        raise ValueError("tls_version_min is higher than "
+                         "tls_version_max.")
+
+    if min_version_idx < min_allowed_idx:
+        min_version_idx = min_allowed_idx
+        logger.warning("tls_version_min set too low ('%s'),using '%s' instead",
+                       tls_version_min, TLS_VERSIONS[min_version_idx])
+
+    if max_version_idx < min_allowed_idx:
+        max_version_idx = min_version_idx
+        logger.warning("tls_version_max set too low ('%s'),using '%s' instead",
+                       tls_version_max, TLS_VERSIONS[max_version_idx])
+    return TLS_VERSIONS[min_version_idx:max_version_idx+1]
+
+
+def create_https_connection(
+    host, port=HTTPSConnection.default_port,
+    cafile=None,
+    client_certfile=None, client_keyfile=None,
+    keyfile_passwd=None,
+    tls_version_min="tls1.1",
+    tls_version_max="tls1.2",
+    **kwargs
+):
+    """
+    Create a customized HTTPSConnection object.
+
+    :param host:  The host to connect to
+    :param port:  The port to connect to, defaults to
+               HTTPSConnection.default_port
+    :param cafile:  A PEM-format file containning the trusted
+                    CA certificates
+    :param client_certfile:
+            A PEM-format client certificate file that will be used to
+            identificate the user to the server.
+    :param client_keyfile:
+            A file with the client private key. If this argument is not
+            supplied, the key will be sought in client_certfile.
+    :param keyfile_passwd:
+            A path to the file which stores the password that is used to
+            encrypt client_keyfile. Leave default value if the keyfile
+            is not encrypted.
+    :returns An established HTTPS connection to host:port
+    """
+    # pylint: disable=no-member
+    tls_cutoff_map = {
+        "ssl2": ssl.OP_NO_SSLv2,
+        "ssl3": ssl.OP_NO_SSLv3,
+        "tls1.0": ssl.OP_NO_TLSv1,
+        "tls1.1": ssl.OP_NO_TLSv1_1,
+        "tls1.2": ssl.OP_NO_TLSv1_2,
+    }
+    # pylint: enable=no-member
+
+    if cafile is None:
+        raise RuntimeError("cafile argument is required to perform server "
+                           "certificate verification")
+
+    if not os.path.isfile(cafile) or not os.access(cafile, os.R_OK):
+        raise RuntimeError("cafile \'{file}\' doesn't exist or is unreadable".
+                           format(file=cafile))
+
+    # remove the slice of negating protocol options according to options
+    tls_span = get_proper_tls_version_span(tls_version_min, tls_version_max)
+
+    # official Python documentation states that the best option to get
+    # TLSv1 and later is to setup SSLContext with PROTOCOL_SSLv23
+    # and then negate the insecure SSLv2 and SSLv3
+    # pylint: disable=no-member
+    ctx = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
+    ctx.options |= (
+        ssl.OP_ALL | ssl.OP_NO_COMPRESSION | ssl.OP_SINGLE_DH_USE |
+        ssl.OP_SINGLE_ECDH_USE
+    )
+
+    # high ciphers without RC4, MD5, TripleDES, pre-shared key and secure
+    # remote password. Uses system crypto policies on some platforms.
+    ctx.set_ciphers(constants.TLS_HIGH_CIPHERS)
+
+    # pylint: enable=no-member
+    # set up the correct TLS version flags for the SSL context
+    for version in TLS_VERSIONS:
+        if version in tls_span:
+            # make sure the required TLS versions are available if Python
+            # decides to modify the default TLS flags
+            ctx.options &= ~tls_cutoff_map[version]
+        else:
+            # disable all TLS versions not in tls_span
+            ctx.options |= tls_cutoff_map[version]
+
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    ctx.check_hostname = True
+    ctx.load_verify_locations(cafile)
+
+    if client_certfile is not None:
+        if keyfile_passwd is not None:
+            with open(keyfile_passwd) as pwd_f:
+                passwd = pwd_f.read()
+        else:
+            passwd = None
+        ctx.load_cert_chain(client_certfile, client_keyfile, passwd)
+
+    return HTTPSConnection(host, port, context=ctx, **kwargs)
 
 
 def validate_dns_label(dns_label, allow_underscore=False, allow_slash=False):
@@ -224,11 +403,18 @@ def validate_dns_label(dns_label, allow_underscore=False, allow_slash=False):
                            % dict(chars=chars, chars2=chars2))
 
 
-def validate_domain_name(domain_name, allow_underscore=False, allow_slash=False):
+def validate_domain_name(
+    domain_name, allow_underscore=False,
+    allow_slash=False, entity='domain'
+):
     if domain_name.endswith('.'):
         domain_name = domain_name[:-1]
 
     domain_name = domain_name.split(".")
+
+    if len(domain_name) < 2:
+        raise ValueError(_(
+            'single label {}s are not supported'.format(entity)))
 
     # apply DNS name validator to every name part
     for label in domain_name:
@@ -237,7 +423,7 @@ def validate_domain_name(domain_name, allow_underscore=False, allow_slash=False)
 
 def validate_zonemgr(zonemgr):
     assert isinstance(zonemgr, DNSName)
-    if any('@' in label for label in zonemgr.labels):
+    if any(b'@' in label for label in zonemgr.labels):
         raise ValueError(_('too many \'@\' characters'))
 
 
@@ -272,11 +458,15 @@ def validate_hostname(hostname, check_fqdn=True, allow_underscore=False, allow_s
 def normalize_sshpubkey(value):
     return SSHPublicKey(value).openssh()
 
+
 def validate_sshpubkey(ugettext, value):
     try:
         SSHPublicKey(value)
     except (ValueError, UnicodeDecodeError):
         return _('invalid SSH public key')
+    else:
+        return None
+
 
 def validate_sshpubkey_no_options(ugettext, value):
     try:
@@ -286,6 +476,8 @@ def validate_sshpubkey_no_options(ugettext, value):
 
     if pubkey.has_options():
         return _('options are not allowed')
+    else:
+        return None
 
 
 def convert_sshpubkey_post(entry_attrs):
@@ -301,7 +493,7 @@ def convert_sshpubkey_post(entry_attrs):
         except (ValueError, UnicodeDecodeError):
             continue
 
-        fp = pubkey.fingerprint_hex_md5()
+        fp = pubkey.fingerprint_hex_sha256()
         comment = pubkey.comment()
         if comment:
             fp = u'%s %s' % (fp, comment)
@@ -345,39 +537,6 @@ def remove_sshpubkey_from_output_list_post(context, entries):
             entry_attrs.pop('ipasshpubkey', None)
         delattr(context, 'ipasshpubkey_added')
 
-
-class cachedproperty(object):
-    """
-    A property-like attribute that caches the return value of a method call.
-
-    When the attribute is first read, the method is called and its return
-    value is saved and returned. On subsequent reads, the saved value is
-    returned.
-
-    Typical usage:
-    class C(object):
-        @cachedproperty
-        def attr(self):
-            return 'value'
-    """
-    __slots__ = ('getter', 'store')
-
-    def __init__(self, getter):
-        self.getter = getter
-        self.store = WeakKeyDictionary()
-
-    def __get__(self, obj, cls):
-        if obj is None:
-            return None
-        if obj not in self.store:
-            self.store[obj] = self.getter(obj)
-        return self.store[obj]
-
-    def __set__(self, obj, value):
-        raise AttributeError("can't set attribute")
-
-    def __delete__(self, obj):
-        raise AttributeError("can't delete attribute")
 
 # regexp matching signed floating point number (group 1) followed by
 # optional whitespace followed by time unit, e.g. day, hour (group 7)
@@ -538,18 +697,23 @@ def get_reverse_zone_default(ip_address):
 
     return normalize_zone('.'.join(items))
 
+
 def validate_rdn_param(ugettext, value):
     try:
         RDN(value)
     except Exception as e:
         return str(e)
-    return None
+    else:
+        return None
+
 
 def validate_hostmask(ugettext, hostmask):
     try:
         netaddr.IPNetwork(hostmask)
     except (ValueError, AddrFormatError):
         return _('invalid hostmask')
+    else:
+        return None
 
 
 class ForwarderValidationError(Exception):
@@ -578,17 +742,16 @@ class DNSSECValidationError(ForwarderValidationError):
                "failed DNSSEC validation on server %(ip)s")
 
 
-def _log_response(log, e):
+def _log_response(e):
     """
     If exception contains response from server, log this response to debug log
     :param log: if log is None, do not log
     :param e: DNSException
     """
     assert isinstance(e, DNSException)
-    if log is not None:
-        response = getattr(e, 'kwargs', {}).get('response')
-        if response:
-            log.debug("DNSException: %s; server response: %s", e, response)
+    response = getattr(e, 'kwargs', {}).get('response')
+    if response:
+        logger.debug("DNSException: %s; server response: %s", e, response)
 
 
 def _resolve_record(owner, rtype, nameserver_ip=None, edns0=False,
@@ -600,7 +763,7 @@ def _resolve_record(owner, rtype, nameserver_ip=None, edns0=False,
     :param flag_cd: requires dnssec=True, adds flag CD
     :raise DNSException: if error occurs
     """
-    assert isinstance(nameserver_ip, six.string_types)
+    assert isinstance(nameserver_ip, six.string_types) or nameserver_ip is None
     assert isinstance(rtype, six.string_types)
 
     res = dns.resolver.Resolver()
@@ -624,7 +787,7 @@ def _resolve_record(owner, rtype, nameserver_ip=None, edns0=False,
     return res.query(owner, rtype)
 
 
-def _validate_edns0_forwarder(owner, rtype, ip_addr, log=None, timeout=10):
+def _validate_edns0_forwarder(owner, rtype, ip_addr, timeout=10):
     """
     Validate if forwarder supports EDNS0
 
@@ -635,7 +798,7 @@ def _validate_edns0_forwarder(owner, rtype, ip_addr, log=None, timeout=10):
     try:
         _resolve_record(owner, rtype, nameserver_ip=ip_addr, timeout=timeout)
     except DNSException as e:
-        _log_response(log, e)
+        _log_response(e)
         raise UnresolvableRecordError(owner=owner, rtype=rtype, ip=ip_addr,
                                       error=e)
 
@@ -643,12 +806,12 @@ def _validate_edns0_forwarder(owner, rtype, ip_addr, log=None, timeout=10):
         _resolve_record(owner, rtype, nameserver_ip=ip_addr, edns0=True,
                         timeout=timeout)
     except DNSException as e:
-        _log_response(log, e)
+        _log_response(e)
         raise EDNS0UnsupportedError(owner=owner, rtype=rtype, ip=ip_addr,
                                     error=e)
 
 
-def validate_dnssec_global_forwarder(ip_addr, log=None, timeout=10):
+def validate_dnssec_global_forwarder(ip_addr, timeout=10):
     """Test DNS forwarder properties. against root zone.
 
     Global forwarders should be able return signed root zone
@@ -662,16 +825,15 @@ def validate_dnssec_global_forwarder(ip_addr, log=None, timeout=10):
     owner = "."
     rtype = "SOA"
 
-    _validate_edns0_forwarder(owner, rtype, ip_addr, log=log, timeout=timeout)
+    _validate_edns0_forwarder(owner, rtype, ip_addr, timeout=timeout)
 
     # DNS root has to be signed
     try:
         ans = _resolve_record(owner, rtype, nameserver_ip=ip_addr, dnssec=True,
                               timeout=timeout)
     except DNSException as e:
-        _log_response(log, e)
-        raise UnresolvableRecordError(owner=owner, rtype=rtype, ip=ip_addr,
-                                      error=e)
+        _log_response(e)
+        raise DNSSECSignatureMissingError(owner=owner, rtype=rtype, ip=ip_addr)
 
     try:
         ans.response.find_rrset(
@@ -682,17 +844,16 @@ def validate_dnssec_global_forwarder(ip_addr, log=None, timeout=10):
         raise DNSSECSignatureMissingError(owner=owner, rtype=rtype, ip=ip_addr)
 
 
-def validate_dnssec_zone_forwarder_step1(ip_addr, fwzone, log=None, timeout=10):
+def validate_dnssec_zone_forwarder_step1(ip_addr, fwzone, timeout=10):
     """
     Only forwarders in forward zones can be validated in this way
     :raise UnresolvableRecordError: record cannot be resolved
     :raise EDNS0UnsupportedError: ENDS0 is not supported by forwarder
     """
-    _validate_edns0_forwarder(fwzone, "SOA", ip_addr, log=log, timeout=timeout)
+    _validate_edns0_forwarder(fwzone, "SOA", ip_addr, timeout=timeout)
 
 
-def validate_dnssec_zone_forwarder_step2(ipa_ip_addr, fwzone, log=None,
-                                         timeout=10):
+def validate_dnssec_zone_forwarder_step2(ipa_ip_addr, fwzone, timeout=10):
     """
     This step must be executed after forwarders are added into LDAP, and only
     when we are sure the forwarders work.
@@ -709,10 +870,10 @@ def validate_dnssec_zone_forwarder_step2(ipa_ip_addr, fwzone, log=None,
                                  timeout=timeout)
     except NXDOMAIN as e:
         # sometimes CD flag is ignored and NXDomain is returned
-        _log_response(log, e)
+        _log_response(e)
         raise DNSSECValidationError(owner=fwzone, rtype=rtype, ip=ipa_ip_addr)
     except DNSException as e:
-        _log_response(log, e)
+        _log_response(e)
         raise UnresolvableRecordError(owner=fwzone, rtype=rtype,
                                       ip=ipa_ip_addr, error=e)
 
@@ -720,7 +881,7 @@ def validate_dnssec_zone_forwarder_step2(ipa_ip_addr, fwzone, log=None,
         ans_do = _resolve_record(fwzone, rtype, nameserver_ip=ipa_ip_addr,
                                  edns0=True, dnssec=True, timeout=timeout)
     except DNSException as e:
-        _log_response(log, e)
+        _log_response(e)
         raise DNSSECValidationError(owner=fwzone, rtype=rtype, ip=ipa_ip_addr)
     else:
         if (ans_do.canonical_name == ans_cd.canonical_name
@@ -962,6 +1123,16 @@ def ensure_krbcanonicalname_set(ldap, entry_attrs):
     entry_attrs.update(old_entry)
 
 
+def check_client_configuration():
+    """
+    Check if IPA client is configured on the system.
+    """
+    if (not os.path.isfile(paths.IPA_DEFAULT_CONF) or
+            not os.path.isdir(paths.IPA_CLIENT_SYSRESTORE) or
+            not os.listdir(paths.IPA_CLIENT_SYSRESTORE)):
+        raise ScriptError('IPA client is not configured on this system')
+
+
 def check_principal_realm_in_trust_namespace(api_instance, *keys):
     """
     Check that principal name's suffix does not overlap with UPNs and realm
@@ -999,21 +1170,85 @@ def check_principal_realm_in_trust_namespace(api_instance, *keys):
                         'namespace'))
 
 
-def network_ip_address_warning(addr_list):
+def no_matching_interface_for_ip_address_warning(addr_list):
     for ip in addr_list:
-        if ip.is_network_addr():
-            root_logger.warning("IP address %s might be network address", ip)
+        if not ip.get_matching_interface():
+            logger.warning(
+                "No network interface matches the IP address %s", ip)
             # fixme: once when loggers will be fixed, we can remove this
             # print
-            print("WARNING: IP address {} might be network address".format(ip),
-                  file=sys.stderr)
+            print(
+                "WARNING: No network interface matches the IP address "
+                "{}".format(ip),
+                file=sys.stderr
+            )
 
 
-def broadcast_ip_address_warning(addr_list):
-    for ip in addr_list:
-        if ip.is_broadcast_addr():
-            root_logger.warning("IP address %s might be broadcast address", ip)
-            # fixme: once when loggers will be fixed, we can remove this
-            # print
-            print("WARNING: IP address {} might be broadcast address".format(
-                ip), file=sys.stderr)
+def get_terminal_height(fd=1):
+    """
+    Get current terminal height
+
+    Args:
+        fd (int): file descriptor. Default: 1 (stdout)
+
+    Returns:
+        int: Terminal height
+    """
+    try:
+        return struct.unpack(
+            'hh', fcntl.ioctl(fd, termios.TIOCGWINSZ, b'1234'))[0]
+    except (IOError, OSError, struct.error):
+        return os.environ.get("LINES", 25)
+
+
+def open_in_pager(data):
+    """
+    Open text data in pager
+
+    Args:
+        data (bytes): data to view in pager
+
+    Returns:
+        None
+    """
+    pager = os.environ.get("PAGER", "less")
+    pager_process = subprocess.Popen([pager], stdin=subprocess.PIPE)
+
+    try:
+        pager_process.stdin.write(data)
+        pager_process.communicate()
+    except IOError:
+        pass
+
+
+if reprlib is not None:
+    class APIRepr(reprlib.Repr):
+        builtin_types = {
+            bool, int, float,
+            str, bytes,
+            dict, tuple, list, set, frozenset,
+            type(None),
+        }
+
+        def __init__(self):
+            super(APIRepr, self).__init__()
+            # no limitation
+            for k, v in self.__dict__.items():
+                if isinstance(v, int):
+                    setattr(self, k, sys.maxsize)
+
+        def repr_str(self, x, level):
+            """Output with u'' prefix"""
+            return 'u' + repr(x)
+
+        def repr_type(self, x, level):
+            if x is str:
+                return "<type 'unicode'>"
+            if x in self.builtin_types:
+                return "<type '{}'>".format(x.__name__)
+            else:
+                return repr(x)
+
+    apirepr = APIRepr().repr
+else:
+    apirepr = repr

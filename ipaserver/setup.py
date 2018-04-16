@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 
 # Authors:
 #   Jason Gerard DeRose <jderose@redhat.com>
@@ -31,16 +31,52 @@ if __name__ == '__main__':
     from ipasetup import ipasetup  # noqa: E402
 
     ipasetup(
-        name='freeipa',
+        name='ipaserver',
         doc=__doc__,
         package_dir={'ipaserver': ''},
         packages=[
             'ipaserver',
             'ipaserver.advise',
             'ipaserver.advise.plugins',
+            'ipaserver.dnssec',
             'ipaserver.plugins',
+            'ipaserver.secrets',
             'ipaserver.install',
             'ipaserver.install.plugins',
             'ipaserver.install.server',
         ],
+        install_requires=[
+            "cryptography",
+            "custodia",
+            "dbus-python",
+            "dnspython",
+            "dogtag-pki",
+            "ipaclient",
+            "ipalib",
+            "ipaplatform",
+            "ipapython",
+            "jwcrypto",
+            "lxml",
+            "netaddr",
+            "pyasn1",
+            "requests",
+            "six",
+            "python-augeas",
+            "python-ldap",
+        ],
+        entry_points={
+            'custodia.authorizers': [
+                'IPAKEMKeys = ipaserver.secrets.kem:IPAKEMKeys',
+            ],
+            'custodia.stores': [
+                'IPASecStore = ipaserver.secrets.store:IPASecStore',
+            ],
+        },
+        extras_require={
+            # These packages are currently not available on PyPI.
+            "dcerpc": ["samba", "pysss", "pysss_nss_idmap"],
+            "hbactest": ["pyhbac"],
+            "install": ["SSSDConfig"],
+            "trust": ["pysss_murmur", "pysss_nss_idmap"],
+        }
     )

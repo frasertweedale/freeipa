@@ -2,14 +2,19 @@
 # Copyright (C) 2016  FreeIPA Contributors see COPYING for license
 #
 
-from ipalib import api, errors, output, DNParam, Str
+import base64
+
+import six
+
+from ipalib import api, errors, output, Bytes, DNParam, Flag, Str
 from ipalib.constants import IPA_CA_CN
 from ipalib.plugable import Registry
+from ipapython.dn import ATTR_NAME_BY_OID
 from ipaserver.plugins.baseldap import (
     LDAPObject, LDAPSearch, LDAPCreate, LDAPDelete,
     LDAPUpdate, LDAPRetrieve, LDAPQuery, pkey_to_value)
 from ipaserver.plugins.cert import ca_enabled_check
-from ipalib import _, ngettext
+from ipalib import _, ngettext, x509
 
 
 __doc__ = _("""
@@ -66,7 +71,7 @@ class ca(LDAPObject):
         'cn', 'description', 'ipacaid', 'ipacaissuerdn', 'ipacasubjectdn',
     ]
     rdn_attribute = 'cn'
-    rdn_is_primary_key = True
+    allow_rename = True
     label = _('Certificate Authorities')
     label_singular = _('Certificate Authority')
 
@@ -99,6 +104,18 @@ class ca(LDAPObject):
             label=_('Issuer DN'),
             doc=_('Issuer Distinguished Name'),
             flags=['no_create', 'no_update'],
+        ),
+        Bytes(
+            'certificate',
+            label=_("Certificate"),
+            doc=_("Base-64 encoded certificate."),
+            flags={'no_create', 'no_update', 'no_search'},
+        ),
+        Bytes(
+            'certificate_chain*',
+            label=_("Certificate chain"),
+            doc=_("X.509 certificate chain"),
+            flags={'no_create', 'no_update', 'no_search'},
         ),
     )
 
@@ -145,6 +162,30 @@ class ca(LDAPObject):
     }
 
 
+def set_certificate_attrs(entry, options, want_cert=True):
+    try:
+        ca_id = entry['ipacaid'][0]
+    except KeyError:
+        return
+    full = options.get('all', False)
+    want_chain = options.get('chain', False)
+
+    want_data = want_cert or want_chain or full
+    if not want_data:
+        return
+
+    with api.Backend.ra_lightweight_ca as ca_api:
+        if want_cert or full:
+            der = ca_api.read_ca_cert(ca_id)
+            entry['certificate'] = base64.b64encode(der).decode('ascii')
+
+        if want_chain or full:
+            pkcs7_der = ca_api.read_ca_chain(ca_id)
+            certs = x509.pkcs7_to_certs(pkcs7_der, x509.DER)
+            ders = [cert.public_bytes(x509.Encoding.DER) for cert in certs]
+            entry['certificate_chain'] = ders
+
+
 @register()
 class ca_find(LDAPSearch):
     __doc__ = _("Search for CAs.")
@@ -153,17 +194,34 @@ class ca_find(LDAPSearch):
     )
 
     def execute(self, *keys, **options):
-        ca_enabled_check()
-        return super(ca_find, self).execute(*keys, **options)
+        ca_enabled_check(self.api)
+        result = super(ca_find, self).execute(*keys, **options)
+        if not options.get('pkey_only', False):
+            for entry in result['result']:
+                set_certificate_attrs(entry, options, want_cert=False)
+        return result
+
+
+_chain_flag = Flag(
+    'chain',
+    default=False,
+    doc=_('Include certificate chain in output'),
+)
 
 
 @register()
 class ca_show(LDAPRetrieve):
     __doc__ = _("Display the properties of a CA.")
 
-    def execute(self, *args, **kwargs):
-        ca_enabled_check()
-        return super(ca_show, self).execute(*args, **kwargs)
+    takes_options = LDAPRetrieve.takes_options + (
+        _chain_flag,
+    )
+
+    def execute(self, *keys, **options):
+        ca_enabled_check(self.api)
+        result = super(ca_show, self).execute(*keys, **options)
+        set_certificate_attrs(result['result'], options)
+        return result
 
 
 @register()
@@ -171,11 +229,33 @@ class ca_add(LDAPCreate):
     __doc__ = _("Create a CA.")
     msg_summary = _('Created CA "%(value)s"')
 
+    takes_options = LDAPCreate.takes_options + (
+        _chain_flag,
+    )
+
     def pre_callback(self, ldap, dn, entry, entry_attrs, *keys, **options):
-        ca_enabled_check()
-        if not ldap.can_add(dn[1:]):
+        ca_enabled_check(self.api)
+        if not ldap.can_add(dn[1:], 'ipaca'):
             raise errors.ACIError(
                 info=_("Insufficient 'add' privilege for entry '%s'.") % dn)
+
+        # check that DN only includes standard naming attributes
+        dn_attrs = {
+            ava.attr.lower()
+            for rdn in options['ipacasubjectdn']
+            for ava in rdn
+        }
+        x509_attrs = {
+            attr.lower()
+            for attr in six.viewvalues(ATTR_NAME_BY_OID)
+        }
+        unknown_attrs = dn_attrs - x509_attrs
+        if len(unknown_attrs) > 0:
+            raise errors.ValidationError(
+                name=_("Subject DN"),
+                error=_("Unrecognized attributes: %(attrs)s")
+                    % dict(attrs=", ".join(unknown_attrs))
+            )
 
         # check for name collision before creating CA in Dogtag
         try:
@@ -203,6 +283,10 @@ class ca_add(LDAPCreate):
         entry['ipacasubjectdn'] = [resp['dn']]
         return dn
 
+    def post_callback(self, ldap, dn, entry_attrs, *keys, **options):
+        set_certificate_attrs(entry_attrs, options)
+        return dn
+
 
 @register()
 class ca_del(LDAPDelete):
@@ -211,7 +295,13 @@ class ca_del(LDAPDelete):
     msg_summary = _('Deleted CA "%(value)s"')
 
     def pre_callback(self, ldap, dn, *keys, **options):
-        ca_enabled_check()
+        ca_enabled_check(self.api)
+
+        # ensure operator has permission to delete CA
+        # before contacting Dogtag
+        if not ldap.can_delete(dn):
+            raise errors.ACIError(info=_(
+                "Insufficient privilege to delete a CA."))
 
         if keys[0] == IPA_CA_CN:
             raise errors.ProtectedEntryError(
@@ -233,7 +323,7 @@ class ca_mod(LDAPUpdate):
     msg_summary = _('Modified CA "%(value)s"')
 
     def pre_callback(self, ldap, dn, entry_attrs, attrs_list, *keys, **options):
-        ca_enabled_check()
+        ca_enabled_check(self.api)
 
         if 'rename' in options or 'cn' in entry_attrs:
             if keys[0] == IPA_CA_CN:
@@ -249,11 +339,17 @@ class CAQuery(LDAPQuery):
     has_output = output.standard_value
 
     def execute(self, cn, **options):
-        ca_enabled_check()
+        ca_enabled_check(self.api)
 
-        ca_id = self.api.Command.ca_show(cn)['result']['ipacaid'][0]
+        ca_obj = self.api.Command.ca_show(cn)['result']
+
+        # ensure operator has permission to modify CAs
+        if not self.api.Backend.ldap2.can_write(ca_obj['dn'], 'description'):
+            raise errors.ACIError(info=_(
+                "Insufficient privilege to modify a CA."))
+
         with self.api.Backend.ra_lightweight_ca as ca_api:
-            self.perform_action(ca_api, ca_id)
+            self.perform_action(ca_api, ca_obj['ipacaid'][0])
 
         return dict(
             result=True,

@@ -17,6 +17,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import logging
+
 from ipalib import api, errors, output, util
 from ipalib import Command, Str, Flag, Int
 from ipalib import _
@@ -29,8 +31,13 @@ if api.env.in_server and api.env.context in ['lite', 'server']:
     except ImportError:
         _dcerpc_bindings_installed = False
 
-import pyhbac
 import six
+
+try:
+    import pyhbac
+except ImportError:
+    raise errors.SkipPluginModule(reason=_('pyhbac is not installed.'))
+
 
 if six.PY3:
     unicode = str
@@ -208,9 +215,11 @@ EXAMPLES:
       Not matched rules: can_login
 """)
 
+logger = logging.getLogger(__name__)
+
 register = Registry()
 
-def convert_to_ipa_rule(rule):
+def _convert_to_ipa_rule(rule):
     # convert a dict with a rule to an pyhbac rule
     ipa_rule = pyhbac.HbacRule(rule['cn'][0])
     ipa_rule.enabled = rule['ipaenabledflag'][0]
@@ -356,7 +365,7 @@ class hbactest(Command):
         # --disabled will import all disabled rules
         # --rules will implicitly add the rules from a rule list
         for rule in hbacset:
-            ipa_rule = convert_to_ipa_rule(rule)
+            ipa_rule = _convert_to_ipa_rule(rule)
             if ipa_rule.name in testrules:
                 ipa_rule.enabled = True
                 rules.append(ipa_rule)
@@ -474,10 +483,11 @@ class hbactest(Command):
                     code, rule_name = e.args
                     if code == pyhbac.HBAC_EVAL_ERROR:
                         error_rules.append(rule_name)
-                        self.log.info('Native IPA HBAC rule "%s" parsing error: %s' % \
-                                      (rule_name, pyhbac.hbac_result_string(code)))
+                        logger.info('Native IPA HBAC rule "%s" parsing error: '
+                                    '%s',
+                                    rule_name, pyhbac.hbac_result_string(code))
                 except (TypeError, IOError) as info:
-                    self.log.error('Native IPA HBAC module error: %s' % info)
+                    logger.error('Native IPA HBAC module error: %s', info)
 
             access_granted = len(matched_rules) > 0
         else:

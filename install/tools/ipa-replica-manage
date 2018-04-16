@@ -1,4 +1,4 @@
-#! /usr/bin/python2 -E
+#!/usr/bin/python3 -E
 # Authors: Karl MacMillan <kmacmillan@mentalrootkit.com>
 #
 # Copyright (C) 2007  Red Hat
@@ -20,6 +20,7 @@
 
 from __future__ import print_function
 
+import logging
 import sys
 import os
 
@@ -33,19 +34,20 @@ from six.moves.urllib.parse import urlparse
 from six.moves.xmlrpc_client import MAXINT
 # pylint: enable=import-error
 
+from ipaclient.install import ipadiscovery
 from ipapython import ipautil
 from ipaserver.install import replication, dsinstance, installutils
-from ipaserver.install import bindinstance, cainstance, certs
+from ipaserver.install import bindinstance, cainstance
 from ipaserver.install import opendnssecinstance, dnskeysyncinstance
 from ipapython import version, ipaldap
 from ipalib import api, errors
-from ipalib.constants import CACERT
 from ipalib.util import has_managed_topology, verify_host_resolvable
-from ipapython.ipa_log_manager import root_logger, standard_logging_setup
+from ipapython.ipa_log_manager import standard_logging_setup
 from ipapython.dn import DN
 from ipapython.config import IPAOptionParser
-from ipaclient import ipadiscovery
 from ipaplatform.paths import paths
+
+logger = logging.getLogger(os.path.basename(__file__))
 
 # dict of command name and tuples of min/max num of args needed
 commands = {
@@ -84,6 +86,8 @@ def parse_options():
     parser.add_option("-p", "--password", dest="dirman_passwd", help="Directory Manager password")
     parser.add_option("-v", "--verbose", dest="verbose", action="store_true", default=False,
                       help="provide additional information")
+    parser.add_option("-d", "--debug", dest="debug", action="store_true", default=False,
+                      help="provide additional debug information")
     parser.add_option("-f", "--force", dest="force", action="store_true", default=False,
                       help="ignore some types of errors")
     parser.add_option("-c", "--cleanup", dest="cleanup", action="store_true", default=False,
@@ -167,11 +171,13 @@ def list_replicas(realm, host, replica, dirman_passwd, verbose, nolookup=False):
     peers = {}
 
     try:
-        conn = ipaldap.IPAdmin(host, 636, cacert=CACERT)
+        ldap_uri = ipaldap.get_ldap_uri(host, 636, cacert=paths.IPA_CA_CRT)
+        conn = ipaldap.LDAPClient(ldap_uri, cacert=paths.IPA_CA_CRT)
         if dirman_passwd:
-            conn.do_simple_bind(bindpw=dirman_passwd)
+            conn.simple_bind(bind_dn=ipaldap.DIRMAN_DN,
+                             bind_password=dirman_passwd)
         else:
-            conn.do_sasl_gssapi_bind()
+            conn.gssapi_bind()
     except Exception as e:
         print("Failed to connect to host '%s': %s" % (host, str(e)))
         return
@@ -370,7 +376,7 @@ def get_ruv(realm, host, dirman_passwd, nolookup=False, ca=False):
         else:
             thisrepl = replication.ReplicationManager(realm, host, dirman_passwd)
     except Exception as e:
-        root_logger.debug(traceback.format_exc())
+        logger.debug("%s", traceback.format_exc())
         raise RuntimeError("Failed to connect to server {host}: {err}"
                            .format(host=host, err=e))
 
@@ -380,7 +386,7 @@ def get_ruv(realm, host, dirman_passwd, nolookup=False, ca=False):
             thisrepl.db_suffix, thisrepl.conn.SCOPE_SUBTREE, search_filter,
             ['nsds50ruv'])
     except errors.NotFound:
-        root_logger.debug(traceback.format_exc())
+        logger.debug("%s", traceback.format_exc())
         raise NoRUVsFound("No RUV records found.")
 
     servers = []
@@ -417,7 +423,7 @@ def get_ruv_both_suffixes(realm, host, dirman_passwd, verbose, nolookup=False):
             fail_gracefully = False
             if verbose:
                 print(err)
-        root_logger.debug(err)
+        logger.debug('%s', err)
     try:
         ruvs['domain'] = get_ruv(realm, host, dirman_passwd, nolookup)
     except (NoRUVsFound, RuntimeError) as e:
@@ -427,7 +433,7 @@ def get_ruv_both_suffixes(realm, host, dirman_passwd, verbose, nolookup=False):
                 raise
             if verbose:
                 print(err)
-        root_logger.debug(err)
+        logger.debug('%s', err)
 
     if not ruvs.keys():
         raise NoRUVsFound("No RUV records found.")
@@ -626,9 +632,11 @@ def clean_dangling_ruvs(realm, host, options):
     Cleans all RUVs and CS-RUVs that are left in the system from
     uninstalled replicas
     """
-    conn = ipaldap.IPAdmin(host, 636, cacert=CACERT)
+    ldap_uri = ipaldap.get_ldap_uri(host, 636, cacert=paths.IPA_CA_CRT)
+    conn = ipaldap.LDAPClient(ldap_uri, cacert=paths.IPA_CA_CRT)
     try:
-        conn.do_simple_bind(bindpw=options.dirman_passwd)
+        conn.simple_bind(bind_dn=ipaldap.DIRMAN_DN,
+                         bind_password=options.dirman_passwd)
 
         # get all masters
         masters_dn = DN(api.env.container_masters, api.env.basedn)
@@ -672,8 +680,10 @@ def clean_dangling_ruvs(realm, host, options):
     offlines = set()
     for master_cn, master_info in info.items():
         try:
-            conn = ipaldap.IPAdmin(master_cn, 636, cacert=CACERT)
-            conn.do_simple_bind(bindpw=options.dirman_passwd)
+            ldap_uri = ipaldap.get_ldap_uri(master_cn, 636, cacert=paths.IPA_CA_CRT)
+            conn = ipaldap.LDAPClient(ldap_uri, cacert=paths.IPA_CA_CRT)
+            conn.simple_bind(bind_dn=ipaldap.DIRMAN_DN,
+                             bind_password=options.dirman_passwd)
             master_info['online'] = True
         except Exception:
             print("The server '{host}' appears to be offline."
@@ -885,7 +895,7 @@ def ensure_last_services(conn, hostname, masters, options):
             print("Please disable or replace DNSSEC key master first.")
             sys.exit("Deletion aborted")
 
-    ca = cainstance.CAInstance(api.env.realm, certs.NSS_DIR)
+    ca = cainstance.CAInstance(api.env.realm)
     if ca.is_renewal_master(hostname):
         try:
             ca.set_renewal_master(options.host)
@@ -897,8 +907,7 @@ def ensure_last_services(conn, hostname, masters, options):
 
 def cleanup_server_dns_entries(realm, hostname, suffix, options):
     try:
-        if bindinstance.dns_container_exists(options.host, suffix,
-                                             dm_password=options.dirman_passwd):
+        if bindinstance.dns_container_exists(suffix):
             bindinstance.remove_master_dns_records(hostname, realm)
             dnskeysyncinstance.remove_replica_public_keys(hostname)
     except Exception as e:
@@ -1087,10 +1096,11 @@ def add_link(realm, replica1, replica2, dirman_passwd, options):
 
     if options.winsync:
         if not options.binddn or not options.bindpw or not options.cacert or not options.passsync:
-            root_logger.error("The arguments --binddn, --bindpw, --passsync and --cacert are required to create a winsync agreement")
+            logger.error("The arguments --binddn, --bindpw, --passsync and "
+                         "--cacert are required to create a winsync agreement")
             sys.exit(1)
         if os.getegid() != 0:
-            root_logger.error("winsync agreements need to be created as root")
+            logger.error("winsync agreements need to be created as root")
             sys.exit(1)
     elif has_managed_topology(api):
         exit_on_managed_topology("Creation of IPA replication agreement")
@@ -1117,8 +1127,7 @@ def add_link(realm, replica1, replica2, dirman_passwd, options):
 
     if options.cacert:
         # have to install the given CA cert before doing anything else
-        ds = dsinstance.DsInstance(realm_name = realm,
-                                   dm_password = dirman_passwd)
+        ds = dsinstance.DsInstance(realm_name=realm)
         if not ds.add_ca_cert(options.cacert):
             print("Could not load the required CA certificate file [%s]" % options.cacert)
             return
@@ -1197,8 +1206,11 @@ def re_initialize(realm, thishost, fromhost, dirman_passwd, nolookup=False):
         repl = replication.ReplicationManager(realm, fromhost, dirman_passwd)
         agreement = repl.get_replication_agreement(thishost)
 
-        thisrepl.enable_agreement(fromhost)
-        repl.enable_agreement(thishost)
+        try:
+            thisrepl.enable_agreement(fromhost)
+            repl.enable_agreement(thishost)
+        except errors.NotFound as e:
+            sys.exit(e)
 
         repl.force_sync(repl.conn, thishost)
 
@@ -1208,7 +1220,7 @@ def re_initialize(realm, thishost, fromhost, dirman_passwd, nolookup=False):
         # If the agreement doesn't have nsDS5ReplicatedAttributeListTotal it means
         # we did not replicate memberOf, do so now.
         if not agreement.single_value.get('nsDS5ReplicatedAttributeListTotal'):
-            ds = dsinstance.DsInstance(realm_name = realm, dm_password = dirman_passwd)
+            ds = dsinstance.DsInstance(realm_name=realm)
             ds.ldapi = os.getegid() == 0
             ds.init_memberof()
 
@@ -1228,8 +1240,14 @@ def force_sync(realm, thishost, fromhost, dirman_passwd, nolookup=False):
         repl = replication.ReplicationManager(realm, thishost, dirman_passwd)
         repl.force_sync(repl.conn, fromhost)
     else:
+        ds = dsinstance.DsInstance(realm_name=realm)
+        ds.ldapi = os.getegid() == 0
+        ds.replica_manage_time_skew(prevent=False)
         repl = replication.ReplicationManager(realm, fromhost, dirman_passwd)
         repl.force_sync(repl.conn, thishost)
+        agreement = repl.get_replication_agreement(thishost)
+        repl.wait_for_repl_init(repl.conn, agreement.dn)
+        ds.replica_manage_time_skew(prevent=True)
 
 def show_DNA_ranges(hostname, master, realm, dirman_passwd, nextrange=False,
                     nolookup=False):
@@ -1440,7 +1458,7 @@ def set_DNA_range(hostname, range, realm, dirman_passwd, next_range=False,
             entries = repl.conn.get_entries(dn, repl.conn.SCOPE_ONELEVEL,
                                         "(objectclass=ipaDomainIDRange)")
         except errors.NotFound as e:
-            sys.exit('Unable to load IPA ranges: %s' % e.message)
+            sys.exit('Unable to load IPA ranges: {err}'.format(err=e))
 
         for ent in entries:
             entry_start = int(ent.single_value['ipabaseid'])
@@ -1496,16 +1514,10 @@ def main(options, args):
     elif not os.path.exists(paths.IPA_DEFAULT_CONF):
         sys.exit("IPA is not configured on this system.")
 
-    # Just initialize the environment. This is so the installer can have
-    # access to the plugin environment
-    api_env = {'in_server' : True,
-               'verbose'   : options.verbose,
-              }
-
-    if os.getegid() != 0:
-        api_env['log'] = None # turn off logging for non-root
-
-    api.bootstrap(**api_env)
+    api.bootstrap(
+        context='cli', confdir=paths.ETC_IPA,
+        in_server=True, verbose=options.verbose, debug=options.debug
+    )
     api.finalize()
 
     dirman_passwd = None
@@ -1532,11 +1544,7 @@ def main(options, args):
     options.dirman_passwd = dirman_passwd
 
     # Initialize the LDAP connection
-    if options.dirman_passwd:
-        api.Backend.ldap2.connect(bind_dn=DN(('cn', 'Directory Manager')),
-                                  bind_pw=options.dirman_passwd)
-    else:
-        api.Backend.ldap2.connect()
+    api.Backend.ldap2.connect(bind_pw=options.dirman_passwd)
 
     if args[0] == "list":
         replica = None
@@ -1605,6 +1613,8 @@ def main(options, args):
     elif args[0] == "dnanextrange-set":
         set_DNA_range(args[1], args[2], realm, dirman_passwd, next_range=True,
                       nolookup=options.nolookup)
+
+    api.Backend.ldap2.disconnect()
 
 try:
     options, args = parse_options()

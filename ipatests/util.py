@@ -42,13 +42,53 @@ from ipalib import api
 from ipalib.plugable import Plugin
 from ipalib.request import context
 from ipapython.dn import DN
-from ipapython.ipautil import (
-    private_ccache, kinit_password, kinit_keytab, run
-)
-from ipaplatform.paths import paths
+from ipapython.ipaldap import ldap_initialize
+from ipapython.ipautil import run
+
+
+try:
+    # not available with client-only wheel packages
+    from ipalib.install.kinit import kinit_keytab, kinit_password
+except ImportError:
+    kinit_keytab = kinit_password = None
+
+try:
+    # not available with client-only wheel packages
+    from ipaplatform.paths import paths
+except ImportError:
+    paths = None
+
 
 if six.PY3:
     unicode = str
+
+
+PYTEST_VERSION = tuple(int(v) for v in pytest.__version__.split('.'))
+
+
+def check_ipaclient_unittests(reason="Skip in ipaclient unittest mode"):
+    """Call this in a package to skip the package in ipaclient-unittest mode
+    """
+    if pytest.config.getoption('ipaclient_unittests', False):
+        if PYTEST_VERSION[0] >= 3:
+            # pytest 3+ does no longer allow pytest.skip() on module level
+            # pylint: disable=unexpected-keyword-arg
+            raise pytest.skip.Exception(reason, allow_module_level=True)
+            # pylint: enable=unexpected-keyword-arg
+        else:
+            raise pytest.skip(reason)
+
+
+def check_no_ipaapi(reason="Skip tests that needs an IPA API"):
+    """Call this in a package to skip the package in no-ipaapi mode
+    """
+    if pytest.config.getoption('skip_ipaapi', False):
+        if PYTEST_VERSION[0] >= 3:
+            # pylint: disable=unexpected-keyword-arg
+            raise pytest.skip.Exception(reason, allow_module_level=True)
+            # pylint: enable=unexpected-keyword-arg
+        else:
+            raise pytest.skip(reason)
 
 
 class TempDir(object):
@@ -97,6 +137,12 @@ class TempDir(object):
     def __del__(self):
         self.rmtree()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.rmtree()
+
 
 class TempHome(TempDir):
     def __init__(self):
@@ -139,8 +185,8 @@ class Fuzzy(object):
     """
     Perform a fuzzy (non-strict) equality tests.
 
-    `Fuzzy` instances will likely be used when comparing nesting data-structures
-    using `assert_deepequal()`.
+    `Fuzzy` instances will likely be used when comparing nesting
+    data-structures using `assert_deepequal()`.
 
     By default a `Fuzzy` instance is equal to everything.  For example, all of
     these evaluate to ``True``:
@@ -162,9 +208,9 @@ class Fuzzy(object):
     Use of a regular expression by default implies the ``unicode`` type, so
     comparing with an ``str`` instance will evaluate to ``False``:
 
-    >>> phone.type
-    <type 'unicode'>
-    >>> '123-456-7890' == phone
+    >>> phone.type is six.text_type
+    True
+    >>> b'123-456-7890' == phone
     False
 
     The *type* kwarg allows you to specify a type constraint, so you can force
@@ -204,16 +250,18 @@ class Fuzzy(object):
     >>> fuzzy = Fuzzy('.+', type=str, test=lambda other: True)
     >>> fuzzy.regex
     '.+'
-    >>> fuzzy.type
-    <type 'str'>
+    >>> fuzzy.type is str
+    True
     >>> fuzzy.test  # doctest:+ELLIPSIS
     <function <lambda> at 0x...>
 
     To aid debugging, `Fuzzy.__repr__()` reveals these kwargs as well:
 
     >>> fuzzy  # doctest:+ELLIPSIS
-    Fuzzy('.+', <type 'str'>, <function <lambda> at 0x...>)
+    Fuzzy('.+', <... 'str'>, <function <lambda> at 0x...>)
     """
+
+    __hash__ = None
 
     def __init__(self, regex=None, type=None, test=None):
         """
@@ -312,25 +360,31 @@ def assert_deepequal(expected, got, doc='', stack=tuple()):
     If the tests fails, it will raise an ``AssertionError`` with detailed
     information, including the path to the offending value.  For example:
 
-    >>> expected = [u'Hello', dict(world=u'how are you?')]
-    >>> got = [u'Hello', dict(world='how are you?')]
+    >>> expected = [u'Hello', dict(world=1)]
+    >>> got = [u'Hello', dict(world=1.0)]
     >>> expected == got
     True
-    >>> assert_deepequal(expected, got, doc='Testing my nested data')
+    >>> assert_deepequal(
+    ...    expected, got, doc='Testing my nested data')  # doctest: +ELLIPSIS
     Traceback (most recent call last):
       ...
     AssertionError: assert_deepequal: type(expected) is not type(got).
       Testing my nested data
-      type(expected) = <type 'unicode'>
-      type(got) = <type 'str'>
-      expected = u'how are you?'
-      got = 'how are you?'
-      path = (0, 'world')
+      type(expected) = <... 'int'>
+      type(got) = <... 'float'>
+      expected = 1
+      got = 1.0
+      path = (..., 'world')
 
     Note that lists and tuples are considered equivalent, and the order of
     their elements does not matter.
     """
-    if pytest.config.getoption("pretty_print"):  # pylint: disable=no-member
+    try:
+        pretty_print = pytest.config.getoption("pretty_print")
+    except (AttributeError, ValueError):
+        pretty_print = False
+
+    if pretty_print:
         expected_str = struct_to_string(expected, EXPECTED_LEN)
         got_str = struct_to_string(got, GOT_LEN)
     else:
@@ -344,7 +398,11 @@ def assert_deepequal(expected, got, doc='', stack=tuple()):
     if isinstance(expected, DN):
         if isinstance(got, six.string_types):
             got = DN(got)
-    if not (isinstance(expected, Fuzzy) or callable(expected) or type(expected) is type(got)):
+    if (
+        not (isinstance(expected, Fuzzy)
+             or callable(expected)
+             or type(expected) is type(got))
+    ):
         raise AssertionError(
             TYPE % (doc, type(expected), type(got), expected, got, stack)
         )
@@ -634,22 +692,30 @@ class DummyClass(object):
     def __process(self, name_, args_, kw_):
         if self.__i >= len(self.__calls):
             raise AssertionError(
-                'extra call: %s, %r, %r' % (name_, args_, kw_)
+                "extra call: {name!s}, {args!r}, {kwargs!r}".format(
+                    name=name_, args=args_, kwargs=kw_
+                )
             )
         (name, args, kw, result) = self.__calls[self.__i]
         self.__i += 1
         i = self.__i
         if name_ != name:
             raise AssertionError(
-                'call %d should be to method %r; got %r' % (i, name, name_)
+                "call {0:d} should be to method {1!r}; got {2!r}".format(
+                    i, name, name_
+                )
             )
         if args_ != args:
             raise AssertionError(
-                'call %d to %r should have args %r; got %r' % (i, name, args, args_)
+                "call {0:d} to {1!r} should have args {2!r}; got {3!r}".format(
+                    i, name, args, args_
+                )
             )
         if kw_ != kw:
             raise AssertionError(
-                'call %d to %r should have kw %r, got %r' % (i, name, kw, kw_)
+                "call {0:d} to {1!r} should have kw {2!r}, got {3!r}".format(
+                    i, name, kw, kw_
+                )
             )
         if isinstance(result, Exception):
             raise result
@@ -661,7 +727,7 @@ class DummyClass(object):
 
 class MockLDAP(object):
     def __init__(self):
-        self.connection = ldap.initialize(
+        self.connection = ldap_initialize(
             'ldap://{host}'.format(host=ipalib.api.env.host)
         )
 
@@ -711,7 +777,7 @@ def unlock_principal_password(user, oldpw, newpw):
         user, api.env.container_user, api.env.basedn)
 
     args = [paths.LDAPPASSWD, '-D', userdn, '-w', oldpw, '-a', oldpw,
-            '-s', newpw, '-x']
+            '-s', newpw, '-x', '-H', api.env.ldap_uri]
     return run(args)
 
 
@@ -747,24 +813,28 @@ def change_principal(principal, password=None, client=None, path=None,
     if client is None:
         client = api
 
-
     client.Backend.rpcclient.disconnect()
 
     try:
-        with private_ccache(ccache_name):
-            if keytab:
-                kinit_keytab(principal, keytab, ccache_name)
-            else:
-                kinit_password(principal, password, ccache_name,
-                               canonicalize=canonicalize,
-                               enterprise=enterprise)
-            client.Backend.rpcclient.connect()
+        if keytab:
+            kinit_keytab(principal, keytab, ccache_name)
+        else:
+            kinit_password(principal, password, ccache_name,
+                           canonicalize=canonicalize,
+                           enterprise=enterprise)
+        client.Backend.rpcclient.connect(ccache=ccache_name)
 
-            try:
-                yield
-            finally:
-                client.Backend.rpcclient.disconnect()
+        try:
+            yield
+        finally:
+            client.Backend.rpcclient.disconnect()
     finally:
+        # If we generated a ccache name, try to remove it, but don't fail
+        if not path:
+            try:
+                os.remove(ccache_name)
+            except OSError:
+                pass
         client.Backend.rpcclient.connect()
 
 
@@ -805,6 +875,7 @@ def host_keytab(hostname, options=None):
 
 def get_group_dn(cn):
     return DN(('cn', cn), api.env.container_group, api.env.basedn)
+
 
 def get_user_dn(uid):
     return DN(('uid', uid), api.env.container_user, api.env.basedn)

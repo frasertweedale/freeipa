@@ -361,7 +361,6 @@ IPA.cert.view_dialog = function(spec) {
     that.issuer = IPA.cert.parse_dn(spec.certificate.issuer);
     that.issued_on = spec.certificate.valid_not_before || '';
     that.expires_on = spec.certificate.valid_not_after || '';
-    that.md5_fingerprint = spec.certificate.md5_fingerprint || '';
     that.sha1_fingerprint = spec.certificate.sha1_fingerprint || '';
     that.sha256_fingerprint = spec.certificate.sha256_fingerprint || '';
 
@@ -427,8 +426,6 @@ IPA.cert.view_dialog = function(spec) {
 
         table_layout = that.create_layout().appendTo(that.container);
 
-        new_row('@i18n:objects.cert.md5_fingerprint', that.md5_fingerprint)
-            .appendTo(table_layout);
         new_row('@i18n:objects.cert.sha1_fingerprint', that.sha1_fingerprint)
             .appendTo(table_layout);
         new_row('@i18n:objects.cert.sha256_fingerprint', that.sha256_fingerprint)
@@ -570,11 +567,11 @@ IPA.cert.loader = function(spec) {
         var certificate = {
             issuer: result.issuer,
             certificate: result.certificate,
-            md5_fingerprint: result.md5_fingerprint,
             revocation_reason: result.revocation_reason,
             serial_number: result.serial_number,
             serial_number_hex: result.serial_number_hex,
             sha1_fingerprint: result.sha1_fingerprint,
+            sha256_fingerprint: result.sha256_fingerprint,
             subject: result.subject,
             valid_not_after: result.valid_not_after,
             valid_not_before: result.valid_not_before
@@ -780,19 +777,35 @@ IPA.cert.request_action = function(spec) {
 
 IPA.cert.perform_revoke = function(spec, sn, revocation_reason, cacn) {
 
-    spec.hide_activity_icon = spec.hide_activity_icon || false;
+    /**
+     * Sets whether activity notification box will be shown
+     * during executing command or not.
+     */
+    spec.notify_globally = spec.notify_globally === undefined ? true :
+            spec.notify_globally;
+
+
+    /**
+     * Specifies function which will be called before command execution starts.
+     */
+    spec.start_handler = spec.start_handler || null;
+
+    /**
+     * Specifies function which will be called after command execution ends.
+     */
+    spec.end_handler = spec.end_handler || null;
 
     rpc.command({
         entity: 'cert',
         method: 'revoke',
-        hide_activity_icon: spec.hide_activity_icon,
         args: [ sn ],
         options: {
             revocation_reason: revocation_reason,
             cacn: cacn
         },
-        notify_activity_start: spec.notify_activity_start,
-        notify_activity_end: spec.notify_activity_end,
+        notify_globally: spec.notify_globally,
+        start_handler: spec.start_handler,
+        end_handler: spec.end_handler,
         on_success: spec.on_success,
         on_error: spec.on_error
     }).execute();
@@ -906,6 +919,25 @@ IPA.cert.remove_hold_action = function(spec) {
 
 IPA.cert.perform_remove_hold = function(spec, sn, cacn) {
 
+    /**
+     * Sets whether activity notification box will be shown
+     * during executing command or not.
+     */
+    spec.notify_globally = spec.notify_globally === undefined ? true :
+            spec.notify_globally;
+
+
+    /**
+     * Specifies function which will be called before command execution starts.
+     */
+    spec.start_handler = spec.start_handler || null;
+
+    /**
+     * Specifies function which will be called after command execution ends.
+     */
+    spec.end_handler = spec.end_handler || null;
+
+
     rpc.command({
         entity: 'cert',
         method: 'remove_hold',
@@ -913,7 +945,10 @@ IPA.cert.perform_remove_hold = function(spec, sn, cacn) {
         options: {
             cacn: cacn
         },
-        on_success: spec.on_success
+        on_success: spec.on_success,
+        notify_globally: spec.notify_globally,
+        start_handler: spec.start_handler,
+        end_handler: spec.end_handler
     }).execute();
 };
 
@@ -1409,11 +1444,11 @@ IPA.cert.cert_widget = function(spec) {
             on_ok: function() {
 
                 var command_spec = {
-                    hide_activity_icon: true,
-                    notify_activity_end: function() {
+                    notify_globally: false,
+                    end_handler: function() {
                         that.spinner.emit('hide-spinner');
                     },
-                    notify_activity_start: function() {
+                    start_handler: function() {
                         that.spinner.emit('display-spinner');
                     },
                     on_success: function() {
@@ -1443,11 +1478,11 @@ IPA.cert.cert_widget = function(spec) {
             ok_label: '@i18n:buttons.remove_hold',
             on_ok: function () {
                 var command_spec = {
-                    hide_activity_icon: true,
-                    notify_activity_end: function() {
+                    notify_globally: false,
+                    end_handler: function() {
                         that.spinner.emit('hide-spinner');
                     },
-                    notify_activity_start: function() {
+                    start_handler: function() {
                         that.spinner.emit('display-spinner');
                     },
                     on_success: function() {
@@ -1541,12 +1576,12 @@ exp.create_cert_metadata = function() {
     add_param('valid_not_after',
                 text.get('@i18n:objects.cert.expires_on'),
                 text.get('@i18n:objects.cert.expires_on'));
-    add_param('md5_fingerprint',
-                text.get('@i18n:objects.cert.md5_fingerprint'),
-                text.get('@i18n:objects.cert.md5_fingerprint'));
     add_param('sha1_fingerprint',
                 text.get('@i18n:objects.cert.sha1_fingerprint'),
                 text.get('@i18n:objects.cert.sha1_fingerprint'));
+    add_param('sha256_fingerprint',
+                text.get('@i18n:objects.cert.sha256_fingerprint'),
+                text.get('@i18n:objects.cert.sha256_fingerprint'));
     add_param('certificate',
                 text.get('@i18n:objects.cert.certificate'),
                 text.get('@i18n:objects.cert.certificate'));
@@ -1724,7 +1759,7 @@ return {
                         'valid_not_before',
                         'valid_not_after',
                         'sha1_fingerprint',
-                        'md5_fingerprint',
+                        'sha256_fingerprint',
                         {
                             $type: 'revocation_reason',
                             name: 'revocation_reason'
@@ -1841,7 +1876,6 @@ IPA.cert.details_facet = function(spec, no_init) {
     that.create_refresh_command = function() {
 
         var command = that.details_facet_create_refresh_command();
-        delete command.options.all;
         delete command.options.rights;
 
         command.options = command.options || {};

@@ -129,11 +129,6 @@ class PublicMessage(UserWarning):
             data=self.kw,
         )
 
-    if six.PY3:
-        @property
-        def message(self):
-            return str(self)
-
 
 class VersionMissing(PublicMessage):
     """
@@ -477,7 +472,18 @@ class CertificateInvalid(PublicMessage):
     """
     errno = 13029
     type = "error"
-    format = _("%(subject)s: Invalid certificate. "
+    format = _("%(subject)s: Malformed certificate. "
+               "%(reason)s")
+
+
+class FailedToAddHostDNSRecords(PublicMessage):
+    """
+    **13030** Failed to add host DNS records
+    """
+
+    errno = 13030
+    type = "warning"
+    format = _("The host was added but the DNS update failed with: "
                "%(reason)s")
 
 

@@ -222,6 +222,10 @@ define(['dojo/_base/declare',
             }
         },
 
+        disable_user_menu_item: function(name) {
+            this.user_menu.disable_item(name);
+        },
+
         on_menu_item_click: function(item) {
             this.collapse_menu();
         },
@@ -234,6 +238,8 @@ define(['dojo/_base/declare',
                 this.emit('logout-click');
             } else if (item.name == 'password_reset') {
                 this.emit('password-reset-click');
+            } else if (item.name == 'configuration') {
+                this.emit('configuration-click');
             } else if (item.name == 'about') {
                 this.emit('about-click');
             }
@@ -265,6 +271,11 @@ define(['dojo/_base/declare',
                         'class': 'divider'
                     },
                     {
+                        name: 'configuration',
+                        label: 'Customization',
+                        icon: 'fa-gear'
+                    },
+                    {
                         name: 'about',
                         label: 'About',
                         icon: 'fa-question'
@@ -274,7 +285,7 @@ define(['dojo/_base/declare',
                     },
                     {
                         name: 'logout',
-                        label: 'Logout',
+                        label: 'Log out',
                         icon: 'fa-sign-out'
                     }
                 ]

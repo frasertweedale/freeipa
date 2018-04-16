@@ -20,14 +20,19 @@
 import os
 
 import six
-import usb.core
-import yubico
 
 from ipalib import _, api, IntEnum
-from ipalib.errors import NotFound
+from ipalib.errors import NotFound, SkipPluginModule
 from ipalib.frontend import Command, Method, Object
 from ipalib.plugable import Registry
 from ipalib.util import classproperty
+
+try:
+    import usb.core
+    import yubico
+except ImportError:
+    # python-yubico depends on pyusb
+    raise SkipPluginModule(reason=_("python-yubico is not installed."))
 
 if six.PY3:
     unicode = str
@@ -81,6 +86,10 @@ class otptoken_add_yubikey(Command):
 
     NO_CLI = classproperty(__NO_CLI_getter)
 
+    @property
+    def api_version(self):
+        return self.api.Command.otptoken_add.api_version
+
     def get_args(self):
         for arg in self.api.Command.otptoken_add.args():
             yield arg
@@ -122,6 +131,9 @@ class otptoken_add_yubikey(Command):
             raise NotFound(reason="No YubiKey found: %s" % e.strerror)
         except yubico.yubikey.YubiKeyError as e:
             raise NotFound(reason=e.reason)
+        except ValueError as e:
+            raise NotFound(reason=str(e) + ". Please install 'libyubikey' "
+                           "and 'libusb' packages first.")
 
         assert yk.version_num() >= (2, 1)
 
@@ -138,7 +150,10 @@ class otptoken_add_yubikey(Command):
 
         # Write the config.
         cfg = yk.init_config()
-        cfg.mode_oath_hotp(key, kwargs['ipatokenotpdigits'])
+        cfg.mode_oath_hotp(key, kwargs.get(
+            'ipatokenotpdigits',
+            self.get_default_of('ipatokenotpdigits')
+        ))
         cfg.extended_flag('SERIAL_API_VISIBLE', True)
         yk.write_config(cfg, slot=kwargs['slot'])
 

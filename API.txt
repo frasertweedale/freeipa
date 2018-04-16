@@ -445,10 +445,11 @@ option: Str('version?')
 output: Output('count', type=[<type 'int'>])
 output: Output('results', type=[<type 'list'>, <type 'tuple'>])
 command: ca_add/1
-args: 1,7,3
+args: 1,8,3
 arg: Str('cn', cli_name='name')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('chain', autofill=True, default=False)
 option: Str('description?', cli_name='desc')
 option: DNParam('ipacasubjectdn', cli_name='subject')
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
@@ -519,9 +520,10 @@ output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: PrimaryKey('value')
 command: ca_show/1
-args: 1,4,3
+args: 1,5,3
 arg: Str('cn', cli_name='name')
 option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('chain', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Flag('rights', autofill=True, default=False)
 option: Str('version?')
@@ -742,7 +744,7 @@ args: 1,29,4
 arg: Str('criteria?')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('cacn?', cli_name='ca')
-option: Bytes('certificate?', autofill=False)
+option: Certificate('certificate?', autofill=False)
 option: Flag('exactly?', autofill=True, default=False)
 option: Str('host*', cli_name='hosts')
 option: DateTime('issuedon_from?', autofill=False)
@@ -780,11 +782,12 @@ option: Str('cacn?', autofill=True, cli_name='ca', default=u'ipa')
 option: Str('version?')
 output: Output('result')
 command: cert_request/1
-args: 1,8,3
-arg: Str('csr', cli_name='csr_file')
+args: 1,9,3
+arg: CertificateSigningRequest('csr', cli_name='csr_file')
 option: Flag('add', autofill=True, default=False)
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('cacn?', autofill=True, cli_name='ca', default=u'ipa')
+option: Flag('chain', autofill=True, default=False)
 option: Principal('principal')
 option: Str('profile_id?')
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
@@ -801,10 +804,11 @@ option: Int('revocation_reason', autofill=True, default=0)
 option: Str('version?')
 output: Output('result')
 command: cert_show/1
-args: 1,6,3
+args: 1,7,3
 arg: Int('serial_number')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('cacn?', autofill=True, cli_name='ca', default=u'ipa')
+option: Flag('chain', autofill=True, default=False)
 option: Flag('no_members', autofill=True, default=False)
 option: Str('out?')
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
@@ -818,6 +822,126 @@ arg: Int('request_id')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('cacn?', autofill=True, cli_name='ca', default=u'ipa')
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: certmap_match/1
+args: 1,3,4
+arg: Certificate('certificate', cli_name='certificate')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Str('version?')
+output: Output('count', type=[<type 'int'>])
+output: ListOfEntries('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: Output('truncated', type=[<type 'bool'>])
+command: certmapconfig_mod/1
+args: 0,8,3
+option: Str('addattr*', cli_name='addattr')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Str('delattr*', cli_name='delattr')
+option: Bool('ipacertmappromptusername?', autofill=False, cli_name='promptusername')
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Flag('rights', autofill=True, default=False)
+option: Str('setattr*', cli_name='setattr')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: certmapconfig_show/1
+args: 0,4,3
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Flag('rights', autofill=True, default=False)
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: certmaprule_add/1
+args: 1,11,3
+arg: Str('cn', cli_name='rulename')
+option: Str('addattr*', cli_name='addattr')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: DNSNameParam('associateddomain*', cli_name='domain')
+option: Str('description?', cli_name='desc')
+option: Str('ipacertmapmaprule?', cli_name='maprule')
+option: Str('ipacertmapmatchrule?', cli_name='matchrule')
+option: Int('ipacertmappriority?', cli_name='priority')
+option: Flag('ipaenabledflag?', autofill=True, default=True)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Str('setattr*', cli_name='setattr')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: certmaprule_del/1
+args: 1,2,3
+arg: Str('cn+', cli_name='rulename')
+option: Flag('continue', autofill=True, cli_name='continue', default=False)
+option: Str('version?')
+output: Output('result', type=[<type 'dict'>])
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: ListOfPrimaryKeys('value')
+command: certmaprule_disable/1
+args: 1,1,3
+arg: Str('cn', cli_name='rulename')
+option: Str('version?')
+output: Output('result', type=[<type 'bool'>])
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: certmaprule_enable/1
+args: 1,1,3
+arg: Str('cn', cli_name='rulename')
+option: Str('version?')
+output: Output('result', type=[<type 'bool'>])
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: certmaprule_find/1
+args: 1,13,4
+arg: Str('criteria?')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: DNSNameParam('associateddomain*', autofill=False, cli_name='domain')
+option: Str('cn?', autofill=False, cli_name='rulename')
+option: Str('description?', autofill=False, cli_name='desc')
+option: Str('ipacertmapmaprule?', autofill=False, cli_name='maprule')
+option: Str('ipacertmapmatchrule?', autofill=False, cli_name='matchrule')
+option: Int('ipacertmappriority?', autofill=False, cli_name='priority')
+option: Bool('ipaenabledflag?', autofill=False, default=True)
+option: Flag('pkey_only?', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Int('sizelimit?', autofill=False)
+option: Int('timelimit?', autofill=False)
+option: Str('version?')
+output: Output('count', type=[<type 'int'>])
+output: ListOfEntries('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: Output('truncated', type=[<type 'bool'>])
+command: certmaprule_mod/1
+args: 1,13,3
+arg: Str('cn', cli_name='rulename')
+option: Str('addattr*', cli_name='addattr')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: DNSNameParam('associateddomain*', autofill=False, cli_name='domain')
+option: Str('delattr*', cli_name='delattr')
+option: Str('description?', autofill=False, cli_name='desc')
+option: Str('ipacertmapmaprule?', autofill=False, cli_name='maprule')
+option: Str('ipacertmapmatchrule?', autofill=False, cli_name='matchrule')
+option: Int('ipacertmappriority?', autofill=False, cli_name='priority')
+option: Flag('ipaenabledflag?', autofill=True, default=True)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Flag('rights', autofill=True, default=False)
+option: Str('setattr*', cli_name='setattr')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: certmaprule_show/1
+args: 1,4,3
+arg: Str('cn', cli_name='rulename')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Flag('rights', autofill=True, default=False)
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -937,7 +1061,7 @@ args: 0,1,1
 option: Str('version?')
 output: Output('result')
 command: config_mod/1
-args: 0,26,3
+args: 0,27,3
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('ca_renewal_master_server?', autofill=False)
@@ -946,6 +1070,7 @@ option: StrEnum('ipaconfigstring*', autofill=False, cli_name='ipaconfigstring', 
 option: Str('ipadefaultemaildomain?', autofill=False, cli_name='emaildomain')
 option: Str('ipadefaultloginshell?', autofill=False, cli_name='defaultshell')
 option: Str('ipadefaultprimarygroup?', autofill=False, cli_name='defaultgroup')
+option: Str('ipadomainresolutionorder?', autofill=False, cli_name='domain_resolution_order')
 option: Str('ipagroupobjectclasses*', autofill=False, cli_name='groupobjectclasses')
 option: IA5Str('ipagroupsearchfields?', autofill=False, cli_name='groupsearch')
 option: IA5Str('ipahomesrootdir?', autofill=False, cli_name='homedirectory')
@@ -2038,7 +2163,7 @@ output: ListOfEntries('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: Output('truncated', type=[<type 'bool'>])
 command: hbacrule_mod/1
-args: 1,16,3
+args: 1,17,3
 arg: Str('cn', cli_name='name')
 option: StrEnum('accessruletype?', autofill=False, cli_name='type', default=u'allow', values=[u'allow', u'deny'])
 option: Str('addattr*', cli_name='addattr')
@@ -2050,6 +2175,7 @@ option: StrEnum('hostcategory?', autofill=False, cli_name='hostcat', values=[u'a
 option: Bool('ipaenabledflag?', autofill=False)
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Str('rename?', cli_name='rename')
 option: Flag('rights', autofill=True, default=False)
 option: StrEnum('servicecategory?', autofill=False, cli_name='servicecat', values=[u'all'])
 option: Str('setattr*', cli_name='setattr')
@@ -2308,7 +2434,7 @@ option: Str('nsosversion?', cli_name='os')
 option: Flag('random?', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Str('setattr*', cli_name='setattr')
-option: Bytes('usercertificate*', cli_name='certificate')
+option: Certificate('usercertificate*', cli_name='certificate')
 option: Str('userclass*', cli_name='class')
 option: Str('userpassword?', cli_name='password')
 option: Str('version?')
@@ -2321,7 +2447,7 @@ arg: Str('fqdn', cli_name='hostname')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
-option: Bytes('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -2454,7 +2580,7 @@ option: Flag('pkey_only?', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Int('sizelimit?', autofill=False)
 option: Int('timelimit?', autofill=False)
-option: Bytes('usercertificate*', autofill=False, cli_name='certificate')
+option: Certificate('usercertificate*', autofill=False, cli_name='certificate')
 option: Str('userclass*', autofill=False, cli_name='class')
 option: Str('userpassword?', autofill=False, cli_name='password')
 option: Str('version?')
@@ -2487,7 +2613,7 @@ option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Flag('rights', autofill=True, default=False)
 option: Str('setattr*', cli_name='setattr')
 option: Flag('updatedns?', autofill=True, default=False)
-option: Bytes('usercertificate*', autofill=False, cli_name='certificate')
+option: Certificate('usercertificate*', autofill=False, cli_name='certificate')
 option: Str('userclass*', autofill=False, cli_name='class')
 option: Str('userpassword?', autofill=False, cli_name='password')
 option: Str('version?')
@@ -2500,7 +2626,7 @@ arg: Str('fqdn', cli_name='hostname')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
-option: Bytes('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -2736,7 +2862,7 @@ option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Str('setattr*', cli_name='setattr')
 option: Str('uid?', cli_name='login')
 option: Int('uidnumber?', cli_name='uid')
-option: Bytes('usercertificate*', cli_name='certificate')
+option: Certificate('usercertificate*', cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -2748,7 +2874,7 @@ arg: Str('ipaanchoruuid', cli_name='anchor')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Flag('fallback_to_ldap?', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
-option: Bytes('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -2808,7 +2934,7 @@ option: Flag('rights', autofill=True, default=False)
 option: Str('setattr*', cli_name='setattr')
 option: Str('uid?', autofill=False, cli_name='login')
 option: Int('uidnumber?', autofill=False, cli_name='uid')
-option: Bytes('usercertificate*', autofill=False, cli_name='certificate')
+option: Certificate('usercertificate*', autofill=False, cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -2820,7 +2946,7 @@ arg: Str('ipaanchoruuid', cli_name='anchor')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Flag('fallback_to_ldap?', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
-option: Bytes('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -2847,7 +2973,7 @@ option: Int('ipabaserid?', cli_name='rid_base')
 option: Int('ipaidrangesize', cli_name='range_size')
 option: Str('ipanttrusteddomainname?', cli_name='dom_name')
 option: Str('ipanttrusteddomainsid?', cli_name='dom_sid')
-option: StrEnum('iparangetype?', cli_name='type', values=[u'ipa-ad-trust-posix', u'ipa-ad-trust', u'ipa-local'])
+option: StrEnum('iparangetype?', cli_name='type', values=[u'ipa-ad-trust', u'ipa-ad-trust-posix', u'ipa-local'])
 option: Int('ipasecondarybaserid?', cli_name='secondary_rid_base')
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Str('setattr*', cli_name='setattr')
@@ -2872,7 +2998,7 @@ option: Int('ipabaseid?', autofill=False, cli_name='base_id')
 option: Int('ipabaserid?', autofill=False, cli_name='rid_base')
 option: Int('ipaidrangesize?', autofill=False, cli_name='range_size')
 option: Str('ipanttrusteddomainsid?', autofill=False, cli_name='dom_sid')
-option: StrEnum('iparangetype?', autofill=False, cli_name='type', values=[u'ipa-ad-trust-posix', u'ipa-ad-trust', u'ipa-local'])
+option: StrEnum('iparangetype?', autofill=False, cli_name='type', values=[u'ipa-ad-trust', u'ipa-ad-trust-posix', u'ipa-local'])
 option: Int('ipasecondarybaserid?', autofill=False, cli_name='secondary_rid_base')
 option: Flag('pkey_only?', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
@@ -2913,11 +3039,12 @@ output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: PrimaryKey('value')
 command: idview_add/1
-args: 1,6,3
+args: 1,7,3
 arg: Str('cn', cli_name='name')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('description?', cli_name='desc')
+option: Str('ipadomainresolutionorder?', cli_name='domain_resolution_order')
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Str('setattr*', cli_name='setattr')
 option: Str('version?')
@@ -2958,12 +3085,13 @@ output: ListOfEntries('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: Output('truncated', type=[<type 'bool'>])
 command: idview_mod/1
-args: 1,9,3
+args: 1,10,3
 arg: Str('cn', cli_name='name')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('delattr*', cli_name='delattr')
 option: Str('description?', autofill=False, cli_name='desc')
+option: Str('ipadomainresolutionorder?', autofill=False, cli_name='domain_resolution_order')
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Str('rename?', cli_name='rename')
 option: Flag('rights', autofill=True, default=False)
@@ -3127,7 +3255,7 @@ option: Str('groupignoreobjectclass*', autofill=True, cli_name='group_ignore_obj
 option: Str('groupobjectclass+', autofill=True, cli_name='group_objectclass', default=[u'groupOfUniqueNames', u'groupOfNames'])
 option: Flag('groupoverwritegid', autofill=True, cli_name='group_overwrite_gid', default=False)
 option: StrEnum('schema?', autofill=True, cli_name='schema', default=u'RFC2307bis', values=[u'RFC2307bis', u'RFC2307'])
-option: StrEnum('scope', autofill=True, cli_name='scope', default=u'onelevel', values=[u'base', u'subtree', u'onelevel'])
+option: StrEnum('scope', autofill=True, cli_name='scope', default=u'onelevel', values=[u'base', u'onelevel', u'subtree'])
 option: Bool('use_def_group?', autofill=True, cli_name='use_default_group', default=True)
 option: DNParam('usercontainer', autofill=True, cli_name='user_container', default=ipapython.dn.DN('ou=people'))
 option: Str('userignoreattribute*', autofill=True, cli_name='user_ignore_attribute', default=[])
@@ -3608,11 +3736,20 @@ command: ping/1
 args: 0,1,1
 option: Str('version?')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
-command: pkinit_anonymous/1
-args: 1,1,1
-arg: Str('action')
+command: pkinit_status/1
+args: 1,7,4
+arg: Str('criteria?')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Str('server_server?', autofill=False, cli_name='server')
+option: Int('sizelimit?', autofill=False)
+option: StrEnum('status?', autofill=False, cli_name='status', values=[u'enabled', u'disabled'])
+option: Int('timelimit?', autofill=False)
 option: Str('version?')
-output: Output('result')
+output: Output('count', type=[<type 'int'>])
+output: ListOfEntries('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: Output('truncated', type=[<type 'bool'>])
 command: plugins/1
 args: 0,3,3
 option: Flag('all', autofill=True, cli_name='all', default=True)
@@ -4333,7 +4470,7 @@ option: Str('krbprincipalauthind*', cli_name='auth_ind')
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Str('setattr*', cli_name='setattr')
-option: Bytes('usercertificate*', cli_name='certificate')
+option: Certificate('usercertificate*', cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -4344,7 +4481,7 @@ arg: Principal('krbcanonicalname', cli_name='canonical_principal')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
-option: Bytes('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -4478,7 +4615,7 @@ option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Flag('rights', autofill=True, default=False)
 option: Str('setattr*', cli_name='setattr')
-option: Bytes('usercertificate*', autofill=False, cli_name='certificate')
+option: Certificate('usercertificate*', autofill=False, cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -4489,7 +4626,7 @@ arg: Principal('krbcanonicalname', cli_name='canonical_principal')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
-option: Bytes('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -4700,7 +4837,7 @@ output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: PrimaryKey('value')
 command: stageuser_add/1
-args: 1,44,3
+args: 1,45,3
 arg: Str('uid', cli_name='login')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
@@ -4721,6 +4858,7 @@ option: Str('ipasshpubkey*', cli_name='sshpubkey')
 option: Str('ipatokenradiusconfiglink?', cli_name='radius')
 option: Str('ipatokenradiususername?', cli_name='radius_username')
 option: StrEnum('ipauserauthtype*', cli_name='user_auth_type', values=[u'password', u'radius', u'otp'])
+option: DateTime('krbpasswordexpiration?', cli_name='password_expiration')
 option: DateTime('krbprincipalexpiration?', cli_name='principal_expiration')
 option: Principal('krbprincipalname*', autofill=True, cli_name='principal')
 option: Str('l?', cli_name='city')
@@ -4742,9 +4880,34 @@ option: Str('street?', cli_name='street')
 option: Str('telephonenumber*', cli_name='phone')
 option: Str('title?')
 option: Int('uidnumber?', cli_name='uid')
-option: Bytes('usercertificate*', cli_name='certificate')
+option: Certificate('usercertificate*', cli_name='certificate')
 option: Str('userclass*', cli_name='class')
 option: Password('userpassword?', cli_name='password')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: stageuser_add_cert/1
+args: 1,5,3
+arg: Str('uid', cli_name='login')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('no_members', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: stageuser_add_certmapdata/1
+args: 2,7,3
+arg: Str('uid', cli_name='login')
+arg: Str('ipacertmapdata*', alwaysask=False, cli_name='certmapdata')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Certificate('certificate*', cli_name='certificate')
+option: DNParam('issuer?', cli_name='issuer')
+option: Flag('no_members', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: DNParam('subject?', cli_name='subject')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -4760,6 +4923,17 @@ option: Str('version?')
 output: Output('completed', type=[<type 'int'>])
 output: Output('failed', type=[<type 'dict'>])
 output: Entry('result')
+command: stageuser_add_principal/1
+args: 2,4,3
+arg: Str('uid', cli_name='login')
+arg: Principal('krbprincipalname+', alwaysask=True, autofill=True, cli_name='principal')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('no_members', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
 command: stageuser_del/1
 args: 1,2,3
 arg: Str('uid+', cli_name='login')
@@ -4769,7 +4943,7 @@ output: Output('result', type=[<type 'dict'>])
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: ListOfPrimaryKeys('value')
 command: stageuser_find/1
-args: 1,53,4
+args: 1,54,4
 arg: Str('criteria?')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('carlicense*', autofill=False)
@@ -4792,6 +4966,7 @@ option: Str('initials?', autofill=False)
 option: Str('ipatokenradiusconfiglink?', autofill=False, cli_name='radius')
 option: Str('ipatokenradiususername?', autofill=False, cli_name='radius_username')
 option: StrEnum('ipauserauthtype*', autofill=False, cli_name='user_auth_type', values=[u'password', u'radius', u'otp'])
+option: DateTime('krbpasswordexpiration?', autofill=False, cli_name='password_expiration')
 option: DateTime('krbprincipalexpiration?', autofill=False, cli_name='principal_expiration')
 option: Principal('krbprincipalname*', autofill=False, cli_name='principal')
 option: Str('l?', autofill=False, cli_name='city')
@@ -4820,7 +4995,7 @@ option: Int('timelimit?', autofill=False)
 option: Str('title?', autofill=False)
 option: Str('uid?', autofill=False, cli_name='login')
 option: Int('uidnumber?', autofill=False, cli_name='uid')
-option: Bytes('usercertificate*', autofill=False, cli_name='certificate')
+option: Certificate('usercertificate*', autofill=False, cli_name='certificate')
 option: Str('userclass*', autofill=False, cli_name='class')
 option: Password('userpassword?', autofill=False, cli_name='password')
 option: Str('version?')
@@ -4829,7 +5004,7 @@ output: ListOfEntries('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: Output('truncated', type=[<type 'bool'>])
 command: stageuser_mod/1
-args: 1,46,3
+args: 1,47,3
 arg: Str('uid', cli_name='login')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
@@ -4850,6 +5025,7 @@ option: Str('ipasshpubkey*', autofill=False, cli_name='sshpubkey')
 option: Str('ipatokenradiusconfiglink?', autofill=False, cli_name='radius')
 option: Str('ipatokenradiususername?', autofill=False, cli_name='radius_username')
 option: StrEnum('ipauserauthtype*', autofill=False, cli_name='user_auth_type', values=[u'password', u'radius', u'otp'])
+option: DateTime('krbpasswordexpiration?', autofill=False, cli_name='password_expiration')
 option: DateTime('krbprincipalexpiration?', autofill=False, cli_name='principal_expiration')
 option: Principal('krbprincipalname*', autofill=False, cli_name='principal')
 option: Str('l?', autofill=False, cli_name='city')
@@ -4873,9 +5049,34 @@ option: Str('street?', autofill=False, cli_name='street')
 option: Str('telephonenumber*', autofill=False, cli_name='phone')
 option: Str('title?', autofill=False)
 option: Int('uidnumber?', autofill=False, cli_name='uid')
-option: Bytes('usercertificate*', autofill=False, cli_name='certificate')
+option: Certificate('usercertificate*', autofill=False, cli_name='certificate')
 option: Str('userclass*', autofill=False, cli_name='class')
 option: Password('userpassword?', autofill=False, cli_name='password')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: stageuser_remove_cert/1
+args: 1,5,3
+arg: Str('uid', cli_name='login')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('no_members', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: stageuser_remove_certmapdata/1
+args: 2,7,3
+arg: Str('uid', cli_name='login')
+arg: Str('ipacertmapdata*', alwaysask=False, cli_name='certmapdata')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Certificate('certificate*', cli_name='certificate')
+option: DNParam('issuer?', cli_name='issuer')
+option: Flag('no_members', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: DNParam('subject?', cli_name='subject')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -4891,6 +5092,17 @@ option: Str('version?')
 output: Output('completed', type=[<type 'int'>])
 output: Output('failed', type=[<type 'dict'>])
 output: Entry('result')
+command: stageuser_remove_principal/1
+args: 2,4,3
+arg: Str('uid', cli_name='login')
+arg: Principal('krbprincipalname+', alwaysask=True, autofill=True, cli_name='principal')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Flag('no_members', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
 command: stageuser_show/1
 args: 1,5,3
 arg: Str('uid', cli_name='login')
@@ -5203,7 +5415,7 @@ output: ListOfEntries('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: Output('truncated', type=[<type 'bool'>])
 command: sudorule_mod/1
-args: 1,20,3
+args: 1,21,3
 arg: Str('cn', cli_name='sudorule_name')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
@@ -5220,6 +5432,7 @@ option: StrEnum('ipasudorunasgroupcategory?', autofill=False, cli_name='runasgro
 option: StrEnum('ipasudorunasusercategory?', autofill=False, cli_name='runasusercat', values=[u'all'])
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: Str('rename?', cli_name='rename')
 option: Flag('rights', autofill=True, default=False)
 option: Str('setattr*', cli_name='setattr')
 option: Int('sudoorder?', autofill=False, cli_name='order', default=0)
@@ -5508,7 +5721,7 @@ option: Int('base_id?', cli_name='base_id')
 option: Bool('bidirectional?', cli_name='two_way', default=False)
 option: Bool('external?', cli_name='external', default=False)
 option: Int('range_size?', cli_name='range_size')
-option: StrEnum('range_type?', cli_name='range_type', values=[u'ipa-ad-trust-posix', u'ipa-ad-trust'])
+option: StrEnum('range_type?', cli_name='range_type', values=[u'ipa-ad-trust', u'ipa-ad-trust-posix'])
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
 option: Str('realm_admin?', cli_name='admin')
 option: Password('realm_passwd?', cli_name='password', confirm=False)
@@ -5559,11 +5772,12 @@ output: ListOfEntries('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: Output('truncated', type=[<type 'bool'>])
 command: trust_mod/1
-args: 1,9,3
+args: 1,10,3
 arg: Str('cn', cli_name='realm')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('delattr*', cli_name='delattr')
+option: Str('ipantadditionalsuffixes*', autofill=False, cli_name='upn_suffixes')
 option: Str('ipantsidblacklistincoming*', autofill=False, cli_name='sid_blacklist_incoming')
 option: Str('ipantsidblacklistoutgoing*', autofill=False, cli_name='sid_blacklist_outgoing')
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
@@ -5689,7 +5903,7 @@ output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: PrimaryKey('value')
 command: user_add/1
-args: 1,45,3
+args: 1,46,3
 arg: Str('uid', cli_name='login')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
@@ -5709,6 +5923,7 @@ option: Str('ipasshpubkey*', cli_name='sshpubkey')
 option: Str('ipatokenradiusconfiglink?', cli_name='radius')
 option: Str('ipatokenradiususername?', cli_name='radius_username')
 option: StrEnum('ipauserauthtype*', cli_name='user_auth_type', values=[u'password', u'radius', u'otp'])
+option: DateTime('krbpasswordexpiration?', cli_name='password_expiration')
 option: DateTime('krbprincipalexpiration?', cli_name='principal_expiration')
 option: Principal('krbprincipalname*', autofill=True, cli_name='principal')
 option: Str('l?', cli_name='city')
@@ -5718,7 +5933,7 @@ option: Str('manager?')
 option: Str('mobile*')
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('noprivate', autofill=True, cli_name='noprivate', default=False)
-option: Bool('nsaccountlock?')
+option: Bool('nsaccountlock?', cli_name='disabled', default=False)
 option: Str('ou?', cli_name='orgunit')
 option: Str('pager*')
 option: Str('postalcode?')
@@ -5732,7 +5947,7 @@ option: Str('street?', cli_name='street')
 option: Str('telephonenumber*', cli_name='phone')
 option: Str('title?')
 option: Int('uidnumber?', cli_name='uid')
-option: Bytes('usercertificate*', cli_name='certificate')
+option: Certificate('usercertificate*', cli_name='certificate')
 option: Str('userclass*', cli_name='class')
 option: Password('userpassword?', cli_name='password')
 option: Str('version?')
@@ -5745,7 +5960,21 @@ arg: Str('uid', cli_name='login')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
-option: Bytes('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: user_add_certmapdata/1
+args: 2,7,3
+arg: Str('uid', cli_name='login')
+arg: Str('ipacertmapdata*', alwaysask=False, cli_name='certmapdata')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Certificate('certificate*', cli_name='certificate')
+option: DNParam('issuer?', cli_name='issuer')
+option: Flag('no_members', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: DNParam('subject?', cli_name='subject')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -5796,7 +6025,7 @@ output: Output('result', type=[<type 'bool'>])
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: PrimaryKey('value')
 command: user_find/1
-args: 1,56,4
+args: 1,57,4
 arg: Str('criteria?')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Str('carlicense*', autofill=False)
@@ -5819,6 +6048,7 @@ option: Str('initials?', autofill=False)
 option: Str('ipatokenradiusconfiglink?', autofill=False, cli_name='radius')
 option: Str('ipatokenradiususername?', autofill=False, cli_name='radius_username')
 option: StrEnum('ipauserauthtype*', autofill=False, cli_name='user_auth_type', values=[u'password', u'radius', u'otp'])
+option: DateTime('krbpasswordexpiration?', autofill=False, cli_name='password_expiration')
 option: DateTime('krbprincipalexpiration?', autofill=False, cli_name='principal_expiration')
 option: Principal('krbprincipalname*', autofill=False, cli_name='principal')
 option: Str('l?', autofill=False, cli_name='city')
@@ -5832,7 +6062,7 @@ option: Str('not_in_hbacrule*', cli_name='not_in_hbacrules')
 option: Str('not_in_netgroup*', cli_name='not_in_netgroups')
 option: Str('not_in_role*', cli_name='not_in_roles')
 option: Str('not_in_sudorule*', cli_name='not_in_sudorules')
-option: Bool('nsaccountlock?', autofill=False)
+option: Bool('nsaccountlock?', autofill=False, cli_name='disabled', default=False)
 option: Str('ou?', autofill=False, cli_name='orgunit')
 option: Str('pager*', autofill=False)
 option: Flag('pkey_only?', autofill=True, default=False)
@@ -5849,7 +6079,7 @@ option: Int('timelimit?', autofill=False)
 option: Str('title?', autofill=False)
 option: Str('uid?', autofill=False, cli_name='login')
 option: Int('uidnumber?', autofill=False, cli_name='uid')
-option: Bytes('usercertificate*', autofill=False, cli_name='certificate')
+option: Certificate('usercertificate*', autofill=False, cli_name='certificate')
 option: Str('userclass*', autofill=False, cli_name='class')
 option: Password('userpassword?', autofill=False, cli_name='password')
 option: Str('version?')
@@ -5859,7 +6089,7 @@ output: ListOfEntries('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: Output('truncated', type=[<type 'bool'>])
 command: user_mod/1
-args: 1,47,3
+args: 1,48,3
 arg: Str('uid', cli_name='login')
 option: Str('addattr*', cli_name='addattr')
 option: Flag('all', autofill=True, cli_name='all', default=False)
@@ -5880,6 +6110,7 @@ option: Str('ipasshpubkey*', autofill=False, cli_name='sshpubkey')
 option: Str('ipatokenradiusconfiglink?', autofill=False, cli_name='radius')
 option: Str('ipatokenradiususername?', autofill=False, cli_name='radius_username')
 option: StrEnum('ipauserauthtype*', autofill=False, cli_name='user_auth_type', values=[u'password', u'radius', u'otp'])
+option: DateTime('krbpasswordexpiration?', autofill=False, cli_name='password_expiration')
 option: DateTime('krbprincipalexpiration?', autofill=False, cli_name='principal_expiration')
 option: Principal('krbprincipalname*', autofill=False, cli_name='principal')
 option: Str('l?', autofill=False, cli_name='city')
@@ -5888,7 +6119,7 @@ option: Str('mail*', autofill=False, cli_name='email')
 option: Str('manager?', autofill=False)
 option: Str('mobile*', autofill=False)
 option: Flag('no_members', autofill=True, default=False)
-option: Bool('nsaccountlock?', autofill=False)
+option: Bool('nsaccountlock?', autofill=False, cli_name='disabled', default=False)
 option: Str('ou?', autofill=False, cli_name='orgunit')
 option: Str('pager*', autofill=False)
 option: Str('postalcode?', autofill=False)
@@ -5904,7 +6135,7 @@ option: Str('street?', autofill=False, cli_name='street')
 option: Str('telephonenumber*', autofill=False, cli_name='phone')
 option: Str('title?', autofill=False)
 option: Int('uidnumber?', autofill=False, cli_name='uid')
-option: Bytes('usercertificate*', autofill=False, cli_name='certificate')
+option: Certificate('usercertificate*', autofill=False, cli_name='certificate')
 option: Str('userclass*', autofill=False, cli_name='class')
 option: Password('userpassword?', autofill=False, cli_name='password')
 option: Str('version?')
@@ -5917,7 +6148,21 @@ arg: Str('uid', cli_name='login')
 option: Flag('all', autofill=True, cli_name='all', default=False)
 option: Flag('no_members', autofill=True, default=False)
 option: Flag('raw', autofill=True, cli_name='raw', default=False)
-option: Bytes('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Certificate('usercertificate+', alwaysask=True, cli_name='certificate')
+option: Str('version?')
+output: Entry('result')
+output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
+output: PrimaryKey('value')
+command: user_remove_certmapdata/1
+args: 2,7,3
+arg: Str('uid', cli_name='login')
+arg: Str('ipacertmapdata*', alwaysask=False, cli_name='certmapdata')
+option: Flag('all', autofill=True, cli_name='all', default=False)
+option: Certificate('certificate*', cli_name='certificate')
+option: DNParam('issuer?', cli_name='issuer')
+option: Flag('no_members', autofill=True, default=False)
+option: Flag('raw', autofill=True, cli_name='raw', default=False)
+option: DNParam('subject?', cli_name='subject')
 option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
@@ -6229,6 +6474,12 @@ option: Str('version?')
 output: Entry('result')
 output: Output('summary', type=[<type 'unicode'>, <type 'NoneType'>])
 output: PrimaryKey('value')
+command: whoami/1
+args: 0,1,3
+option: Str('version?')
+output: Output('arguments', type=[<type 'list'>, <type 'tuple'>])
+output: Output('command', type=[<type 'unicode'>])
+output: Output('object', type=[<type 'unicode'>])
 default: aci/1
 default: aci_add/1
 default: aci_del/1
@@ -6305,6 +6556,19 @@ default: cert_request/1
 default: cert_revoke/1
 default: cert_show/1
 default: cert_status/1
+default: certmap/1
+default: certmap_match/1
+default: certmapconfig/1
+default: certmapconfig_mod/1
+default: certmapconfig_show/1
+default: certmaprule/1
+default: certmaprule_add/1
+default: certmaprule_del/1
+default: certmaprule_disable/1
+default: certmaprule_enable/1
+default: certmaprule_find/1
+default: certmaprule_mod/1
+default: certmaprule_show/1
 default: certprofile/1
 default: certprofile_del/1
 default: certprofile_find/1
@@ -6555,7 +6819,7 @@ default: permission_remove_member/1
 default: permission_show/1
 default: ping/1
 default: pkinit/1
-default: pkinit_anonymous/1
+default: pkinit_status/1
 default: plugins/1
 default: privilege/1
 default: privilege_add/1
@@ -6659,11 +6923,17 @@ default: sidgen_was_run/1
 default: stageuser/1
 default: stageuser_activate/1
 default: stageuser_add/1
+default: stageuser_add_cert/1
+default: stageuser_add_certmapdata/1
 default: stageuser_add_manager/1
+default: stageuser_add_principal/1
 default: stageuser_del/1
 default: stageuser_find/1
 default: stageuser_mod/1
+default: stageuser_remove_cert/1
+default: stageuser_remove_certmapdata/1
 default: stageuser_remove_manager/1
+default: stageuser_remove_principal/1
 default: stageuser_show/1
 default: sudocmd/1
 default: sudocmd_add/1
@@ -6739,6 +7009,7 @@ default: trustdomain_mod/1
 default: user/1
 default: user_add/1
 default: user_add_cert/1
+default: user_add_certmapdata/1
 default: user_add_manager/1
 default: user_add_principal/1
 default: user_del/1
@@ -6747,6 +7018,7 @@ default: user_enable/1
 default: user_find/1
 default: user_mod/1
 default: user_remove_cert/1
+default: user_remove_certmapdata/1
 default: user_remove_manager/1
 default: user_remove_principal/1
 default: user_show/1
@@ -6774,6 +7046,7 @@ default: vaultcontainer_add_owner/1
 default: vaultcontainer_del/1
 default: vaultcontainer_remove_owner/1
 default: vaultcontainer_show/1
+default: whoami/1
 capability: messages 2.52
 capability: optional_uid_params 2.54
 capability: permissions2 2.69

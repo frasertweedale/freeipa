@@ -1,8 +1,10 @@
-import shlex
-import sys
 import contextlib
+import os
+import shlex
+import subprocess
+import sys
+import unittest
 
-import nose
 import six
 from six import StringIO
 
@@ -15,8 +17,12 @@ if six.PY3:
 
 TEST_ZONE = u'zoneadd.%(domain)s' % api.env
 
+HERE = os.path.abspath(os.path.dirname(__file__))
+BASE_DIR = os.path.abspath(os.path.join(HERE, os.pardir, os.pardir))
+
 
 @pytest.mark.tier0
+@pytest.mark.needs_ipaapi
 class TestCLIParsing(object):
     """Tests that commandlines are correctly parsed to Command keyword args
     """
@@ -37,7 +43,7 @@ class TestCLIParsing(object):
         try:
             api.Command[command_name](**kw)
         except errors.NetworkError:
-            raise nose.SkipTest('%r: Server not available: %r' %
+            raise unittest.SkipTest('%r: Server not available: %r' %
                                 (self.__module__, api.env.xmlrpc_uri))
 
     @contextlib.contextmanager
@@ -50,6 +56,9 @@ class TestCLIParsing(object):
 
     def test_ping(self):
         self.check_command('ping', 'ping')
+
+    def test_plugins(self):
+        self.check_command('plugins', 'plugins')
 
     def test_user_show(self):
         self.check_command('user-show admin', 'user_show', uid=u'admin')
@@ -113,7 +122,7 @@ class TestCLIParsing(object):
         try:
             self.run_command('dnszone_add', idnsname=TEST_ZONE)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         try:
             self.run_command('dnsrecord_add',
                 dnszoneidnsname=TEST_ZONE,
@@ -141,7 +150,7 @@ class TestCLIParsing(object):
         try:
             self.run_command('dnszone_add', idnsname=TEST_ZONE)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         try:
             records = (u'1 1 E3B72BA346B90570EED94BE9334E34AA795CED23',
                        u'2 1 FD2693C1EFFC11A8D2BE57229212A04B45663791')
@@ -221,7 +230,7 @@ class TestCLIParsing(object):
             self.run_command(
                 'dnszone_add', idnsname=TEST_ZONE)
         except errors.NotFound:
-            raise nose.SkipTest('DNS is not configured')
+            raise unittest.SkipTest('DNS is not configured')
         try:
             self.run_command(
                 'dnsrecord_add',
@@ -302,3 +311,22 @@ class TestCLIParsing(object):
 
         if not adtrust_is_enabled:
             mockldap.del_entry(adtrust_dn)
+
+
+def test_cli_fsencoding():
+    # https://pagure.io/freeipa/issue/5887
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith(('LC_', 'LANG'))
+    }
+    env['LC_ALL'] = 'C'
+    env['PYTHONPATH'] = BASE_DIR
+    p = subprocess.Popen(
+        [sys.executable, '-m', 'ipaclient', 'help'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    out, err = p.communicate()
+    assert p.returncode > 0, (out, err)
+    assert b'System encoding must be UTF-8' in err, (out, err)

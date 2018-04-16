@@ -30,6 +30,8 @@
  * filtering purposes */
 #define SECURID 1
 
+#include "config.h"
+
 #include <errno.h>
 #include <kdb.h>
 #include <ldap.h>
@@ -40,6 +42,9 @@
 #include <arpa/inet.h>
 #include <endian.h>
 #include <unistd.h>
+#ifdef HAVE_KRB5_CERTAUTH_PLUGIN
+#include <krb5/certauth_plugin.h>
+#endif
 
 #include "ipa_krb5.h"
 #include "ipa_pwd.h"
@@ -96,11 +101,14 @@ struct ipadb_global_config {
     bool disable_preauth_for_spns;
 };
 
+#define IPA_CONTEXT_MAGIC 0x0c027ea7
 struct ipadb_context {
+    int magic;
     char *uri;
     char *base;
     char *realm;
     char *realm_base;
+    char *accounts_base;
     char *kdc_hostname;
     LDAP *lcontext;
     krb5_context kcontext;
@@ -110,6 +118,9 @@ struct ipadb_context {
     krb5_key_salt_tuple *def_encs;
     int n_def_encs;
     struct ipadb_mspac *mspac;
+#ifdef HAVE_KRB5_CERTAUTH_PLUGIN
+    krb5_certauth_moddata certauth_moddata;
+#endif
 
     /* Don't access this directly, use ipadb_get_global_config(). */
     struct ipadb_global_config config;
@@ -174,17 +185,40 @@ int ipadb_ldap_attr_has_value(LDAP *lcontext, LDAPMessage *le,
 int ipadb_ldap_deref_results(LDAP *lcontext, LDAPMessage *le,
                              LDAPDerefRes **results);
 
+struct ipadb_multires;
+krb5_error_code ipadb_multires_init(LDAP *lcontext, struct ipadb_multires **r);
+void ipadb_multires_free(struct ipadb_multires *r);
+LDAPMessage *ipadb_multires_next_entry(struct ipadb_multires *r);
+krb5_error_code ipadb_multibase_search(struct ipadb_context *ipactx,
+                                       char **basedns, int scope,
+                                       char *filter, char **attrs,
+                                       struct ipadb_multires **res,
+                                       bool any);
+
 /* PRINCIPALS FUNCTIONS */
 krb5_error_code ipadb_get_principal(krb5_context kcontext,
                                     krb5_const_principal search_for,
                                     unsigned int flags,
                                     krb5_db_entry **entry);
 void ipadb_free_principal(krb5_context kcontext, krb5_db_entry *entry);
+/* Helper function for DAL API 6.1 or later */
+void ipadb_free_principal_e_data(krb5_context kcontext, krb5_octet *e_data);
 krb5_error_code ipadb_put_principal(krb5_context kcontext,
                                     krb5_db_entry *entry,
                                     char **db_args);
 krb5_error_code ipadb_delete_principal(krb5_context kcontext,
                                        krb5_const_principal search_for);
+krb5_error_code
+ipadb_fetch_principals_with_extra_filter(struct ipadb_context *ipactx,
+                                         unsigned int flags,
+                                         const char *principal,
+                                         const char *filter,
+                                         LDAPMessage **result);
+krb5_error_code ipadb_find_principal(krb5_context kcontext,
+                                     unsigned int flags,
+                                     LDAPMessage *res,
+                                     char **principal,
+                                     LDAPMessage **entry);
 #if KRB5_KDB_API_VERSION < 8
 krb5_error_code ipadb_iterate(krb5_context kcontext,
                               char *match_entry,
@@ -294,6 +328,10 @@ krb5_error_code ipadb_check_allowed_to_delegate(krb5_context kcontext,
 
 void ipadb_audit_as_req(krb5_context kcontext,
                         krb5_kdc_req *request,
+#if (KRB5_KDB_DAL_MAJOR_VERSION == 7)
+                        const krb5_address *local_addr,
+                        const krb5_address *remote_addr,
+#endif
                         krb5_db_entry *client,
                         krb5_db_entry *server,
                         krb5_timestamp authtime,
@@ -307,3 +345,8 @@ ipadb_get_global_config(struct ipadb_context *ipactx);
 int ipadb_get_enc_salt_types(struct ipadb_context *ipactx, LDAPMessage *entry,
                              char *attr, krb5_key_salt_tuple **enc_salt_types,
                              int *n_enc_salt_types);
+
+#ifdef HAVE_KRB5_CERTAUTH_PLUGIN
+/* CERTAUTH PLUGIN */
+void ipa_certauth_free_moddata(krb5_certauth_moddata *moddata);
+#endif

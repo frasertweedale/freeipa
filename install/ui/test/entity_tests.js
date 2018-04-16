@@ -27,17 +27,18 @@ define([
         'freeipa/reg',
         'freeipa/entity',
         'freeipa/details'],
-    function(IPA, $, mod_facet, mod_search, reg) {
+    function(IPA, $, mod_facet, mod_search, reg, mod_ent, mod_details) {
             return function() {
 
 var container;
 
-module('entity',{
-    setup: function() {
+QUnit.module('entity',{
+    beforeEach: function(assert) {
 
         IPA.ajax_options.async = false;
 
         mod_search.register();
+        mod_details.register();
 
         IPA.init({
             url: 'data',
@@ -59,20 +60,20 @@ module('entity',{
                 });
             },
             on_error: function(xhr, text_status, error_thrown) {
-                ok(false, "ipa_init() failed: "+error_thrown);
+                assert.ok(false, "ipa_init() failed: "+error_thrown);
             }
         });
 
         container = $('<div id="content"/>').appendTo(document.body);
 
     },
-    teardown: function() {
+    afterEach: function() {
         container.remove();
         reg.facet.remove('search');
     }
 });
 
-test('Testing IPA.entity_set_search_definition().', function() {
+QUnit.test('Testing IPA.entity_set_search_definition().', function(assert) {
 
     var uid_callback = function() {
         return true;
@@ -84,15 +85,15 @@ test('Testing IPA.entity_set_search_definition().', function() {
     facet.create();
 
     var column = facet.get_columns()[0];
-    ok(
+    assert.ok(
         column,
         'column is not null');
 
-    equals(
+    assert.equal(
         column.name, 'uid',
         'column.name');
 
-    equals(
+    assert.equal(
         column.label, 'User login',
         'column.label');
 

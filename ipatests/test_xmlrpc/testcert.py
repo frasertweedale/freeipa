@@ -28,15 +28,40 @@ once per test run.
 import os
 import tempfile
 import shutil
-import six
+import base64
+import re
 
 from ipalib import api, x509
 from ipaserver.plugins import rabase
-from ipapython import ipautil
+from ipapython import certdb
+from ipapython.dn import DN
 from ipaplatform.paths import paths
 
-if six.PY3:
-    unicode = str
+_subject_base = None
+
+
+def subject_base():
+    global _subject_base
+
+    if _subject_base is None:
+        config = api.Command['config_show']()['result']
+        _subject_base = DN(config['ipacertificatesubjectbase'][0])
+
+    return _subject_base
+
+
+def strip_cert_header(pem):
+    """
+    Remove the header and footer from a certificate.
+    """
+    regexp = (
+        r"^-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----"
+    )
+    s = re.search(regexp, pem, re.MULTILINE | re.DOTALL)
+    if s is not None:
+        return s.group(1)
+    else:
+        return pem
 
 
 def get_testcert(subject, principal):
@@ -47,30 +72,7 @@ def get_testcert(subject, principal):
                              principal)
     finally:
         shutil.rmtree(reqdir)
-    return x509.strip_header(_testcert)
-
-
-def run_certutil(reqdir, args, stdin=None):
-    """
-    Run an NSS certutil command
-    """
-    new_args = [paths.CERTUTIL, "-d", reqdir]
-    new_args = new_args + args
-    return ipautil.run(new_args, stdin)
-
-
-def generate_csr(reqdir, pwname, subject):
-    """
-    Create a CSR for the given subject.
-    """
-    req_path = os.path.join(reqdir, 'req')
-    run_certutil(reqdir, ["-R", "-s", subject,
-                          "-o", req_path,
-                          "-z", paths.GROUP,
-                          "-f", pwname,
-                          "-a"])
-    with open(req_path, "r") as fp:
-        return fp.read()
+    return strip_cert_header(_testcert.decode('utf-8'))
 
 
 def makecert(reqdir, subject, principal):
@@ -79,21 +81,29 @@ def makecert(reqdir, subject, principal):
     """
 
     ra = rabase.rabase(api)
-    if (not os.path.exists(ra.sec_dir) and
+    if (not os.path.exists(ra.client_certfile) and
             api.env.xmlrpc_uri == 'http://localhost:8888/ipa/xml'):
         raise AssertionError('The self-signed CA is not configured, '
                              'see ipatests/test_xmlrpc/test_cert.py')
 
-    pwname = os.path.join(reqdir, "pwd")
-
-    # Create an empty password file
-    with open(pwname, "w") as fp:
-        fp.write("\n")
-
-    # Generate NSS cert database to store the private key for our CSR
-    run_certutil(reqdir, ["-N", "-f", pwname])
-
-    csr = unicode(generate_csr(reqdir, pwname, str(subject)))
+    nssdb = certdb.NSSDatabase(nssdir=reqdir)
+    with open(nssdb.pwd_file, "w") as f:
+        # Create an empty password file
+        f.write("\n")
+    # create db
+    nssdb.create_db()
+    # create CSR
+    csr_file = os.path.join(reqdir, 'req')
+    nssdb.run_certutil([
+        "-R", "-s", str(subject),
+        "-o", csr_file,
+        "-z", paths.GROUP,
+        "-a"
+    ])
+    with open(csr_file, "rb") as f:
+        csr = f.read().decode('ascii')
 
     res = api.Command['cert_request'](csr, principal=principal, add=True)
-    return x509.make_pem(res['result']['certificate'])
+    cert = x509.load_der_x509_certificate(
+        base64.b64decode(res['result']['certificate']))
+    return cert.public_bytes(x509.Encoding.PEM)

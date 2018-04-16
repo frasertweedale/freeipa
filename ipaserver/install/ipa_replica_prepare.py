@@ -21,29 +21,41 @@
 from __future__ import absolute_import
 from __future__ import print_function
 
+import logging
 import os
 import shutil
 import tempfile
 import time
+# pylint: disable=deprecated-module
 from optparse import OptionGroup, SUPPRESS_HELP
+# pylint: enable=deprecated-module
 
 import dns.resolver
-# pylint: disable=import-error
-from six.moves.configparser import SafeConfigParser
-# pylint: enable=import-error
+import six
 
-from ipaserver.install import certs, installutils, bindinstance, dsinstance
+from ipaserver.install import certs, installutils, bindinstance, dsinstance, ca
 from ipaserver.install.replication import enable_replication_version_checking
-from ipaserver.plugins.ldap2 import ldap2
+from ipaserver.install.server.replicainstall import install_ca_cert
 from ipaserver.install.bindinstance import (
     add_zone, add_fwd_rr, add_ptr_rr, dns_container_exists)
-from ipapython import ipautil, admintool
+from ipapython import ipautil, admintool, certdb
 from ipapython.dn import DN
 from ipapython import version
 from ipalib import api
 from ipalib import errors
 from ipaplatform.paths import paths
-from ipalib.constants import CACERT, DOMAIN_LEVEL_0
+from ipalib.constants import DOMAIN_LEVEL_0
+
+# pylint: disable=import-error
+if six.PY3:
+    # The SafeConfigParser class has been renamed to ConfigParser in Py3
+    from configparser import ConfigParser as SafeConfigParser
+else:
+    from ConfigParser import SafeConfigParser
+# pylint: enable=import-error
+
+
+logger = logging.getLogger(__name__)
 
 UNSUPPORTED_DOMAIN_LEVEL_TEMPLATE = """
 Replica creation using '{command_name}' to generate replica file
@@ -86,9 +98,6 @@ class ReplicaPrepare(admintool.AdminTool):
         parser.add_option("--allow-zone-overlap", dest="allow_zone_overlap",
             action="store_true", default=False, help="create DNS "
             "zone even if it already exists")
-        parser.add_option("--no-pkinit", dest="setup_pkinit",
-            action="store_false", default=True,
-            help="disables pkinit setup steps")
         parser.add_option("--ca", dest="ca_file", default=paths.CACERT_P12,
             metavar="FILE",
             help="location of CA PKCS#12 file, default /root/cacert.p12")
@@ -110,12 +119,6 @@ class ReplicaPrepare(admintool.AdminTool):
         group.add_option("--http_pkcs12", dest="http_cert_files",
             action="append",
             help=SUPPRESS_HELP)
-        group.add_option("--pkinit-cert-file", dest="pkinit_cert_files",
-            action="append", metavar="FILE",
-            help="File containing the Kerberos KDC SSL certificate and private key")
-        group.add_option("--pkinit_pkcs12", dest="pkinit_cert_files",
-            action="append",
-            help=SUPPRESS_HELP)
         group.add_option("--dirsrv-pin", dest="dirsrv_pin", sensitive=True,
             metavar="PIN",
             help="The password to unlock the Directory Server private key")
@@ -126,20 +129,12 @@ class ReplicaPrepare(admintool.AdminTool):
             help="The password to unlock the Apache Server private key")
         group.add_option("--http_pin", dest="http_pin", sensitive=True,
             help=SUPPRESS_HELP)
-        group.add_option("--pkinit-pin", dest="pkinit_pin", sensitive=True,
-            metavar="PIN",
-            help="The password to unlock the Kerberos KDC private key")
-        group.add_option("--pkinit_pin", dest="pkinit_pin", sensitive=True,
-            help=SUPPRESS_HELP)
         group.add_option("--dirsrv-cert-name", dest="dirsrv_cert_name",
             metavar="NAME",
             help="Name of the Directory Server SSL certificate to install")
         group.add_option("--http-cert-name", dest="http_cert_name",
             metavar="NAME",
             help="Name of the Apache Server SSL certificate to install")
-        group.add_option("--pkinit-cert-name", dest="pkinit_cert_name",
-            metavar="NAME",
-            help="Name of the Kerberos KDC SSL certificate to install")
         parser.add_option_group(group)
 
     def validate_options(self):
@@ -158,16 +153,13 @@ class ReplicaPrepare(admintool.AdminTool):
             self.option_parser.error("You cannot specify a --reverse-zone "
                 "option together with --no-reverse")
 
-        #Automatically disable pkinit w/ dogtag until that is supported
-        options.setup_pkinit = False
-
         # If any of the PKCS#12 options are selected, all are required.
         cert_file_req = (options.dirsrv_cert_files, options.http_cert_files)
-        cert_file_opt = (options.pkinit_cert_files,)
-        if any(cert_file_req + cert_file_opt) and not all(cert_file_req):
+        if any(cert_file_req) and not all(cert_file_req):
             self.option_parser.error(
                 "--dirsrv-cert-file and --http-cert-file are required if any "
-                "PKCS#12 options are used.")
+                "key file options are used."
+            )
 
         if len(self.args) < 1:
             self.option_parser.error(
@@ -178,8 +170,10 @@ class ReplicaPrepare(admintool.AdminTool):
         else:
             [self.replica_fqdn] = self.args
 
-        api.bootstrap(in_server=True)
+        api.bootstrap(in_server=True, confdir=paths.ETC_IPA)
         api.finalize()
+        # Connect to LDAP, connection is closed at the end of run()
+        api.Backend.ldap2.connect()
 
         self.check_for_supported_domain_level()
 
@@ -188,7 +182,7 @@ class ReplicaPrepare(admintool.AdminTool):
 
         config_dir = dsinstance.config_dirname(
             installutils.realm_to_serverid(api.env.realm))
-        if not ipautil.dir_exists(config_dir):
+        if not os.path.isdir(config_dir):
             raise admintool.ScriptError(
                 "could not find directory instance: %s" % config_dir)
 
@@ -197,12 +191,14 @@ class ReplicaPrepare(admintool.AdminTool):
             cert_files=cert_files,
             key_password=key_password,
             key_nickname=key_nickname,
-            ca_cert_files=[CACERT],
+            ca_cert_files=[paths.IPA_CA_CRT],
             host_name=self.replica_fqdn)
 
     def ask_for_options(self):
         options = self.options
         super(ReplicaPrepare, self).ask_for_options()
+        http_ca_cert = None
+        dirsrv_ca_cert = None
 
         # get the directory manager password
         self.dirman_password = options.password
@@ -215,28 +211,25 @@ class ReplicaPrepare(admintool.AdminTool):
                     "Directory Manager password required")
 
         # Try out the password & get the subject base
+        api.Backend.ldap2.disconnect()
         try:
-            conn = api.Backend.ldap2
-            conn.connect(bind_dn=DN(('cn', 'directory manager')),
-                         bind_pw=self.dirman_password)
+            api.Backend.ldap2.connect(bind_pw=self.dirman_password)
 
-            entry_attrs = conn.get_ipa_config()
+            entry_attrs = api.Backend.ldap2.get_ipa_config()
             self.subject_base = entry_attrs.get(
                 'ipacertificatesubjectbase', [None])[0]
 
             ca_enabled = api.Command.ca_is_enabled()['result']
-
-            conn.disconnect()
         except errors.ACIError:
             raise admintool.ScriptError("The password provided is incorrect "
-                "for LDAP server %s" % api.env.host)
+                                        "for LDAP server %s" % api.env.host)
         except errors.LDAPError:
             raise admintool.ScriptError(
                 "Unable to connect to LDAP server %s" % api.env.host)
         except errors.DatabaseError as e:
             raise admintool.ScriptError(e.desc)
 
-        if ca_enabled and not ipautil.file_exists(paths.CA_CS_CFG_PATH):
+        if ca_enabled and not os.path.isfile(paths.CA_CS_CFG_PATH):
             raise admintool.ScriptError(
                 "CA is not installed on this server. "
                 "ipa-replica-prepare must be run on an IPA server with CA.")
@@ -255,13 +248,10 @@ class ReplicaPrepare(admintool.AdminTool):
         except installutils.BadHostError as e:
             if isinstance(e, installutils.HostLookupError):
                 if not options.ip_addresses:
-                    if dns_container_exists(
-                            api.env.host, api.env.basedn,
-                            dm_password=self.dirman_password,
-                            ldapi=True, realm=api.env.realm):
-                        self.log.info('You might use the --ip-address option '
-                                      'to create a DNS entry if the DNS zone '
-                                      'is managed by IPA.')
+                    if dns_container_exists(api.env.basedn):
+                        logger.info('You might use the --ip-address option '
+                                    'to create a DNS entry if the DNS zone '
+                                    'is managed by IPA.')
                     raise
                 else:
                     # The host doesn't exist in DNS but we're adding it.
@@ -270,21 +260,12 @@ class ReplicaPrepare(admintool.AdminTool):
                 raise
 
         if options.ip_addresses:
-            if not dns_container_exists(api.env.host, api.env.basedn,
-                                        dm_password=self.dirman_password,
-                                        ldapi=True, realm=api.env.realm):
-                self.log.error(
+            if not dns_container_exists(api.env.basedn):
+                logger.error(
                     "It is not possible to add a DNS record automatically "
                     "because DNS is not managed by IPA. Please create DNS "
                     "record manually and then omit --ip-address option.")
                 raise admintool.ScriptError("Cannot add DNS record")
-
-            disconnect = False
-            if not api.Backend.ldap2.isconnected():
-                api.Backend.ldap2.connect(
-                    bind_dn=DN(('cn', 'Directory Manager')),
-                    bind_pw=self.dirman_password)
-                disconnect = True
 
             options.reverse_zones = bindinstance.check_reverse_zones(
                 options.ip_addresses, options.reverse_zones, options, False,
@@ -292,15 +273,12 @@ class ReplicaPrepare(admintool.AdminTool):
 
             _host, zone = self.replica_fqdn.split('.', 1)
             if not bindinstance.dns_zone_exists(zone, api=api):
-                self.log.error("DNS zone %s does not exist in IPA managed DNS "
-                               "server. Either create DNS zone or omit "
-                               "--ip-address option." % zone)
+                logger.error("DNS zone %s does not exist in IPA managed DNS "
+                             "server. Either create DNS zone or omit "
+                             "--ip-address option.", zone)
                 raise admintool.ScriptError("Cannot add DNS record")
 
-            if disconnect:
-                api.Backend.ldap2.disconnect()
-
-        self.http_pin = self.dirsrv_pin = self.pkinit_pin = None
+        self.http_pin = self.dirsrv_pin = None
 
         if options.http_cert_files:
             if options.http_pin is None:
@@ -330,20 +308,6 @@ class ReplicaPrepare(admintool.AdminTool):
             self.dirsrv_pkcs12_file = dirsrv_pkcs12_file
             self.dirsrv_pin = dirsrv_pin
 
-        if options.pkinit_cert_files:
-            if options.pkinit_pin is None:
-                options.pkinit_pin = installutils.read_password(
-                    "Enter Kerberos KDC private key unlock",
-                    confirm=False, validate=False, retry=False)
-                if options.pkinit_pin is None:
-                    raise admintool.ScriptError(
-                        "Kerberos KDC private key unlock password required")
-            pkinit_pkcs12_file, pkinit_pin, _pkinit_ca_cert = self.load_pkcs12(
-                options.pkinit_cert_files, options.pkinit_pin,
-                options.pkinit_cert_name)
-            self.pkinit_pkcs12_file = pkinit_pkcs12_file
-            self.pkinit_pin = pkinit_pin
-
         if (options.http_cert_files and options.dirsrv_cert_files and
             http_ca_cert != dirsrv_ca_cert):
             raise admintool.ScriptError(
@@ -355,9 +319,10 @@ class ReplicaPrepare(admintool.AdminTool):
         options = self.options
         super(ReplicaPrepare, self).run()
 
-        self.log.info("Preparing replica for %s from %s",
-            self.replica_fqdn, api.env.host)
-        enable_replication_version_checking(api.env.host, api.env.realm,
+        logger.info("Preparing replica for %s from %s",
+                    self.replica_fqdn, api.env.host)
+        enable_replication_version_checking(
+            api.env.realm,
             self.dirman_password)
 
         self.top_dir = tempfile.mkdtemp("ipa")
@@ -366,12 +331,9 @@ class ReplicaPrepare(admintool.AdminTool):
         os.chmod(self.dir, 0o700)
         try:
             self.copy_ds_certificate()
-
             self.copy_httpd_certificate()
 
-            if options.setup_pkinit:
-                self.copy_pkinit_certificate()
-
+            self.retrieve_ca_certs()
             self.copy_misc_files()
 
             self.save_config()
@@ -386,6 +348,9 @@ class ReplicaPrepare(admintool.AdminTool):
         if options.wait_for_dns:
             self.wait_for_dns()
 
+        # Close LDAP connection that was opened in validate_options()
+        api.Backend.ldap2.disconnect()
+
     def copy_ds_certificate(self):
         options = self.options
 
@@ -394,10 +359,10 @@ class ReplicaPrepare(admintool.AdminTool):
             fd.write("%s\n" % (self.dirsrv_pin or ''))
 
         if options.dirsrv_cert_files:
-            self.log.info("Copying SSL certificate for the Directory Server")
+            logger.info("Copying SSL certificate for the Directory Server")
             self.copy_info_file(self.dirsrv_pkcs12_file.name, "dscert.p12")
         else:
-            if ipautil.file_exists(options.ca_file):
+            if os.path.isfile(options.ca_file):
                 # Since it is possible that the Directory Manager password
                 # has changed since ipa-server-install, we need to regenerate
                 # the CA PKCS#12 file and update the pki admin user password
@@ -408,15 +373,15 @@ class ReplicaPrepare(admintool.AdminTool):
                 raise admintool.ScriptError("Root CA PKCS#12 not "
                     "found in %s" % options.ca_file)
 
-            self.log.info(
+            logger.info(
                 "Creating SSL certificate for the Directory Server")
             self.export_certdb("dscert", passwd_fname)
 
         if not options.dirsrv_cert_files:
-            self.log.info(
+            logger.info(
                 "Creating SSL certificate for the dogtag Directory Server")
             self.export_certdb("dogtagcert", passwd_fname)
-            self.log.info("Saving dogtag Directory Server port")
+            logger.info("Saving dogtag Directory Server port")
             port_fname = os.path.join(
                 self.dir, "dogtag_directory_port.txt")
             with open(port_fname, "w") as fd:
@@ -430,40 +395,31 @@ class ReplicaPrepare(admintool.AdminTool):
             fd.write("%s\n" % (self.http_pin or ''))
 
         if options.http_cert_files:
-            self.log.info("Copying SSL certificate for the Web Server")
+            logger.info("Copying SSL certificate for the Web Server")
             self.copy_info_file(self.http_pkcs12_file.name, "httpcert.p12")
         else:
-            self.log.info("Creating SSL certificate for the Web Server")
+            logger.info("Creating SSL certificate for the Web Server")
             self.export_certdb("httpcert", passwd_fname)
 
-            self.log.info("Exporting RA certificate")
+            logger.info("Exporting RA certificate")
             self.export_ra_pkcs12()
 
-    def copy_pkinit_certificate(self):
-        options = self.options
-
-        passwd_fname = os.path.join(self.dir, "pkinit_pin.txt")
-        with open(passwd_fname, "w") as fd:
-            fd.write("%s\n" % (self.pkinit_pin or ''))
-
-        if options.pkinit_cert_files:
-            self.log.info("Copying SSL certificate for the KDC")
-            self.copy_info_file(self.pkinit_pkcs12_file.name, "pkinitcert.p12")
-        else:
-            self.log.info("Creating SSL certificate for the KDC")
-            self.export_certdb("pkinitcert", passwd_fname, is_kdc=True)
-
     def copy_misc_files(self):
-        self.log.info("Copying additional files")
+        logger.info("Copying additional files")
 
-        self.copy_info_file(CACERT, "ca.crt")
         cacert_filename = paths.CACERT_PEM
-        if ipautil.file_exists(cacert_filename):
+        if os.path.isfile(cacert_filename):
             self.copy_info_file(cacert_filename, "cacert.pem")
         self.copy_info_file(paths.IPA_DEFAULT_CONF, "default.conf")
 
+    def retrieve_ca_certs(self):
+        logger.info("Retrieving CA certificates")
+        dest = os.path.join(self.dir, "ca.crt")
+        install_ca_cert(api.Backend.ldap2, api.env.basedn,
+                        api.env.realm, paths.IPA_CA_CRT, destfile=dest)
+
     def save_config(self):
-        self.log.info("Finalizing configuration")
+        logger.info("Finalizing configuration")
 
         config = SafeConfigParser()
         config.add_section("realm")
@@ -481,10 +437,10 @@ class ReplicaPrepare(admintool.AdminTool):
         replicafile = paths.REPLICA_INFO_TEMPLATE % self.replica_fqdn
         encfile = "%s.gpg" % replicafile
 
-        self.log.info("Packaging replica information into %s", encfile)
+        logger.info("Packaging replica information into %s", encfile)
         ipautil.run(
             [paths.TAR, "cf", replicafile, "-C", self.top_dir, "realm_info"])
-        ipautil.encrypt_file(
+        installutils.encrypt_file(
             replicafile, encfile, self.dirman_password, self.top_dir)
 
         os.chmod(encfile, 0o600)
@@ -494,16 +450,11 @@ class ReplicaPrepare(admintool.AdminTool):
     def add_dns_records(self):
         options = self.options
 
-        self.log.info("Adding DNS records for %s", self.replica_fqdn)
+        logger.info("Adding DNS records for %s", self.replica_fqdn)
         name, domain = self.replica_fqdn.split(".", 1)
 
-        if not api.Backend.ldap2.isconnected():
-            api.Backend.ldap2.connect(
-                bind_dn=DN(('cn', 'Directory Manager')),
-                bind_pw=self.dirman_password)
-
         for reverse_zone in options.reverse_zones:
-            self.log.info("Adding reverse zone %s", reverse_zone)
+            logger.info("Adding reverse zone %s", reverse_zone)
             add_zone(reverse_zone)
 
         for ip in options.ip_addresses:
@@ -517,7 +468,7 @@ class ReplicaPrepare(admintool.AdminTool):
             if not options.no_reverse:
                 reverse_zone = bindinstance.find_reverse_zone(ip)
                 if reverse_zone is None:
-                    self.log.warning(
+                    logger.warning(
                         "Could not find any IPA managed reverse zone. "
                         "Not creating PTR records")
                     return
@@ -542,8 +493,8 @@ class ReplicaPrepare(admintool.AdminTool):
             except exceptions:
                 return False
         except Exception as e:
-            self.log.warning('Exception while waiting for DNS record: %s: %s',
-                          type(e).__name__, e)
+            logger.warning('Exception while waiting for DNS record: %s: %s',
+                           type(e).__name__, e)
 
         return True
 
@@ -555,20 +506,20 @@ class ReplicaPrepare(admintool.AdminTool):
             replica_fqdn += '.'
 
         if self.check_dns(replica_fqdn):
-            self.log.debug('%s A/AAAA record resolvable', replica_fqdn)
+            logger.debug('%s A/AAAA record resolvable', replica_fqdn)
             return
 
-        self.log.info('Waiting for %s A or AAAA record to be resolvable',
-                      replica_fqdn)
+        logger.info('Waiting for %s A or AAAA record to be resolvable',
+                    replica_fqdn)
         print('This can be safely interrupted (Ctrl+C)')
 
         try:
             while not self.check_dns(replica_fqdn):
                 time.sleep(1)
         except KeyboardInterrupt:
-            self.log.info('Interrupted')
+            logger.info('Interrupted')
         else:
-            self.log.debug('%s A/AAAA record resolvable', replica_fqdn)
+            logger.debug('%s A/AAAA record resolvable', replica_fqdn)
 
     def copy_info_file(self, source, dest):
         """Copy a file into the info directory
@@ -577,7 +528,7 @@ class ReplicaPrepare(admintool.AdminTool):
         :param dest: The destination file (relative to the info directory)
         """
         dest_path = os.path.join(self.dir, dest)
-        self.log.debug('Copying %s to %s', source, dest_path)
+        logger.debug('Copying %s to %s', source, dest_path)
         try:
             shutil.copy(source, dest_path)
         except IOError as e:
@@ -590,81 +541,60 @@ class ReplicaPrepare(admintool.AdminTool):
         """
         installutils.remove_file(os.path.join(self.dir, filename))
 
-    def export_certdb(self, fname, passwd_fname, is_kdc=False):
+    def export_certdb(self, fname, passwd_fname):
         """Export a cert database
 
         :param fname: The file to export to (relative to the info directory)
         :param passwd_fname: File that holds the cert DB password
-        :param is_kdc: True if we're exporting KDC certs
         """
         hostname = self.replica_fqdn
         subject_base = self.subject_base
-
-        if is_kdc:
-            nickname = "KDC-Cert"
-        else:
-            nickname = "Server-Cert"
+        ca_subject = ca.lookup_ca_subject(api, subject_base)
+        nickname = "Server-Cert"
 
         try:
             db = certs.CertDB(
-                api.env.realm, nssdir=self.dir, subject_base=subject_base)
+                api.env.realm, nssdir=self.dir, host_name=api.env.host,
+                subject_base=subject_base, ca_subject=ca_subject)
             db.create_passwd_file()
-            ca_db = certs.CertDB(
-                api.env.realm, host_name=api.env.host,
-                subject_base=subject_base)
-            db.create_from_cacert(ca_db.cacert_fname)
-            db.create_server_cert(nickname, hostname, ca_db)
+            db.create_from_cacert()
+            db.create_server_cert(nickname, hostname)
 
             pkcs12_fname = os.path.join(self.dir, fname + ".p12")
 
             try:
-                if is_kdc:
-                    ca_db.export_pem_p12(pkcs12_fname, passwd_fname,
-                        nickname, os.path.join(self.dir, "kdc.pem"))
-                else:
-                    db.export_pkcs12(pkcs12_fname, passwd_fname, nickname)
+                db.export_pkcs12(pkcs12_fname, passwd_fname, nickname)
             except ipautil.CalledProcessError as e:
-                self.log.info("error exporting Server certificate: %s", e)
+                logger.info("error exporting Server certificate: %s", e)
                 installutils.remove_file(pkcs12_fname)
                 installutils.remove_file(passwd_fname)
 
-            self.remove_info_file("cert8.db")
-            self.remove_info_file("key3.db")
-            self.remove_info_file("secmod.db")
+            for fname in (certdb.NSS_DBM_FILES + certdb.NSS_SQL_FILES):
+                self.remove_info_file(fname)
             self.remove_info_file("noise.txt")
 
-            if is_kdc:
-                self.remove_info_file("kdc.pem")
-
             orig_filename = passwd_fname + ".orig"
-            if ipautil.file_exists(orig_filename):
+            if os.path.isfile(orig_filename):
                 installutils.remove_file(orig_filename)
         except errors.CertificateOperationError as e:
             raise admintool.ScriptError(str(e))
 
     def export_ra_pkcs12(self):
-        agent_fd, agent_name = tempfile.mkstemp()
-        os.write(agent_fd, self.dirman_password)
-        os.close(agent_fd)
-
-        try:
-            db = certs.CertDB(api.env.realm, host_name=api.env.host)
-
-            if db.has_nickname("ipaCert"):
-                pkcs12_fname = os.path.join(self.dir, "ra.p12")
-                db.export_pkcs12(pkcs12_fname, agent_name, "ipaCert")
-        finally:
-            os.remove(agent_name)
+        if (os.path.exists(paths.RA_AGENT_PEM) and
+           os.path.exists(paths.RA_AGENT_KEY)):
+            with ipautil.write_tmp_file(self.dirman_password) as f:
+                ipautil.run([
+                    paths.OPENSSL,
+                    "pkcs12", "-export",
+                    "-inkey", paths.RA_AGENT_KEY,
+                    "-in", paths.RA_AGENT_PEM,
+                    "-out", os.path.join(self.dir, "ra.p12"),
+                    "-passout", "file:{pwfile}".format(pwfile=f.name)
+                ])
 
     def update_pki_admin_password(self):
-        ldap = ldap2(api)
-        ldap.connect(
-            bind_dn=DN(('cn', 'directory manager')),
-            bind_pw=self.dirman_password
-        )
         dn = DN('uid=admin', 'ou=people', 'o=ipaca')
-        ldap.modify_password(dn, self.dirman_password)
-        ldap.disconnect()
+        api.Backend.ldap2.modify_password(dn, self.dirman_password)
 
     def regenerate_ca_file(self, ca_file):
         dm_pwd_fd = ipautil.write_tmp_file(self.dirman_password)
@@ -695,7 +625,8 @@ class ReplicaPrepare(admintool.AdminTool):
 
         domain_level = dsinstance.get_domain_level(api)
         if domain_level > DOMAIN_LEVEL_0:
-            self.log.error(
+            logger.error(
+                '%s',
                 UNSUPPORTED_DOMAIN_LEVEL_TEMPLATE.format(
                     command_name=self.command_name,
                     domain_level=DOMAIN_LEVEL_0,

@@ -2,6 +2,7 @@ import contextlib
 import unittest
 import pytest
 
+from cryptography import x509
 import six
 
 from ipapython.dn import DN, RDN, AVA
@@ -527,6 +528,7 @@ class TestRDN(unittest.TestCase):
     def test_assignments(self):
         rdn = RDN((self.attr1, self.value1))
         with self.assertRaises(TypeError):
+            # pylint: disable=unsupported-assignment-operation
             rdn[0] = self.ava2
 
     def test_iter(self):
@@ -621,7 +623,7 @@ class TestDN(unittest.TestCase):
     def setUp(self):
         # ava1 must sort before ava2
         self.attr1    = 'cn'
-        self.value1   = 'Bob'
+        self.value1   = u'Bob'
         self.str_ava1 = '%s=%s' % (self.attr1, self.value1)
         self.ava1     = AVA(self.attr1, self.value1)
 
@@ -629,7 +631,7 @@ class TestDN(unittest.TestCase):
         self.rdn1     = RDN((self.attr1, self.value1))
 
         self.attr2    = 'ou'
-        self.value2   = 'people'
+        self.value2   = u'people'
         self.str_ava2 = '%s=%s' % (self.attr2, self.value2)
         self.ava2     = AVA(self.attr2, self.value2)
 
@@ -656,6 +658,11 @@ class TestDN(unittest.TestCase):
         self.base_container_dn = DN((self.attr1, self.value1),
                                     self.container_dn, self.base_dn)
 
+        self.x500name = x509.Name([
+            x509.NameAttribute(
+                x509.NameOID.ORGANIZATIONAL_UNIT_NAME, self.value2),
+            x509.NameAttribute(x509.NameOID.COMMON_NAME, self.value1),
+        ])
 
     def assertExpectedClass(self, klass, obj, component):
         self.assertIs(obj.__class__, expected_class(klass, component))
@@ -783,6 +790,19 @@ class TestDN(unittest.TestCase):
 
         # Create with single string with 2 RDN's
         dn1 = DN(self.str_dn3)
+        self.assertEqual(len(dn1), 2)
+        self.assertExpectedClass(DN, dn1, 'self')
+        for i in range(0, len(dn1)):
+            self.assertExpectedClass(DN, dn1[i], 'RDN')
+            for j in range(0, len(dn1[i])):
+                self.assertExpectedClass(DN, dn1[i][j], 'AVA')
+            self.assertIsInstance(dn1[i].attr, unicode)
+            self.assertIsInstance(dn1[i].value, unicode)
+        self.assertEqual(dn1[0], self.rdn1)
+        self.assertEqual(dn1[1], self.rdn2)
+
+        # Create with a python-cryptography 'Name'
+        dn1 = DN(self.x500name)
         self.assertEqual(len(dn1), 2)
         self.assertExpectedClass(DN, dn1, 'self')
         for i in range(0, len(dn1)):
@@ -935,8 +955,10 @@ class TestDN(unittest.TestCase):
     def test_assignments(self):
         dn = DN('t=0,t=1,t=2,t=3,t=4,t=5,t=6,t=7,t=8,t=9')
         with self.assertRaises(TypeError):
+            # pylint: disable=unsupported-assignment-operation
             dn[0] = RDN('t=a')
         with self.assertRaises(TypeError):
+            # pylint: disable=unsupported-assignment-operation
             dn[0:1] = [RDN('t=a'), RDN('t=b')]
 
     def test_iter(self):
@@ -1164,6 +1186,26 @@ class TestDN(unittest.TestCase):
         self.assertTrue(dn2_b in s)
         self.assertFalse(dn3_a in s)
         self.assertFalse(dn3_b in s)
+
+    def test_x500_text(self):
+        # null DN x500 ordering and LDAP ordering are the same
+        nulldn = DN()
+        self.assertEqual(nulldn.ldap_text(), nulldn.x500_text())
+
+        # reverse a DN with a single RDN
+        self.assertEqual(self.dn1.ldap_text(), self.dn1.x500_text())
+
+        # reverse a DN with 2 RDNs
+        dn3_x500 = self.dn3.x500_text()
+        dn3_rev = DN(self.rdn2, self.rdn1)
+        self.assertEqual(dn3_rev.ldap_text(), dn3_x500)
+
+        # reverse a longer DN
+        longdn_x500 = self.base_container_dn.x500_text()
+        longdn_rev = DN(longdn_x500)
+        l = len(self.base_container_dn)
+        for i in range(l):
+            self.assertEqual(longdn_rev[i], self.base_container_dn[l-1-i])
 
 
 class TestEscapes(unittest.TestCase):

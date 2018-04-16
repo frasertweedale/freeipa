@@ -1,20 +1,20 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 
 from ipaserver import dcerpc
 from ipaserver.install.installutils import is_ipa_configured, ScriptError
 from ipapython import config, ipautil
 from ipalib import api
 from ipapython.dn import DN
-from ipalib.config import Env
-from ipalib.constants import DEFAULT_CONFIG
-from ipapython.ipautil import kinit_keytab
 from ipaplatform.constants import constants
+from ipaplatform.paths import paths
 import sys
 import os
 import pwd
 
 import six
 import gssapi
+
+from ipalib.install.kinit import kinit_keytab
 
 if six.PY3:
     unicode = str
@@ -89,12 +89,8 @@ if len(args) != 1:
 
 trusted_domain = ipautil.fsdecode(args[0]).lower()
 
-env = Env()
-env._bootstrap(debug=options.debug, log=None)
-env._finalize_core(**dict(DEFAULT_CONFIG))
-
-# Initialize the API with the proper debug level
-api.bootstrap(in_server=True, debug=env.debug, log=None, context='server')
+api.bootstrap(in_server=True, log=None,
+              context='server', confdir=paths.ETC_IPA)
 api.finalize()
 
 # Only import trust plugin after api is initialized or internal imports

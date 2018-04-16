@@ -875,7 +875,9 @@ IPA.dns.record_search_facet = function(spec) {
 
     var that = IPA.nested_search_facet(spec);
 
-    that.get_records = function(pkeys, on_success, on_error) {
+    that.get_records = function(records, pkeys_list, on_success, on_error) {
+
+        var pkeys = pkeys_list.keys;
 
         var batch = rpc.batch_command({
             name: that.get_records_command_name(),
@@ -887,6 +889,7 @@ IPA.dns.record_search_facet = function(spec) {
 
         for (var i=0; i<pkeys.length; i++) {
             var pkey = pkeys[i];
+            var call_pkey = pkeys_list.get(pkey);
 
             var command = rpc.command({
                 entity: that.table.entity.name,
@@ -1532,19 +1535,15 @@ IPA.dns.record_prepare_editor_for_type = function(type, fields, widgets, update)
 
         //create editor widget
         var widget = {};
-        if (typeof attribute === 'string') {
-            widget.name = attribute;
-        } else {
-            widget.name = attribute.name;
-            if (metadata) {
-                var doc = metadata.doc;
-                var label = metadata.label;
-                if (doc !== label) widget.tooltip = doc;
-            }
-            set_defined(attribute.$type, widget, '$type');
-            set_defined(attribute.options, widget, 'options');
-            copy_obj(widget, attribute.widget_opt);
+        widget.name = attribute.name;
+        if (metadata) {
+            var doc = metadata.doc;
+            var label = metadata.label;
+            if (doc !== label) widget.tooltip = doc;
         }
+        set_defined(attribute.$type, widget, '$type');
+        set_defined(attribute.options, widget, 'options');
+        copy_obj(widget, attribute.widget_opt);
         section.widgets.push(widget);
     }
 };
@@ -1950,7 +1949,7 @@ IPA.dns.record_type_table_widget = function(spec) {
 
         if (!selected_values.length) {
             var message = text.get('@i18n:dialogs.remove_empty');
-            alert(message);
+            window.alert(message);
             return;
         }
 

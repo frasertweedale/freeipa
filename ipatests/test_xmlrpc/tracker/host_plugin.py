@@ -25,8 +25,9 @@ class HostTracker(KerberosAliasMixin, Tracker):
     retrieve_keys = {
         'dn', 'fqdn', 'description', 'l', 'krbcanonicalname',
         'krbprincipalname', 'managedby_host',
-        'has_keytab', 'has_password', 'issuer', 'md5_fingerprint',
+        'has_keytab', 'has_password', 'issuer',
         'serial_number', 'serial_number_hex', 'sha1_fingerprint',
+        'sha256_fingerprint',
         'subject', 'usercertificate', 'valid_not_after', 'valid_not_before',
         'macaddress', 'sshpubkeyfp', 'ipaallowedtoperform_read_keys_user',
         'memberof_hostgroup', 'memberofindirect_hostgroup',
@@ -40,7 +41,8 @@ class HostTracker(KerberosAliasMixin, Tracker):
     retrieve_all_keys = retrieve_keys | {
         u'cn', u'ipakrbokasdelegate', u'ipakrbrequirespreauth', u'ipauniqueid',
         u'krbcanonicalname', u'managing_host', u'objectclass',
-        u'serverhostname', u'ipakrboktoauthasdelegate'}
+        u'serverhostname', u'ipakrboktoauthasdelegate',
+        u'krbpwdpolicyreference'}
     create_keys = retrieve_keys | {'objectclass', 'ipauniqueid',
                                    'randompassword'}
     update_keys = retrieve_keys - {'dn'}
@@ -121,6 +123,11 @@ class HostTracker(KerberosAliasMixin, Tracker):
             managing_host=[self.fqdn],
             serverhostname=[self.shortname],
             ipakrboktoauthasdelegate=False,
+            krbpwdpolicyreference=[DN(
+                u'cn=Default Host Password Policy',
+                self.api.env.container_host,
+                self.api.env.basedn,
+            )],
         )
         self.exists = True
 

@@ -27,16 +27,14 @@
 
 import os
 import sys
+import unittest
 
 import pytest
-import nose
-from nose.tools import assert_raises  # pylint: disable=E0611
-import nss.nss as nss
 import six
 
-from ipaserver.plugins.ldap2 import ldap2
-from ipalib import api, x509, create_api, errors
-from ipapython import ipautil
+from ipaplatform.paths import paths
+from ipaserver.plugins.ldap2 import ldap2, AUTOBIND_DISABLED
+from ipalib import api, create_api, errors
 from ipapython.dn import DN
 
 if six.PY3:
@@ -44,6 +42,7 @@ if six.PY3:
 
 
 @pytest.mark.tier0
+@pytest.mark.needs_ipaapi
 class test_ldap(object):
     """
     Test various LDAP client bind methods.
@@ -51,8 +50,7 @@ class test_ldap(object):
 
     def setup(self):
         self.conn = None
-        self.ldapuri = 'ldap://%s' % ipautil.format_netloc(api.env.host)
-        nss.nss_init_nodb()
+        self.ldapuri = api.env.ldap_uri
         self.dn = DN(('krbprincipalname','ldap/%s@%s' % (api.env.host, api.env.realm)),
                      ('cn','services'),('cn','accounts'),api.env.basedn)
 
@@ -64,8 +62,8 @@ class test_ldap(object):
         """
         Test an anonymous LDAP bind using ldap2
         """
-        self.conn = ldap2(api, ldap_uri=self.ldapuri)
-        self.conn.connect()
+        self.conn = ldap2(api)
+        self.conn.connect(autobind=AUTOBIND_DISABLED)
         dn = api.env.basedn
         entry_attrs = self.conn.get_entry(dn, ['associateddomain'])
         domain = entry_attrs.single_value['associateddomain']
@@ -75,32 +73,29 @@ class test_ldap(object):
         """
         Test a GSSAPI LDAP bind using ldap2
         """
-        self.conn = ldap2(api, ldap_uri=self.ldapuri)
-        self.conn.connect()
+        self.conn = ldap2(api)
+        self.conn.connect(autobind=AUTOBIND_DISABLED)
         entry_attrs = self.conn.get_entry(self.dn, ['usercertificate'])
-        cert = entry_attrs.get('usercertificate')
-        cert = cert[0]
-        serial = unicode(x509.get_serial_number(cert, x509.DER))
-        assert serial is not None
+        cert = entry_attrs.get('usercertificate')[0]
+        assert cert.serial_number is not None
 
     def test_simple(self):
         """
         Test a simple LDAP bind using ldap2
         """
         pwfile = api.env.dot_ipa + os.sep + ".dmpw"
-        if ipautil.file_exists(pwfile):
-            fp = open(pwfile, "r")
-            dm_password = fp.read().rstrip()
-            fp.close()
+        if os.path.isfile(pwfile):
+            with open(pwfile, "r") as fp:
+                dm_password = fp.read().rstrip()
         else:
-            raise nose.SkipTest("No directory manager password in %s" % pwfile)
-        self.conn = ldap2(api, ldap_uri=self.ldapuri)
+            raise unittest.SkipTest(
+                "No directory manager password in %s" % pwfile
+            )
+        self.conn = ldap2(api)
         self.conn.connect(bind_dn=DN(('cn', 'directory manager')), bind_pw=dm_password)
         entry_attrs = self.conn.get_entry(self.dn, ['usercertificate'])
-        cert = entry_attrs.get('usercertificate')
-        cert = cert[0]
-        serial = unicode(x509.get_serial_number(cert, x509.DER))
-        assert serial is not None
+        cert = entry_attrs.get('usercertificate')[0]
+        assert cert.serial_number is not None
 
     def test_Backend(self):
         """
@@ -111,43 +106,40 @@ class test_ldap(object):
         # a client-only api. Then we register in the commands and objects
         # we need for the test.
         myapi = create_api(mode=None)
-        myapi.bootstrap(context='cli', in_server=True)
+        myapi.bootstrap(context='cli', in_server=True, confdir=paths.ETC_IPA)
         myapi.finalize()
 
         pwfile = api.env.dot_ipa + os.sep + ".dmpw"
-        if ipautil.file_exists(pwfile):
-            fp = open(pwfile, "r")
-            dm_password = fp.read().rstrip()
-            fp.close()
+        if os.path.isfile(pwfile):
+            with open(pwfile, "r") as fp:
+                dm_password = fp.read().rstrip()
         else:
-            raise nose.SkipTest("No directory manager password in %s" % pwfile)
+            raise unittest.SkipTest(
+                "No directory manager password in %s" % pwfile
+            )
         myapi.Backend.ldap2.connect(bind_dn=DN(('cn', 'Directory Manager')), bind_pw=dm_password)
 
         result = myapi.Command['service_show']('ldap/%s@%s' %  (api.env.host, api.env.realm,))
         entry_attrs = result['result']
-        cert = entry_attrs.get('usercertificate')
-        cert = cert[0]
-        serial = unicode(x509.get_serial_number(cert, x509.DER))
-        assert serial is not None
+        cert = entry_attrs.get('usercertificate')[0]
+        assert cert.serial_number is not None
 
     def test_autobind(self):
         """
         Test an autobind LDAP bind using ldap2
         """
-        ldapuri = 'ldapi://%%2fvar%%2frun%%2fslapd-%s.socket' % api.env.realm.replace('.','-')
-        self.conn = ldap2(api, ldap_uri=ldapuri)
+        self.conn = ldap2(api)
         try:
             self.conn.connect(autobind=True)
         except errors.ACIError:
-            raise nose.SkipTest("Only executed as root")
+            raise unittest.SkipTest("Only executed as root")
         entry_attrs = self.conn.get_entry(self.dn, ['usercertificate'])
-        cert = entry_attrs.get('usercertificate')
-        cert = cert[0]
-        serial = unicode(x509.get_serial_number(cert, x509.DER))
-        assert serial is not None
+        cert = entry_attrs.get('usercertificate')[0]
+        assert cert.serial_number is not None
 
 
 @pytest.mark.tier0
+@pytest.mark.needs_ipaapi
 class test_LDAPEntry(object):
     """
     Test the LDAPEntry class
@@ -158,9 +150,9 @@ class test_LDAPEntry(object):
     dn2 = DN(('cn', cn2[0]))
 
     def setup(self):
-        self.ldapuri = 'ldap://%s' % ipautil.format_netloc(api.env.host)
-        self.conn = ldap2(api, ldap_uri=self.ldapuri)
-        self.conn.connect()
+        self.ldapuri = api.env.ldap_uri
+        self.conn = ldap2(api)
+        self.conn.connect(autobind=AUTOBIND_DISABLED)
 
         self.entry = self.conn.make_entry(self.dn1, cn=self.cn1)
 
@@ -240,7 +232,7 @@ class test_LDAPEntry(object):
         assert e.pop('cn') == self.cn1
         assert 'cn' not in e
         assert e.pop('cn', 'default') is 'default'
-        with assert_raises(KeyError):
+        with pytest.raises(KeyError):
             e.pop('cn')
 
     def test_clear(self):

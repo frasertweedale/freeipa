@@ -66,7 +66,12 @@ class Principal(object):
     Container for the principal name and realm according to RFC 1510
     """
     def __init__(self, components, realm=None):
-        if isinstance(components, six.string_types):
+        if isinstance(components, six.binary_type):
+            raise TypeError(
+                "Cannot create a principal object from bytes: {!r}".format(
+                    components)
+            )
+        elif isinstance(components, six.string_types):
             # parse principal components from realm
             self.components, self.realm = self._parse_from_text(
                 components, realm)
@@ -87,6 +92,18 @@ class Principal(object):
 
     def __ne__(self, other):
         return not self.__eq__(other)
+
+    def __lt__(self, other):
+        return unicode(self) < unicode(other)
+
+    def __le__(self, other):
+        return self.__lt__(other) or self.__eq__(other)
+
+    def __gt__(self, other):
+        return not self.__le__(other)
+
+    def __ge__(self, other):
+        return self.__gt__(other) or self.__eq__(other)
 
     def __hash__(self):
         return hash(self.components + (self.realm,))
@@ -181,3 +198,7 @@ class Principal(object):
             principal_string = u'@'.join([principal_string, realm])
 
         return principal_string
+
+    def __repr__(self):
+        return "{0.__module__}.{0.__name__}('{1}')".format(
+            self.__class__, self)

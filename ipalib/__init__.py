@@ -527,7 +527,7 @@ the following:
 
 Also note that your ``execute()`` method should not contain any ``print``
 statements or otherwise cause any output on ``sys.stdout``.  Your command can
-(and should) produce log messages by using ``self.log`` (see below).
+(and should) produce log messages by using a module-level logger (see below).
 
 To learn more about XML-RPC (XML Remote Procedure Call), see:
 
@@ -670,18 +670,19 @@ See the `ipalib.cli.textui` plugin for a description of its methods.
 Logging from your plugin
 ------------------------
 
-After `plugable.Plugin.__init__()` is called, your plugin will have a
-``self.log`` attribute.  Plugins should only log through this attribute.
+Plugins should log through a module-level logger.
 For example:
 
+>>> import logging
+>>> logger = logging.getLogger(__name__)
 >>> class paint_house(Command):
 ...
 ...     takes_args = 'color'
 ...
 ...     def execute(self, color, **options):
-...         """Uses self.log.error()"""
+...         """Uses logger.error()"""
 ...         if color not in ('red', 'blue', 'green'):
-...             self.log.error("I don't have %s paint!", color) # Log error
+...             logger.error("I don't have %s paint!", color) # Log error
 ...             return
 ...         return 'I painted the house %s.' % color
 ...
@@ -691,7 +692,7 @@ Some basic knowledge of the Python ``logging`` module might be helpful. See:
     http://docs.python.org/library/logging.html
 
 The important thing to remember is that your plugin should not configure
-logging itself, but should instead simply use the ``self.log`` logger.
+logging itself, but should instead simply use the module-level logger.
 
 Also see the `plugable.API.bootstrap()` method for details on how the logging
 is configured.
@@ -880,8 +881,41 @@ freeIPA.org:
     http://freeipa.org/page/Contribute
 
 '''
+from ipapython.version import VERSION as __version__
 
-import os
+def _enable_warnings(error=False):
+    """Enable additional warnings during development
+    """
+    import ctypes
+    import warnings
+
+    # get reference to Py_BytesWarningFlag from Python CAPI
+    byteswarnings = ctypes.c_int.in_dll(  # pylint: disable=no-member
+        ctypes.pythonapi, 'Py_BytesWarningFlag')
+
+    if byteswarnings.value >= 2:
+        # bytes warnings flag already set to error
+        return
+
+    # default warning mode for all modules: warn once per location
+    warnings.simplefilter('default', BytesWarning)
+    if error:
+        byteswarnings.value = 2
+        action = 'error'
+    else:
+        byteswarnings.value = 1
+        action = 'default'
+
+    module = '(ipa.*|__main__)'
+    warnings.filterwarnings(action, category=BytesWarning, module=module)
+    warnings.filterwarnings(action, category=DeprecationWarning,
+                            module=module)
+
+# call this as early as possible
+if 'git' in __version__:
+    _enable_warnings(False)
+
+# noqa: E402
 from ipalib import plugable
 from ipalib.backend import Backend
 from ipalib.frontend import Command, LocalOrRemote, Updater
@@ -893,12 +927,6 @@ from ipalib.parameters import (BytesEnum, StrEnum, IntEnum, AccessTime, File,
 from ipalib.errors import SkipPluginModule
 from ipalib.text import _, ngettext, GettextFactory, NGettextFactory
 
-version_info = (2, 0, 0, 'alpha', 0)
-if version_info[3] == 'final':
-    __version__ = '%d.%d.%d' % version_info[:3]
-else:
-    __version__ = '%d.%d.%d.%s.%d' % version_info
-
 Registry = plugable.Registry
 
 
@@ -908,7 +936,9 @@ class API(plugable.API):
     @property
     def packages(self):
         if self.env.in_server:
+            # pylint: disable=import-error,ipa-forbidden-import
             import ipaserver.plugins
+            # pylint: enable=import-error,ipa-forbidden-import
             result = (
                 ipaserver.plugins,
             )
@@ -921,7 +951,9 @@ class API(plugable.API):
             )
 
         if self.env.context in ('installer', 'updates'):
+            # pylint: disable=import-error,ipa-forbidden-import
             import ipaserver.install.plugins
+            # pylint: enable=import-error,ipa-forbidden-import
             result += (ipaserver.install.plugins,)
 
         return result
@@ -949,10 +981,3 @@ def create_api(mode='dummy'):
     return api
 
 api = create_api(mode=None)
-
-if os.environ.get('IPA_UNIT_TEST_MODE', None) == 'cli_test':
-    from ipalib.cli import cli_plugins
-    api.bootstrap(context='cli', in_server=False, in_tree=True, fallback=False)
-    for klass in cli_plugins:
-        api.add_plugin(klass)
-    api.finalize()

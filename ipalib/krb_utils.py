@@ -79,20 +79,6 @@ def krb5_parse_ccache(ccache_name):
 def krb5_unparse_ccache(scheme, name):
     return '%s:%s' % (scheme.upper(), name)
 
-def krb5_format_principal_name(user, realm):
-    '''
-    Given a Kerberos user principal name and a Kerberos realm
-    return the Kerberos V5 user principal name.
-
-    :parameters:
-      user
-        User principal name.
-      realm
-        The Kerberos realm the user exists in.
-    :returns:
-      Kerberos V5 user principal name.
-    '''
-    return '%s@%s' % (user, realm)
 
 def krb5_format_service_principal_name(service, host, realm):
     '''
@@ -161,7 +147,7 @@ def get_credentials(name=None, ccache_name=None):
         return gssapi.Credentials(usage='initiate', name=name, store=store)
     except gssapi.exceptions.GSSError as e:
         if e.min_code == KRB5_FCC_NOFILE:  # pylint: disable=no-member
-            raise ValueError('"%s", ccache="%s"' % (e.message, ccache_name))
+            raise ValueError('"%s", ccache="%s"' % (e, ccache_name))
         raise
 
 def get_principal(ccache_name=None):
@@ -207,4 +193,6 @@ def get_credentials_if_valid(name=None, ccache_name=None):
             return creds
         return None
     except gssapi.exceptions.ExpiredCredentialsError:
+        return None
+    except gssapi.exceptions.GSSError:
         return None

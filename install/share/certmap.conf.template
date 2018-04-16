@@ -1,3 +1,7 @@
+# VERSION 3 - DO NOT REMOVE THIS LINE
+#
+# This file is managed by IPA and will be overwritten on upgrades.
+#
 #
 # This file configures how a certificate is mapped to an LDAP entry.  See the
 # documentation for more information on this file.
@@ -41,6 +45,6 @@ certmap default         default
 #default:InitFn         <Init function's name>
 default:DNComps
 default:FilterComps     uid
-certmap ipaca           CN=Certificate Authority,$SUBJECT_BASE
+certmap ipaca           $ISSUER_DN
 ipaca:CmapLdapAttr      seeAlso
 ipaca:verifycert        on

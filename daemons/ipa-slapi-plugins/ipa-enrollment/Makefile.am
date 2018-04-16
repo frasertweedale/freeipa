@@ -1,9 +1,8 @@
 NULL =
 
-PLUGIN_COMMON_DIR=../common
+PLUGIN_COMMON_DIR = $(srcdir)/../common
 
 AM_CPPFLAGS =							\
-	-I.							\
 	-I$(srcdir)						\
 	-I$(PLUGIN_COMMON_DIR)					\
 	-DPREFIX=\""$(prefix)"\" 				\
@@ -11,6 +10,7 @@ AM_CPPFLAGS =							\
 	-DLIBDIR=\""$(libdir)"\" 				\
 	-DLIBEXECDIR=\""$(libexecdir)"\"			\
 	-DDATADIR=\""$(datadir)"\"				\
+	$(DIRSRV_CFLAGS)					\
 	$(LDAP_CFLAGS)					\
 	$(KRB5_CFLAGS)						\
 	$(WARN_CFLAGS)						\
@@ -39,7 +39,3 @@ app_DATA =			\
 EXTRA_DIST =			\
 	$(app_DATA)		\
 	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	Makefile.in

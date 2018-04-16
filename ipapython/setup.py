@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 # Copyright (C) 2007  Red Hat
 # see file 'COPYING' for use and warranty information
 #
@@ -34,8 +34,22 @@ if __name__ == '__main__':
         package_dir={'ipapython': ''},
         packages=[
             "ipapython",
-            "ipapython.dnssec",
-            "ipapython.secrets",
             "ipapython.install"
         ],
+        install_requires=[
+            "cffi",
+            "cryptography",
+            "dnspython",
+            "gssapi",
+            # "ipalib",  # circular dependency
+            "ipaplatform",
+            "netaddr",
+            "netifaces",
+            "python-ldap",
+            "six",
+        ],
+        extras_require={
+            ":python_version<'3'": ["enum34"],
+            "install": ["dbus-python"],  # for certmonger
+        },
     )

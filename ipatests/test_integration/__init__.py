@@ -16,3 +16,8 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+import ipatests.util
+
+
+ipatests.util.check_ipaclient_unittests()
+ipatests.util.check_no_ipaapi()

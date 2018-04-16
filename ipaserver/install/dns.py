@@ -2,11 +2,21 @@
 # Copyright (C) 2015  FreeIPA Contributors see COPYING for license
 #
 
+"""
+DNS installer module
+"""
+
 from __future__ import absolute_import
 from __future__ import print_function
 
+import enum
+import logging
+import os
+
 # absolute import is necessary because IPA module dns clashes with python-dns
 from dns import resolver
+import six
+
 import sys
 
 from subprocess import CalledProcessError
@@ -14,16 +24,18 @@ from subprocess import CalledProcessError
 from ipalib import api
 from ipalib import errors
 from ipalib import util
+from ipalib.install import hostname, sysrestore
+from ipalib.install.service import enroll_only, prepare_only
 from ipaplatform.paths import paths
 from ipaplatform.constants import constants
 from ipaplatform import services
 from ipapython import ipautil
-from ipapython import sysrestore
 from ipapython import dnsutil
 from ipapython.dn import DN
-from ipapython.ipa_log_manager import root_logger
+from ipapython.dnsutil import check_zone_overlap
+from ipapython.install import typing
+from ipapython.install.core import group, knob
 from ipapython.admintool import ScriptError
-from ipapython.ipaldap import AUTOBIND_ENABLED
 from ipapython.ipautil import user_input
 from ipaserver.install.installutils import get_server_ip_address
 from ipaserver.install.installutils import read_dns_forwarders
@@ -32,6 +44,11 @@ from ipaserver.install import bindinstance
 from ipaserver.install import dnskeysyncinstance
 from ipaserver.install import odsexporterinstance
 from ipaserver.install import opendnssecinstance
+
+if six.PY3:
+    unicode = str
+
+logger = logging.getLogger(__name__)
 
 ip_addresses = []
 reverse_zones = []
@@ -61,29 +78,23 @@ def _is_master():
 def _disable_dnssec():
     fstore = sysrestore.FileStore(paths.SYSRESTORE)
 
-    ods = opendnssecinstance.OpenDNSSECInstance(
-            fstore, ldapi=True, autobind=AUTOBIND_ENABLED)
+    ods = opendnssecinstance.OpenDNSSECInstance(fstore)
     ods.realm = api.env.realm
 
-    ods_exporter = odsexporterinstance.ODSExporterInstance(fstore, ldapi=True)
+    ods_exporter = odsexporterinstance.ODSExporterInstance(fstore)
     ods_exporter.realm = api.env.realm
 
     # unconfigure services first
     ods.uninstall()  # needs keytab to flush the latest ods database
     ods_exporter.uninstall()
 
-    ods.ldap_connect()
     ods.ldap_disable('DNSSEC', api.env.host, api.env.basedn)
     ods.ldap_remove_service_container('DNSSEC', api.env.host, api.env.basedn)
 
-    ods_exporter.ldap_connect()
     ods_exporter.ldap_disable('DNSKeyExporter', api.env.host, api.env.basedn)
     ods_exporter.remove_service()
     ods_exporter.ldap_remove_service_container('DNSKeyExporter', api.env.host,
                                                api.env.basedn)
-
-    ods.ldap_disconnect()
-    ods_exporter.ldap_disconnect()
 
     conn = api.Backend.ldap2
     dn = DN(('cn', 'DNSSEC'), ('cn', api.env.host), ('cn', 'masters'),
@@ -104,7 +115,7 @@ def install_check(standalone, api, replica, options, hostname):
     global reverse_zones
     fstore = sysrestore.FileStore(paths.SYSRESTORE)
 
-    if not ipautil.file_exists(paths.IPA_DNS_INSTALL):
+    if not os.path.isfile(paths.IPA_DNS_INSTALL):
         raise RuntimeError("Integrated DNS requires '%s' package" %
                            constants.IPA_DNS_PACKAGE_NAME)
 
@@ -121,9 +132,9 @@ def install_check(standalone, api, replica, options, hostname):
             dnsutil.check_zone_overlap(domain, raise_on_error=False)
         except ValueError as e:
             if options.force or options.allow_zone_overlap:
-                root_logger.warning("%s Please make sure that the domain is "
-                                    "properly delegated to this IPA server.",
-                                    e.message)
+                logger.warning("%s Please make sure that the domain is "
+                               "properly delegated to this IPA server.",
+                               e)
             else:
                 raise e
 
@@ -132,7 +143,7 @@ def install_check(standalone, api, replica, options, hostname):
             dnsutil.check_zone_overlap(reverse_zone)
         except ValueError as e:
             if options.force or options.allow_zone_overlap:
-                root_logger.warning(e.message)
+                logger.warning('%s', six.text_type(e))
             else:
                 raise e
 
@@ -192,16 +203,15 @@ def install_check(standalone, api, replica, options, hostname):
                 "%s\n"
                 "It is possible to move DNSSEC key master role to a different "
                 "server by using --force option to skip this check.\n\n"
-                "WARNING: You have to immediatelly copy kasp.db file to a new "
+                "WARNING: You have to immediately copy kasp.db file to a new "
                 "server and run command 'ipa-dns-install --dnssec-master "
                 "--kasp-db'.\n"
                 "Your DNS zones will become unavailable if you "
-                "do not reinstall the DNSSEC key master role immediatelly." %
+                "do not reinstall the DNSSEC key master role immediately." %
                 ", ".join([str(zone) for zone in dnssec_zones]))
 
     elif options.dnssec_master:
-        ods = opendnssecinstance.OpenDNSSECInstance(
-            fstore, ldapi=True)
+        ods = opendnssecinstance.OpenDNSSECInstance(fstore)
         ods.realm = api.env.realm
         dnssec_masters = ods.get_masters()
         # we can reinstall current server if it is dnssec master
@@ -211,7 +221,7 @@ def install_check(standalone, api, replica, options, hostname):
                 "Only one DNSSEC key master is supported in current version.")
 
         if options.kasp_db_file:
-            dnskeysyncd = services.service('ipa-dnskeysyncd')
+            dnskeysyncd = services.service('ipa-dnskeysyncd', api)
 
             if not dnskeysyncd.is_installed():
                 raise RuntimeError("ipa-dnskeysyncd is not configured on this "
@@ -232,7 +242,7 @@ def install_check(standalone, api, replica, options, hostname):
                             runas=constants.ODS_USER,
                             suplementary_groups=[constants.NAMED_GROUP])
             except CalledProcessError as e:
-                root_logger.debug("%s", e)
+                logger.debug("%s", e)
                 raise RuntimeError("This IPA server cannot be promoted to "
                                    "DNSSEC master role because some keys were "
                                    "not replicated from the original "
@@ -257,8 +267,7 @@ def install_check(standalone, api, replica, options, hostname):
     ip_addresses = get_server_ip_address(hostname, options.unattended,
                                          True, options.ip_addresses)
 
-    util.network_ip_address_warning(ip_addresses)
-    util.broadcast_ip_address_warning(ip_addresses)
+    util.no_matching_interface_for_ip_address_warning(ip_addresses)
 
     if not options.forward_policy:
         # user did not specify policy, derive it: default is 'first' but
@@ -267,8 +276,8 @@ def install_check(standalone, api, replica, options, hostname):
         for ip in ip_addresses:
             if dnsutil.inside_auto_empty_zone(dnsutil.DNSName(ip.reverse_dns)):
                 options.forward_policy = 'only'
-                root_logger.debug('IP address %s belongs to a private range, '
-                                  'using forward policy only', ip)
+                logger.debug('IP address %s belongs to a private range, '
+                             'using forward policy only', ip)
                 break
 
     if options.no_forwarders:
@@ -283,13 +292,12 @@ def install_check(standalone, api, replica, options, hostname):
 
     # test DNSSEC forwarders
     if options.forwarders:
-        if (not bindinstance.check_forwarders(options.forwarders,
-                                              root_logger)
+        if (not bindinstance.check_forwarders(options.forwarders)
                 and not options.no_dnssec_validation):
             options.no_dnssec_validation = True
             print("WARNING: DNSSEC validation will be disabled")
 
-    root_logger.debug("will use DNS forwarders: %s\n", options.forwarders)
+    logger.debug("will use DNS forwarders: %s\n", options.forwarders)
 
     if not standalone:
         search_reverse_zones = False
@@ -317,8 +325,7 @@ def install(standalone, replica, options, api=api):
         # otherwise this is done by server/replica installer
         update_hosts_file(ip_addresses, api.env.host, fstore)
 
-    bind = bindinstance.BindInstance(fstore, ldapi=True, api=api,
-                                     autobind=AUTOBIND_ENABLED)
+    bind = bindinstance.BindInstance(fstore, api=api)
     bind.setup(api.env.host, ip_addresses, api.env.realm, api.env.domain,
                options.forwarders, options.forward_policy,
                reverse_zones, zonemgr=options.zonemgr,
@@ -331,14 +338,15 @@ def install(standalone, replica, options, api=api):
         print("")
 
     bind.create_instance()
+    print("Restarting the web server to pick up resolv.conf changes")
+    services.knownservices.httpd.restart(capture_output=True)
 
     # on dnssec master this must be installed last
-    dnskeysyncd = dnskeysyncinstance.DNSKeySyncInstance(fstore, ldapi=True)
+    dnskeysyncd = dnskeysyncinstance.DNSKeySyncInstance(fstore)
     dnskeysyncd.create_instance(api.env.host, api.env.realm)
     if options.dnssec_master:
-        ods = opendnssecinstance.OpenDNSSECInstance(fstore, ldapi=True)
-        ods_exporter = odsexporterinstance.ODSExporterInstance(
-            fstore, ldapi=True)
+        ods = opendnssecinstance.OpenDNSSECInstance(fstore)
+        ods_exporter = odsexporterinstance.ODSExporterInstance(fstore)
 
         ods_exporter.create_instance(api.env.host, api.env.realm)
         ods.create_instance(api.env.host, api.env.realm,
@@ -400,3 +408,121 @@ def uninstall():
     dnskeysync = dnskeysyncinstance.DNSKeySyncInstance(fstore)
     if dnskeysync.is_configured():
         dnskeysync.uninstall()
+
+
+class DNSForwardPolicy(enum.Enum):
+    ONLY = 'only'
+    FIRST = 'first'
+
+
+@group
+class DNSInstallInterface(hostname.HostNameInstallInterface):
+    """
+    Interface of the DNS installer
+
+    Knobs defined here will be available in:
+    * ipa-server-install
+    * ipa-replica-prepare
+    * ipa-replica-install
+    * ipa-dns-install
+    """
+    description = "DNS"
+
+    allow_zone_overlap = knob(
+        None,
+        description="Create DNS zone even if it already exists",
+    )
+    allow_zone_overlap = prepare_only(allow_zone_overlap)
+
+    reverse_zones = knob(
+        # pylint: disable=invalid-sequence-index
+        typing.List[str], [],
+        description=("The reverse DNS zone to use. This option can be used "
+                     "multiple times"),
+        cli_names='--reverse-zone',
+        cli_metavar='REVERSE_ZONE',
+    )
+    reverse_zones = prepare_only(reverse_zones)
+
+    @reverse_zones.validator
+    def reverse_zones(self, values):
+        if not self.allow_zone_overlap:
+            for zone in values:
+                check_zone_overlap(zone)
+
+    no_reverse = knob(
+        None,
+        description="Do not create new reverse DNS zone",
+    )
+    no_reverse = prepare_only(no_reverse)
+
+    auto_reverse = knob(
+        None,
+        description="Create necessary reverse zones",
+    )
+    auto_reverse = prepare_only(auto_reverse)
+
+    zonemgr = knob(
+        str, None,
+        description=("DNS zone manager e-mail address. Defaults to "
+                     "hostmaster@DOMAIN"),
+    )
+    zonemgr = prepare_only(zonemgr)
+
+    @zonemgr.validator
+    def zonemgr(self, value):
+        # validate the value first
+        try:
+            # IDNA support requires unicode
+            encoding = getattr(sys.stdin, 'encoding', None)
+            if encoding is None:
+                encoding = 'utf-8'
+            value = value.decode(encoding)
+            bindinstance.validate_zonemgr_str(value)
+        except ValueError as e:
+            # FIXME we can do this in better way
+            # https://fedorahosted.org/freeipa/ticket/4804
+            # decode to proper stderr encoding
+            stderr_encoding = getattr(sys.stderr, 'encoding', None)
+            if stderr_encoding is None:
+                stderr_encoding = 'utf-8'
+            error = unicode(e).encode(stderr_encoding)
+            raise ValueError(error)
+
+    forwarders = knob(
+        # pylint: disable=invalid-sequence-index
+        typing.List[ipautil.CheckedIPAddressLoopback], None,
+        description=("Add a DNS forwarder. This option can be used multiple "
+                     "times"),
+        cli_names='--forwarder',
+    )
+    forwarders = enroll_only(forwarders)
+
+    no_forwarders = knob(
+        None,
+        description="Do not add any DNS forwarders, use root servers instead",
+    )
+    no_forwarders = enroll_only(no_forwarders)
+
+    auto_forwarders = knob(
+        None,
+        description="Use DNS forwarders configured in /etc/resolv.conf",
+    )
+    auto_forwarders = enroll_only(auto_forwarders)
+
+    forward_policy = knob(
+        DNSForwardPolicy, None,
+        description=("DNS forwarding policy for global forwarders"),
+    )
+    forward_policy = enroll_only(forward_policy)
+
+    no_dnssec_validation = knob(
+        None,
+        description="Disable DNSSEC validation",
+    )
+    no_dnssec_validation = enroll_only(no_dnssec_validation)
+
+    dnssec_master = False
+    disable_dnssec_master = False
+    kasp_db_file = None
+    force = False

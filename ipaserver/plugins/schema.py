@@ -16,6 +16,7 @@ from ipalib.frontend import Command, Local, Method, Object
 from ipalib.output import Entry, ListOfEntries, ListOfPrimaryKeys, PrimaryKey
 from ipalib.parameters import Bool, Dict, Flag, Str
 from ipalib.plugable import Registry
+from ipalib.request import context
 from ipalib.text import _
 from ipapython.version import API_VERSION
 
@@ -92,6 +93,9 @@ class BaseMetaObject(Object):
         args, criteria = self._split_search_args(*args)
 
         result = self._search(*args, **kwargs)
+        if not result:
+            return tuple()
+
         result = (self._get_obj(r, **kwargs) for r in result)
 
         if criteria:
@@ -125,8 +129,8 @@ class BaseMetaSearch(Search):
                   "(\"%s\")") % 'name',
         )
 
-    def execute(self, criteria=None, **options):
-        result = list(self.obj.search(criteria, **options))
+    def execute(self, command, criteria=None, **options):
+        result = list(self.obj.search(command, criteria, **options))
         return dict(result=result, count=len(result), truncated=False)
 
 
@@ -377,8 +381,10 @@ class topic_(MetaObject):
                     'full_name': topic_full_name,
                 }
                 topics.append(topic)
+                # pylint: disable=unsupported-assignment-operation
                 topics_by_key[topic_name] = topic
                 topics_by_key[topic_full_name] = topic
+                # pylint: enable=unsupported-assignment-operation
 
                 for package in self.api.packages:
                     module_name = '.'.join((package.__name__, topic_name))
@@ -399,8 +405,8 @@ class topic_(MetaObject):
                         continue
                     if topic_value is not None:
                         topic_name = unicode(topic_value)
-                        topic['topic_topic'] = '{}/{}'.format(topic_name,
-                                                              topic_version)
+                        topic['topic_topic'] = u'{}/{}'.format(topic_name,
+                                                               topic_version)
                     else:
                         topic.pop('topic_topic', None)
 
@@ -624,16 +630,28 @@ class param(BaseParam):
         return obj
 
     def _retrieve(self, metaobjectfull_name, name, **kwargs):
+        found = False
+
         try:
             metaobj = self.api.Command[metaobjectfull_name]
-            plugin = self.api.Object['command']
         except KeyError:
-            metaobj = self.api.Object[metaobjectfull_name]
-            plugin = self.api.Object['class']
+            raise errors.NotFound(
+                reason=_("%(metaobject)s: %(oname)s not found") % {
+                    'metaobject': metaobjectfull_name, 'oname': self.name,
+                }
+            )
 
-        for param in plugin._iter_params(metaobj):
-            if param.name == name:
-                return metaobj, param
+        if 'command' in self.api.Object:
+            plugin = self.api.Object['command']
+            found = True
+        elif 'class' in self.api.Object:
+            plugin = self.api.Object['class']
+            found = True
+
+        if found:
+            for param in plugin._iter_params(metaobj):
+                if param.name == name:
+                    return metaobj, param
 
         raise errors.NotFound(
             reason=_("%(pkey)s: %(oname)s not found") % {
@@ -646,8 +664,11 @@ class param(BaseParam):
             metaobj = self.api.Command[metaobjectfull_name]
             plugin = self.api.Object['command']
         except KeyError:
-            metaobj = self.api.Object[metaobjectfull_name]
-            plugin = self.api.Object['class']
+            try:
+                metaobj = self.api.Object[metaobjectfull_name]
+                plugin = self.api.Object['class']
+            except KeyError:
+                return tuple()
 
         return ((metaobj, param) for param in plugin._iter_params(metaobj))
 
@@ -714,6 +735,13 @@ class output(BaseParam):
         return obj
 
     def _retrieve(self, commandfull_name, name, **kwargs):
+        if not commandfull_name in self.api.Command:
+            raise errors.NotFound(
+                reason=_("%(command_name)s: %(oname)s not found") % {
+                    'command_name': commandfull_name, 'oname': self.name,
+                }
+            )
+
         cmd = self.api.Command[commandfull_name]
         try:
             return (cmd, cmd.output[name])
@@ -725,6 +753,9 @@ class output(BaseParam):
             )
 
     def _search(self, commandfull_name, **kwargs):
+        if not commandfull_name in self.api.Command:
+            return None
+
         cmd = self.api.Command[commandfull_name]
         return ((cmd, output) for output in cmd.output())
 
@@ -803,11 +834,15 @@ class schema(Command):
         return schema
 
     def execute(self, *args, **kwargs):
-        try:
-            schema = self.api._schema
-        except AttributeError:
+        langs = "".join(getattr(context, "languages", []))
+
+        if getattr(self.api, "_schema", None) is None:
+            setattr(self.api, "_schema", {})
+
+        schema = self.api._schema.get(langs)
+        if schema is None:
             schema = self._generate_schema(**kwargs)
-            setattr(self.api, '_schema', schema)
+            self.api._schema[langs] = schema
 
         schema['ttl'] = SCHEMA_TTL
 

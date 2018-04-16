@@ -1047,7 +1047,7 @@ IPA.multivalued_widget = function(spec) {
 
     that.child_spec = spec.child_spec;
     that.size = spec.size || 30;
-    that.undo_control;
+    that.undo_control = null;
     that.initialized = true;
     that.updating = false;
 
@@ -1534,12 +1534,8 @@ IPA.custom_command_multivalued_widget = function(spec) {
      * Called on error of add command. Override point.
      */
     that.on_error_add = function(xhr, text_status, error_thrown) {
-        that.adder_dialog.focus_first_element();
-
-        if (error_thrown.message) {
-            var msg = error_thrown.message;
-            IPA.notify(msg, 'error');
-        }
+        that.adder_dialog.show();
+        exp.focus_invalid(that.adder_dialog);
     };
 
     /**
@@ -1599,27 +1595,16 @@ IPA.custom_command_multivalued_widget = function(spec) {
             name: 'custom-add-dialog'
         };
 
-        that.adder_dialog = IPA.dialog(spec);
-        that.adder_dialog.create_button({
-            name: 'add',
-            label: '@i18n:buttons.add',
-            click: function() {
-                if (!that.adder_dialog.validate()) {
-                    exp.focus_invalid(that.adder_dialog);
-                }
-                else {
-                    that.add(that.adder_dialog);
-                }
+        spec.on_ok = function() {
+            if (!that.adder_dialog.validate()) {
+                exp.focus_invalid(that.adder_dialog);
             }
-        });
+            else {
+                that.add(that.adder_dialog);
+            }
+        };
 
-        that.adder_dialog.create_button({
-            name: 'cancel',
-            label: '@i18n:buttons.cancel',
-            click: function() {
-                that.adder_dialog.close();
-            }
-        });
+        that.adder_dialog = IPA.custom_command_multivalued_dialog(spec);
     };
 
     /* on button 'Add' on adder dialog click */
@@ -1807,6 +1792,8 @@ IPA.custom_command_multivalued_widget = function(spec) {
 IPA.krb_principal_multivalued_widget = function (spec) {
 
     spec = spec || {};
+    spec.child_spec = spec.child_spec || {};
+    spec.child_spec.data_name = spec.child_spec.data_name || 'krb-principal';
 
     spec.adder_dialog_spec = spec.adder_dialog_spec || {
         title: '@i18n:krbaliases.adder_title',
@@ -1827,7 +1814,7 @@ IPA.krb_principal_multivalued_widget = function (spec) {
 
     that.create_remove_dialog_message = function(row) {
         var message = text.get('@i18n:krbaliases.remove_message');
-        message = message.replace('${alias}', row.widget.principal_name);
+        message = message.replace('${alias}', row.widget.new_value);
 
         return message;
     };
@@ -1835,7 +1822,7 @@ IPA.krb_principal_multivalued_widget = function (spec) {
 
     that.create_remove_args = function(row) {
         var pkey = that.facet.get_pkey();
-        var krbprincipalname = row.widget.principal_name;
+        var krbprincipalname = row.widget.new_value;
         krbprincipalname = [ krbprincipalname ];
 
         var args = [
@@ -1862,22 +1849,27 @@ IPA.krb_principal_multivalued_widget = function (spec) {
 };
 
 /**
- * Widget which is used as row in kerberos aliases multivalued widget.
- * It contains only string where is the principal alias name and delete button.
+ * Widget which is used as row in multivalued widget. Each row is just
+ * non-editable text field.
  *
  * @class
  * @extends IPA.input_widget
  */
-IPA.krb_principal_widget = function(spec) {
+IPA.non_editable_row_widget = function(spec) {
     spec = spec || {};
 
     var that = IPA.input_widget();
 
+    /**
+     * Prefix of CSS class of each row.
+     */
+    that.data_name = spec.data_name || 'non-editable';
+
     that.create = function(container) {
         that.widget_create(container);
 
-        that.principal_text = $('<span />', {
-            'class': 'krb-principal-name',
+        that.data_text = $('<span />', {
+            'class': that.data_name + '-data',
             text: ''
         }).appendTo(container);
 
@@ -1890,18 +1882,19 @@ IPA.krb_principal_widget = function(spec) {
 
     that.update = function(value) {
 
-        var principal_name = value[0] || '';
+        var single_value = value[0] || '';
 
-        that.principal_name = principal_name;
+        that.new_value = single_value;
         that.update_text();
     };
 
     that.update_text = function() {
-        that.principal_text.text(that.principal_name);
+        that.data_text.text(that.new_value);
     };
 
     return that;
 };
+
 
 /**
  * Option widget base
@@ -2249,7 +2242,7 @@ IPA.option_widget_base = function(spec, that) {
                 var child_values = [];
                 var option = that.get_option(value);
 
-                if (option.widget) {
+                if (option && option.widget) {
                     child_values = option.widget.save();
                     values.push.apply(values, child_values);
                 }
@@ -2509,6 +2502,8 @@ IPA.custom_checkboxes_widget = function(spec) {
 
     var that = IPA.checkboxes_widget(spec);
 
+    that.set_value_to_lowercase = spec.set_value_to_lowercase || false;
+
     that.add_dialog_title = spec.add_dialog_title ||
                             "@i18n:dialogs.add_custom_value";
     that.add_field_label = spec.add_field_label ||
@@ -2626,14 +2621,14 @@ IPA.custom_checkboxes_widget = function(spec) {
 
             if (!value || value === '') continue;
 
-            value = value.toLowerCase();
+            if (that.set_value_to_lowercase) value = value.toLowerCase();
             that.values.push(value);
         }
 
         that.populate();
         that.append();
         that.owb_create(that.container);
-        that.owb_update(values);
+        that.owb_update(that.values);
     };
 
     /**
@@ -3591,7 +3586,7 @@ IPA.column = function (spec) {
  * @param {boolean} [spec.save_values=true]
  * @param {string} [spec.class] css class
  * @param {boolean} [spec.pagination] render pagination
- * @param {number} [spec.page_length=20]
+ * @param {number} [spec.page_length=config.table_page_size]
  * @param {boolean} [spec.multivalued=true]
  * @param {Array} columns columns or columns specs
  * @param {string} [value_attr_name=name]
@@ -3616,7 +3611,7 @@ IPA.table_widget = function (spec) {
     that.pagination = spec.pagination;
     that.current_page = 1;
     that.total_pages = 1;
-    that.page_length = spec.page_length || 20;
+    that.page_length = spec.page_length || config.get('table_page_size');
 
     that.multivalued = spec.multivalued === undefined ? true : spec.multivalued;
 
@@ -4336,7 +4331,7 @@ IPA.attribute_table_widget = function(spec) {
 
         if (!selected_values.length) {
             var message = text.get('@i18n:dialogs.remove_empty');
-            alert(message);
+            window.alert(message);
             return null;
         }
 
@@ -4611,7 +4606,7 @@ IPA.combobox_widget = function(spec) {
         that.list_container = $('<div/>', {
             'class': 'combobox-widget-list',
             css: { 'z-index': that.z_index, 'display':'none' },
-            keydown: that.on_list_container_keydown
+            keyup: that.on_list_container_keyup
         }).appendTo(that.input_container);
 
         var div = $('<div/>', {
@@ -4723,7 +4718,7 @@ IPA.combobox_widget = function(spec) {
         }
     };
 
-    that.on_list_container_keydown = function(e) {
+    that.on_list_container_keyup = function(e) {
         // close on ESCAPE and consume event to prevent unwanted
         // behaviour like closing dialog
         if (e.which == keys.ESCAPE) {
@@ -4756,11 +4751,16 @@ IPA.combobox_widget = function(spec) {
             e.preventDefault();
             that.select_next();
             that.list.focus();
+        } else if (key === keys.ESCAPE) {
+            e.stopPropagation();
         }
     };
 
     that.list_on_keydown = function(e) {
-        if (e.which === keys.TAB) {
+        if (e.which === keys.ESCAPE) {
+            e.stopPropagation();
+            return false;
+        } else if (e.which === keys.TAB) {
             e.preventDefault();
             if (that.searchable) {
                 that.filter.focus();
@@ -4939,7 +4939,7 @@ IPA.combobox_widget = function(spec) {
         var value = that.list.val();
         var option = $('option[value="'+value+'"]', that.list);
         var next = option.next();
-        if (!next.length) return;
+        if (!next || !next.length) return;
         that.select(next.val());
     };
 
@@ -4947,7 +4947,7 @@ IPA.combobox_widget = function(spec) {
         var value = that.list.val();
         var option = $('option[value="'+value+'"]', that.list);
         var prev = option.prev();
-        if (!prev.length) return;
+        if (!prev || !prev.length) return;
         that.select(prev.val());
     };
 
@@ -5012,7 +5012,8 @@ IPA.entity_select_widget = function(spec) {
             entity: that.other_entity.name,
             method: 'find',
             args: [filter],
-            options: that.filter_options
+            options: that.filter_options,
+            suppress_warnings: [13017]
         });
         var no_members = metadata.get('@mc-opt:' + cmd.get_command() + ':no_members');
         if (no_members) {
@@ -5767,6 +5768,8 @@ exp.fluid_layout = IPA.fluid_layout = function(spec) {
     that.on_visible_change = function(event) {
 
         var row = that._get_row(event);
+        if (!row) return;
+
         if (event.visible) {
             row.css('display', '');
         } else {
@@ -6975,6 +6978,8 @@ exp.activity_widget = IPA.activity_widget = function(spec) {
 
     that.icon = spec.icon || 'fa fa-spinner fa-spin';
 
+    that.connection_counter = 0;
+
     /**
      * Operation mode
      *
@@ -6984,8 +6989,9 @@ exp.activity_widget = IPA.activity_widget = function(spec) {
      */
     that.mode = spec.mode || "dots";
 
-    that.activate_event = spec.activate_event || 'network-activity-start';
-    that.deactivate_event = spec.deactivate_event || 'network-activity-end';
+    that.activate_event = spec.activate_event || 'rpc-start';
+    that.deactivate_event = spec.deactivate_event || 'rpc-end';
+    that.set_activity_event = 'set-activity';
 
     that.create = function(container) {
         that.widget_create(container);
@@ -7010,10 +7016,19 @@ exp.activity_widget = IPA.activity_widget = function(spec) {
         }
         that.set_visible(that.visible);
         topic.subscribe(that.activate_event, function() {
-            that.show();
+            ++that.connection_counter;
+
+            if (that.connection_counter === 1) that.show();
         });
         topic.subscribe(that.deactivate_event, function() {
-            that.hide();
+            --that.connection_counter;
+
+            if (that.connection_counter === 0) that.hide();
+            if (that.connection_counter < 0) that.connection_counter = 0;
+        });
+
+        topic.subscribe(that.set_activity_event, function(new_text) {
+             that.text = new_text;
         });
     };
 
@@ -7034,6 +7049,7 @@ exp.activity_widget = IPA.activity_widget = function(spec) {
         that.toggle_class('closed', true);
         that.row_node.detach(); // to save CPU time (spinner icon)
         that.toggle_timer(false);
+
     };
 
     that.show = function() {
@@ -7156,6 +7172,7 @@ exp.register = function() {
     w.register('html', IPA.html_widget);
     w.register('link', IPA.link_widget);
     w.register('multivalued', IPA.multivalued_widget);
+    w.register('non_editable_row', IPA.non_editable_row_widget);
     w.register('custom_command_multivalued',
         IPA.custom_command_multivalued_widget);
     w.register('krb_principal_multivalued',

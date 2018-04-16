@@ -24,13 +24,13 @@ Contains browser driver and common tasks.
 """
 from __future__ import print_function
 
-import nose
 from datetime import datetime
 import time
 import re
 import os
 from functools import wraps
-from nose.plugins.skip import SkipTest
+import unittest
+import paramiko
 
 # pylint: disable=import-error
 from six.moves.urllib.error import URLError
@@ -42,7 +42,6 @@ try:
     from selenium.common.exceptions import InvalidElementStateException
     from selenium.common.exceptions import StaleElementReferenceException
     from selenium.common.exceptions import WebDriverException
-    from selenium.webdriver.common.action_chains import ActionChains
     from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
     from selenium.webdriver.common.keys import Keys
     from selenium.webdriver.common.by import By
@@ -59,6 +58,7 @@ except ImportError:
     NO_YAML = True
 from ipaplatform.paths import paths
 
+
 ENV_MAP = {
     'MASTER': 'ipa_server',
     'ADMINID': 'ipa_admin',
@@ -69,6 +69,7 @@ ENV_MAP = {
     'IPA_NO_CA': 'no_ca',
     'IPA_NO_DNS': 'no_dns',
     'IPA_HAS_TRUSTS': 'has_trusts',
+    'IPA_HAS_KRA': 'has_kra',
     'IPA_HOST_CSR_PATH': 'host_csr_path',
     'IPA_SERVICE_CSR_PATH': 'service_csr_path',
     'AD_DOMAIN': 'ad_domain',
@@ -97,7 +98,7 @@ def screenshot(fn):
     def screenshot_wrapper(*args):
         try:
             return fn(*args)
-        except SkipTest:
+        except unittest.SkipTest:
             raise
         except Exception:
             self = args[0]
@@ -119,7 +120,7 @@ class UI_driver(object):
     @classmethod
     def setup_class(cls):
         if NO_SELENIUM:
-            raise nose.SkipTest('Selenium not installed')
+            raise unittest.SkipTest('Selenium not installed')
 
     def setup(self, driver=None, config=None):
         self.request_timeout = 30
@@ -149,9 +150,11 @@ class UI_driver(object):
                 with open(path, 'r') as conf:
                     self.config = yaml.load(conf)
             except yaml.YAMLError as e:
-                raise nose.SkipTest("Invalid Web UI config.\n%s" % e)
+                raise unittest.SkipTest("Invalid Web UI config.\n%s" % e)
             except IOError as e:
-                raise nose.SkipTest("Can't load Web UI test config: %s" % e)
+                raise unittest.SkipTest(
+                    "Can't load Web UI test config: %s" % e
+                )
         else:
             self.config = {}
 
@@ -187,7 +190,7 @@ class UI_driver(object):
 
         if driver_type == 'remote':
             if 'host' not in self.config:
-                raise nose.SkipTest('Selenium server host not configured')
+                raise unittest.SkipTest('Selenium server host not configured')
             host = self.config["host"]
 
             if browser == 'chrome':
@@ -203,9 +206,13 @@ class UI_driver(object):
                     command_executor='http://%s:%d/wd/hub' % (host, port),
                     desired_capabilities=capabilities)
             except URLError as e:
-                raise nose.SkipTest('Error connecting to selenium server: %s' % e)
+                raise unittest.SkipTest(
+                    'Error connecting to selenium server: %s' % e
+                )
             except RuntimeError as e:
-                raise nose.SkipTest('Error while establishing webdriver: %s' % e)
+                raise unittest.SkipTest(
+                    'Error while establishing webdriver: %s' % e
+                )
         else:
             try:
                 if browser == 'chrome' or browser == 'chromium':
@@ -216,11 +223,16 @@ class UI_driver(object):
                     fp = None
                     if "ff_profile" in self.config:
                         fp = webdriver.FirefoxProfile(self.config["ff_profile"])
-                    driver = webdriver.Firefox(fp)
+                    ff_log_path = self.config.get("geckodriver_log_path")
+                    driver = webdriver.Firefox(fp, log_path=ff_log_path)
             except URLError as e:
-                raise nose.SkipTest('Error connecting to selenium server: %s' % e)
+                raise unittest.SkipTest(
+                    'Error connecting to selenium server: %s' % e
+                )
             except RuntimeError as e:
-                raise nose.SkipTest('Error while establishing webdriver: %s' % e)
+                raise unittest.SkipTest(
+                    'Error while establishing webdriver: %s' % e
+                )
 
         return driver
 
@@ -283,6 +295,12 @@ class UI_driver(object):
         """
         return self.config.get('has_trusts')
 
+    def has_kra(self):
+        """
+        FreeIPA server was installed with Kra.
+        """
+        return self.config.get('has_kra')
+
     def has_active_request(self):
         """
         Check if there is running AJAX request
@@ -336,34 +354,56 @@ class UI_driver(object):
         """
         Navigate to Web UI first page and wait for loading of all dependencies.
         """
+        # If the application is already loaded, there is no need to re-enter
+        # the URL on the address bar and reloading everything.
+        # This help us to create scenarios like login -> logout -> login
+
+        # if a page is already loaded we click in the IPA logo to go to the
+        # initial page
+        ipa_logo = self.find('.navbar-brand', By.CSS_SELECTOR)
+        if ipa_logo and ipa_logo.is_displayed():
+            self.move_to_element_in_page(ipa_logo)
+            ipa_logo.click()
+            return
+
+        # already on the first page
+        if self.login_screen_visible():
+            return
+
+        # if is not any of above cases, we need to load the application for
+        # its first time entering the URL in the address bar
         self.driver.get(self.get_base_url())
         runner = self
         WebDriverWait(self.driver, 10).until(lambda d: runner.files_loaded())
+        self.wait_for_request()
 
     def login(self, login=None, password=None, new_password=None):
         """
         Log in if user is not logged in.
         """
+        if self.logged_in():
+            return
+
+        if not login:
+            login = self.config['ipa_admin']
+        if not password:
+            password = self.config['ipa_password']
+        if not new_password:
+            new_password = password
+
+        auth = self.get_login_screen()
+        login_tb = self.find("//input[@type='text'][@name='username']",
+                             'xpath', auth, strict=True)
+        psw_tb = self.find("//input[@type='password'][@name='password']",
+                           'xpath', auth, strict=True)
+        login_tb.send_keys(login)
+        psw_tb.send_keys(password)
+        psw_tb.send_keys(Keys.RETURN)
+        self.wait(0.5)
         self.wait_for_request(n=2)
-        if not self.logged_in():
 
-            if not login:
-                login = self.config['ipa_admin']
-            if not password:
-                password = self.config['ipa_password']
-            if not new_password:
-                new_password = password
-
-            auth = self.get_login_screen()
-            login_tb = self.find("//input[@type='text'][@name='username']", 'xpath', auth, strict=True)
-            psw_tb = self.find("//input[@type='password'][@name='password']", 'xpath', auth, strict=True)
-            login_tb.send_keys(login)
-            psw_tb.send_keys(password)
-            psw_tb.send_keys(Keys.RETURN)
-            self.wait(0.5)
-            self.wait_for_request(n=2)
-
-            # reset password if needed
+        # reset password if needed
+        if self.login_screen_visible():
             newpw_tb = self.find("//input[@type='password'][@name='new_password']", 'xpath', auth)
             verify_tb = self.find("//input[@type='password'][@name='verify_password']", 'xpath', auth)
             if newpw_tb and newpw_tb.is_displayed():
@@ -384,12 +424,13 @@ class UI_driver(object):
 
     def logout(self):
         self.profile_menu_action('logout')
+        assert self.login_screen_visible()
 
     def get_login_screen(self):
         """
         Get reference of login screen
         """
-        return self.find('rcue-login-screen', 'id')
+        return self.find('.login-pf', By.CSS_SELECTOR)
 
     def login_screen_visible(self):
         """
@@ -444,8 +485,18 @@ class UI_driver(object):
         Click on tab with given name
         """
         facet = self.get_facet()
-        s = "div.facet-tabs li[name='%s'] a" % name
-        link = self.find(s, By.CSS_SELECTOR, facet, strict=True)
+        tabs = "div.facet-tabs"
+        sidebar = "div.sidebar-pf"
+
+        facets_container = self.find(tabs, By.CSS_SELECTOR, facet)
+
+        # handle sidebar instead of facet-tabs
+        # the webui facet can have only the facet-tabs OR sidebar, not both
+        if not facets_container:
+            facets_container = self.find(sidebar, By.CSS_SELECTOR, facet)
+
+        s = "li[name='%s'] a" % name
+        link = self.find(s, By.CSS_SELECTOR, facets_container, strict=True)
         link.click()
         # double wait because of facet's paging
         self.wait_for_request(0.5)
@@ -635,12 +686,18 @@ class UI_driver(object):
 
     def _button_click(self, selector, parent, name=''):
         btn = self.find(selector, By.CSS_SELECTOR, parent, strict=True)
-        ActionChains(self.driver).move_to_element(btn).perform()
+        self.move_to_element_in_page(btn)
         disabled = btn.get_attribute("disabled")
         assert btn.is_displayed(), 'Button is not displayed: %s' % name
         assert not disabled, 'Invalid button state: disabled. Button: %s' % name
         btn.click()
         self.wait_for_request()
+
+    def move_to_element_in_page(self, element):
+        # workaround to move the page until the element is visible
+        # more in https://github.com/mozilla/geckodriver/issues/776
+        self.driver.execute_script('arguments[0].scrollIntoView(true);',
+                                   element)
 
     def profile_menu_action(self, name):
         """
@@ -654,6 +711,35 @@ class UI_driver(object):
         # action is usually followed by opening a dialog, add wait to compensate
         # possible dialog transition effect
         self.wait(0.5)
+
+    def close_notifications(self):
+        """
+        Close all notifications like success messages, warnings, infos
+        """
+        self.wait()
+        while True:
+            # get close button of notification
+            s = ".notification-area .alert button"
+            button = self.find(s, By.CSS_SELECTOR, strict=False)
+            if button:
+                button.click()
+                self.wait()
+            else:
+                break
+
+    def close_all_dialogs(self):
+        """
+        Close all currently opened dialogs
+        """
+        self.wait()
+        while True:
+            s = ".modal.fade.in .modal-header button.close"
+            btn = self.find(s, By.CSS_SELECTOR)
+            if btn:
+                btn.click()
+                self.wait(0.5)
+            else:
+                break
 
     def get_form(self):
         """
@@ -800,18 +886,19 @@ class UI_driver(object):
         self.wait_for_request()
 
         list_cnt = self.find('.combobox-widget-list', By.CSS_SELECTOR, cb, strict=True)
-        search_btn = self.find('a[name=search] i', By.CSS_SELECTOR, cb, strict=True)
         opt_s = "select[name=list] option[value='%s']" % value
         option = self.find(opt_s, By.CSS_SELECTOR, cb)
 
         if combobox_input:
             if not option:
+                open_btn.click()
                 self.fill_textbox(combobox_input, value, cb)
         else:
             if not option:
                 # try to search
                 self.fill_textbox('filter', value, cb)
-
+                search_btn = self.find('a[name=search] i', By.CSS_SELECTOR, cb,
+                                       strict=True)
                 search_btn.click()
                 self.wait_for_request()
                 option = self.find(opt_s, By.CSS_SELECTOR, cb, strict=True)
@@ -936,7 +1023,8 @@ class UI_driver(object):
         s += '.table'
         return s
 
-    def select_record(self, pkey, parent=None, table_name=None):
+    def select_record(self, pkey, parent=None,
+                      table_name=None, unselect=False):
         """
         Select record with given pkey in search table.
         """
@@ -947,12 +1035,27 @@ class UI_driver(object):
         input_s = s + " tbody td input[value='%s']" % pkey
         checkbox = self.find(input_s, By.CSS_SELECTOR, parent, strict=True)
         try:
-            ActionChains(self.driver).move_to_element(checkbox).click().perform()
+            self.move_to_element_in_page(checkbox)
+            checkbox.click()
         except WebDriverException as e:
             assert False, 'Can\'t click on checkbox label: %s \n%s' % (s, e)
         self.wait()
-        assert checkbox.is_selected(), 'Record was not checked: %s' % input_s
-        self.wait()
+        if unselect:
+            assert checkbox.is_selected() is not True
+            self.wait()
+        else:
+            assert checkbox.is_selected(), \
+                   'Record was not checked: %s' % input_s
+            self.wait()
+
+    def select_multiple_records(self, records):
+        """
+        Select multiple records
+        """
+
+        for data in records:
+            pkey = data['pkey']
+            self.select_record(pkey)
 
     def get_record_value(self, pkey, column, parent=None, table_name=None):
         """
@@ -998,7 +1101,7 @@ class UI_driver(object):
 
     def delete_record(
             self, pkeys, fields=None, parent=None, table_name=None,
-            facet_btn='remove'):
+            facet_btn='remove', confirm_btn='ok'):
         """
         Delete records with given pkeys in currently opened search table.
         """
@@ -1023,7 +1126,9 @@ class UI_driver(object):
                 self.facet_button_click(facet_btn)
             if fields:
                 self.fill_fields(fields)
-            self.dialog_button_click('ok')
+            if not confirm_btn:
+                return
+            self.dialog_button_click(confirm_btn)
             self.wait_for_request(n=2)
             self.wait()
 
@@ -1164,9 +1269,12 @@ class UI_driver(object):
 
     def add_record(self, entity, data, facet='search', facet_btn='add',
                    dialog_btn='add', delete=False, pre_delete=True,
-                   dialog_name='add', navigate=True, combobox_input=None):
+                   dialog_name='add', navigate=True, combobox_input=None,
+                   negative=False):
         """
         Add records.
+
+        When negative=True we are skipping final assertions.
 
         Expected data format:
         {
@@ -1212,6 +1320,9 @@ class UI_driver(object):
         if dialog_info and dialog_info['name'] in expected:
             self.dialog_button_click('ok')
             self.wait_for_request()
+
+        if negative:
+            return
 
         # check for error
         self.assert_no_error_dialog()
@@ -1260,6 +1371,7 @@ class UI_driver(object):
                    update_btn='save',
                    breadcrumb=None,
                    navigate=True,
+                   mod=True,
                    delete=True):
         """
         Basic CRUD operation sequence.
@@ -1296,6 +1408,8 @@ class UI_driver(object):
                         dialog_btn=add_dialog_btn
                         )
 
+        self.close_notifications()
+
         # Find
         self.find_record(parent_entity, data, search_facet)
 
@@ -1310,9 +1424,11 @@ class UI_driver(object):
         self.validate_fields(data.get('add_v'))
 
         # 4. Mod values
-        if data.get('mod'):
+        if mod and data.get('mod'):
             self.mod_record(entity, data, details_facet, update_btn)
             self.validate_fields(data.get('mod_v'))
+
+        self.close_notifications()
 
         if not breadcrumb:
             self.navigate_to_entity(entity, search_facet)
@@ -1322,6 +1438,7 @@ class UI_driver(object):
         # 5. Delete record
         if delete:
             self.delete_record(pkey, data.get('del'))
+            self.close_notifications()
 
     def add_table_record(self, name, data, parent=None):
         """
@@ -1340,7 +1457,8 @@ class UI_driver(object):
         self.wait_for_request()
 
     def prepare_associations(
-            self, pkeys, facet=None, facet_btn='add', member_pkeys=None):
+            self, pkeys, facet=None, facet_btn='add', member_pkeys=None,
+            confirm_btn='add'):
         """
         Helper function for add_associations and delete_associations
         """
@@ -1355,7 +1473,7 @@ class UI_driver(object):
             self.select_record(key, table_name='available')
             self.button_click('add')
 
-        self.dialog_button_click('add')
+        self.dialog_button_click(confirm_btn)
         self.wait_for_request()
 
         if member_pkeys:
@@ -1367,12 +1485,16 @@ class UI_driver(object):
 
     def add_associations(
             self, pkeys, facet=None, delete=False, facet_btn='add',
-            member_pkeys=None):
+            member_pkeys=None, confirm_btn='add'):
         """
         Add associations
         """
         check_pkeys = self.prepare_associations(
-            pkeys, facet, facet_btn, member_pkeys)
+            pkeys, facet, facet_btn, member_pkeys, confirm_btn=confirm_btn)
+
+        # we need to return if we want to "cancel" to avoid assert record fail
+        if confirm_btn == 'cancel':
+            return
 
         for key in check_pkeys:
             self.assert_record(key)
@@ -1541,6 +1663,61 @@ class UI_driver(object):
             # add multiple at once and test table delete button
             self.add_table_associations(table, keys, delete=True)
 
+    def add_sshkey_to_user(self, user, ssh_key):
+        """
+        Add ssh public key to particular user
+
+        user (str): user to add the key to
+        ssh_key (str): public ssh key
+        """
+        self.navigate_to_entity('user')
+        self.navigate_to_record(user)
+
+        ssh_pub = 'div[name="ipasshpubkey"] button[name="add"]'
+        self.find(ssh_pub, By.CSS_SELECTOR).click()
+        self.wait()
+        self.driver.switch_to.active_element.send_keys(ssh_key)
+        self.dialog_button_click('update')
+        self.facet_button_click('save')
+
+    def delete_user_sshkey(self, user):
+        """
+        Delete ssh public key of particular user
+        """
+        self.navigate_to_entity('user')
+        self.navigate_to_record(user)
+
+        ssh_pub = 'div[name="ipasshpubkey"] button[name="remove"]'
+        self.find(ssh_pub, By.CSS_SELECTOR).click()
+        self.facet_button_click('save')
+
+    def run_cmd_on_ui_host(self, cmd):
+        """
+        Run "shell" command on the UI system using "admin" user's passwd from
+        conf.
+        Use only where API does not fit.
+
+        cmd (str): command to run
+        """
+
+        login = self.config.get('ipa_admin')
+        hostname = self.config.get('ipa_server')
+        password = self.config.get('ipa_password')
+
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(hostname=hostname, username=login, password=password)
+            ssh.exec_command(cmd)
+        except paramiko.AuthenticationException:
+            self.skip('Authentication to server {} failed'.format(hostname))
+        except paramiko.SSHException as e:
+            self.skip('Unable to establish SSH connection: {}'.format(e))
+        except Exception as e:
+            self.skip('Unable to proceed: {}'.format(e))
+        finally:
+            ssh.close()
+
     def has_class(self, el, cls):
         """
         Check if el has CSS class
@@ -1551,7 +1728,7 @@ class UI_driver(object):
         """
         Skip tests
         """
-        raise nose.SkipTest(reason)
+        raise unittest.SkipTest(reason)
 
     def assert_text(self, selector, value, parent=None):
         """
@@ -1713,12 +1890,20 @@ class UI_driver(object):
         key = pkey
         self.assert_record(key, negative=negative)
 
-    def assert_record_value(self, expected, pkey, column, parent=None, table_name=None):
+    def assert_record_value(self, expected, pkeys, column, parent=None,
+                            table_name=None):
         """
-        Assert that column's value of record defined by pkey equals expected value.
+        Assert that column's value of record defined by pkey equals expected
+        value.
         """
-        val = self.get_record_value(pkey, column, parent, table_name)
-        assert expected == val, "Invalid value: '%s'. Expected: '%s'." % (val, expected)
+
+        if type(pkeys) is not list:
+            pkeys = [pkeys]
+
+        for pkey in pkeys:
+            val = self.get_record_value(pkey, column, parent, table_name)
+            assert expected == val, ("Invalid value: '%s'. Expected: '%s'."
+                                     % (val, expected))
 
     def assert_class(self, element, cls, negative=False):
         """
@@ -1801,3 +1986,56 @@ class UI_driver(object):
             is_enabled = not self.has_class(li, 'disabled')
             assert is_enabled == enabled, ('Invalid enabled state of action item %s. '
                                            'Expected: %s') % (action, str(visible))
+
+    def assert_field_validation_required(self, parent=None):
+        """
+        Assert we got 'Required field' error message in field validation
+        """
+
+        if not parent:
+            parent = self.get_form()
+
+        req_field_css = '.help-block[name="error_link"]'
+
+        res = self.find(req_field_css, By.CSS_SELECTOR, context=parent)
+        assert 'Required field' in res.text, 'No "Required field" error found'
+
+    def assert_notification(self, type='success', assert_text=None):
+        """
+        Assert whether we have a notification of particular type
+
+        type: type for assertion
+        assert_text: assert particular text when True
+
+        Returns True if selector/text found
+        """
+
+        notification_type = 'div.notification-area .alert-{}'.format(type)
+        # wait for a half sec for notification to appear
+        self.wait(0.5)
+        is_present = self.find(notification_type, By.CSS_SELECTOR)
+        assert is_present, "Notification not present"
+        if assert_text:
+            assert assert_text in is_present.text
+
+    def assert_last_error_dialog(self, expected_err, details=False,
+                                 dialog_name='error_dialog'):
+        """
+        Assert error dialog body text or when details=True click on
+        'Show details' and assert text there
+        """
+
+        err_dialog = self.get_last_error_dialog(dialog_name=dialog_name)
+
+        if details:
+            # open "Show details" paragraph
+            s = 'a[title="Show details"]'
+            details = self.find(s, By.CSS_SELECTOR)
+            details.click()
+
+            s = 'ul.error-container li p'
+            self.assert_text(s, expected_err, parent=err_dialog)
+
+        else:
+            s = '.modal-body div p'
+            self.assert_text(s, expected_err, parent=err_dialog)

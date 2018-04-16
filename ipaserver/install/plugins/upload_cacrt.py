@@ -17,11 +17,17 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-from ipaserver.install import certs
-from ipalib import Registry, errors, certstore
+import logging
+
+from ipalib.install import certstore
+from ipaserver.install import certs, dsinstance
+from ipaserver.install.installutils import realm_to_serverid
+from ipalib import Registry, errors
 from ipalib import Updater
 from ipapython import certdb
 from ipapython.dn import DN
+
+logger = logging.getLogger(__name__)
 
 register = Registry()
 
@@ -33,12 +39,18 @@ class update_upload_cacrt(Updater):
     """
 
     def execute(self, **options):
-        db = certs.CertDB(self.api.env.realm)
+        serverid = realm_to_serverid(self.api.env.realm)
+        db = certs.CertDB(self.api.env.realm,
+                          nssdir=dsinstance.config_dirname(serverid))
         ca_cert = None
 
         ca_enabled = self.api.Command.ca_is_enabled()['result']
         if ca_enabled:
             ca_nickname = certdb.get_ca_nickname(self.api.env.realm)
+            ca_subject = certstore.get_ca_subject(
+                self.api.Backend.ldap2,
+                self.api.env.container_ca,
+                self.api.env.basedn)
         else:
             ca_nickname = None
             server_certs = db.find_server_certs()
@@ -50,11 +62,19 @@ class update_upload_cacrt(Updater):
         ldap = self.api.Backend.ldap2
 
         for nickname, trust_flags in db.list_certs():
-            if 'u' in trust_flags:
+            if trust_flags.has_key:
                 continue
-            if nickname == ca_nickname and ca_enabled:
-                trust_flags = 'CT,C,C'
-            cert = db.get_cert_from_db(nickname, pem=False)
+            cert = db.get_cert_from_db(nickname)
+            subject = cert.subject
+            if ca_enabled and subject == ca_subject:
+                # When ca is enabled, we can have the IPA CA cert stored
+                # in the nss db with a different nickname (for instance
+                # when the server was installed with --subject to
+                # customize the CA cert subject), but it must always be
+                # stored in LDAP with the DN cn=$DOMAIN IPA CA
+                # This is why we check the subject instead of the nickname here
+                nickname = ca_nickname
+                trust_flags = certdb.IPA_CA_TRUST_FLAGS
             trust, _ca, eku = certstore.trust_flags_to_key_policy(trust_flags)
 
             dn = DN(('cn', nickname), ('cn', 'certificates'), ('cn', 'ipa'),
@@ -64,8 +84,8 @@ class update_upload_cacrt(Updater):
             try:
                 certstore.init_ca_entry(entry, cert, nickname, trust, eku)
             except Exception as e:
-                self.log.warning("Failed to create entry for %s: %s",
-                                 nickname, e)
+                logger.warning("Failed to create entry for %s: %s",
+                               nickname, e)
                 continue
             if nickname == ca_nickname:
                 ca_cert = cert
@@ -77,7 +97,11 @@ class update_upload_cacrt(Updater):
             try:
                 ldap.add_entry(entry)
             except errors.DuplicateEntry:
-                pass
+                if nickname == ca_nickname and ca_enabled:
+                    try:
+                        ldap.update_entry(entry)
+                    except errors.EmptyModlist:
+                        pass
 
         if ca_cert:
             dn = DN(('cn', 'CACert'), ('cn', 'ipa'), ('cn','etc'),

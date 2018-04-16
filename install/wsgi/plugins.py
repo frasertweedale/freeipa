@@ -21,9 +21,12 @@
 Plugin index generation script
 """
 
+import logging
 import os
 from ipaplatform.paths import paths
-from ipapython.ipa_log_manager import root_logger
+
+logger = logging.getLogger(os.path.basename(__file__))
+
 
 def get_plugin_index():
 
@@ -34,17 +37,19 @@ def get_plugin_index():
     index = 'define([],function(){return['
     index += ','.join("'"+x+"'" for x in dirs)
     index += '];});'
-    return index
+    return index.encode('utf-8')
 
 def get_failed():
-    return 'define([],function(){return[];});/*error occured: serving default */'
+    return (
+        b'define([],function(){return[];});/*error occured: serving default */'
+    )
 
 def application(environ, start_response):
     try:
         index = get_plugin_index()
         status = '200 OK'
     except Exception as e:
-        root_logger.error('plugin index generation failed: %s' % e)
+        logger.error('plugin index generation failed: %s', e)
         status = '200 OK'
         index = get_failed()
     headers = [('Content-type', 'application/javascript'),

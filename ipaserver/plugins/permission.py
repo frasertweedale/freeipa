@@ -17,6 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import logging
 import re
 import traceback
 
@@ -103,6 +104,8 @@ EXAMPLES:
    ipa permission-add --attrs=member --permissions=write --type=group "Manage Group Members"
 """)
 
+logger = logging.getLogger(__name__)
+
 register = Registry()
 
 _DEPRECATED_OPTION_ALIASES = {
@@ -188,7 +191,7 @@ class permission(baseldap.LDAPObject):
         'member': ['privilege'],
         'memberindirect': ['role'],
     }
-    rdn_is_primary_key = True
+    allow_rename = True
     managed_permissions = {
         'System: Read Permissions': {
             'replaces_global_anonymous_aci': True,
@@ -610,7 +613,7 @@ class permission(baseldap.LDAPObject):
         location = permission_entry.single_value.get('ipapermlocation',
                                                      self.api.env.basedn)
 
-        self.log.debug('Adding ACI %r to %s' % (acistring, location))
+        logger.debug('Adding ACI %r to %s', acistring, location)
         try:
             entry = ldap.get_entry(location, ['aci'])
         except errors.NotFound:
@@ -654,15 +657,15 @@ class permission(baseldap.LDAPObject):
         acidn = acientry.dn  # pylint: disable=E1103
 
         if acistring is not None:
-            self.log.debug('Removing ACI %r from %s' % (acistring, acidn))
+            logger.debug('Removing ACI %r from %s', acistring, acidn)
             acientry['aci'].remove(acistring)
         if new_acistring:
-            self.log.debug('Adding ACI %r to %s' % (new_acistring, acidn))
+            logger.debug('Adding ACI %r to %s', new_acistring, acidn)
             acientry.setdefault('aci', []).append(new_acistring)
         try:
             ldap.update_entry(acientry)
         except errors.EmptyModlist:
-            self.log.debug('No changes to ACI')
+            logger.debug('No changes to ACI')
         return acientry, acistring
 
     def _get_aci_entry_and_string(self, permission_entry, name=None,
@@ -691,22 +694,23 @@ class permission(baseldap.LDAPObject):
                 acientry = ldap.get_entry(location, ['aci'])
             except errors.NotFound:
                 acientry = ldap.make_entry(location)
+
         acis = acientry.get('aci', ())
         for acistring in acis:
             try:
                 aci = ACI(acistring)
             except SyntaxError as e:
-                self.log.warning('Unparseable ACI %s: %s (at %s)',
-                                 acistring, e, location)
+                logger.warning('Unparseable ACI %s: %s (at %s)',
+                               acistring, e, location)
                 continue
             if aci.name == wanted_aciname:
                 return acientry, acistring
-        else:
-            if notfound_ok:
-                return acientry, None
-            raise errors.NotFound(
-                reason=_('The ACI for permission %(name)s was not found '
-                         'in %(dn)s ') % {'name': name, 'dn': location})
+
+        if notfound_ok:
+            return acientry, None
+        raise errors.NotFound(
+            reason=_('The ACI for permission %(name)s was not found '
+                     'in %(dn)s ') % {'name': name, 'dn': location})
 
     def upgrade_permission(self, entry, target_entry=None,
                            output_only=False, cached_acientry=None):
@@ -1058,7 +1062,7 @@ class permission_del(baseldap.LDAPDelete):
         try:
             entry = ldap.get_entry(dn, attrs_list=self.obj.default_attributes)
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         if not options.get('force'):
             self.obj.reject_system(entry)
@@ -1069,7 +1073,7 @@ class permission_del(baseldap.LDAPDelete):
         try:
             self.obj.remove_aci(entry)
         except errors.NotFound:
-            errors.NotFound(
+            raise errors.NotFound(
                 reason=_('ACI of permission %s was not found') % keys[0])
 
         return dn
@@ -1102,7 +1106,7 @@ class permission_mod(baseldap.LDAPUpdate):
             attrs_list = self.obj.default_attributes
             old_entry = ldap.get_entry(dn, attrs_list=attrs_list)
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         self.obj.reject_system(old_entry)
         self.obj.upgrade_permission(old_entry)
@@ -1194,7 +1198,7 @@ class permission_mod(baseldap.LDAPUpdate):
             try:
                 context.old_aci_info = self.obj.remove_aci(old_entry)
             except errors.NotFound as e:
-                self.log.error('permission ACI not found: %s' % e)
+                logger.error('permission ACI not found: %s', e)
 
         # To pass data to postcallback, we currently need to use the context
         context.old_entry = old_entry
@@ -1212,8 +1216,8 @@ class permission_mod(baseldap.LDAPUpdate):
             # Try to roll back the old ACI
             entry, old_aci_string = old_aci_info
             if old_aci_string:
-                self.log.warning('Reverting ACI on %s to %s' % (entry.dn,
-                                                            old_aci_string))
+                logger.warning('Reverting ACI on %s to %s', entry.dn,
+                               old_aci_string)
                 entry['aci'].append(old_aci_string)
                 self.Backend.ldap2.update_entry(entry)
 
@@ -1229,8 +1233,8 @@ class permission_mod(baseldap.LDAPUpdate):
             # Don't revert attribute which doesn't exist in LDAP
             entry.pop('attributelevelrights', None)
 
-            self.log.error('Error updating ACI: %s' % traceback.format_exc())
-            self.log.warning('Reverting entry')
+            logger.error('Error updating ACI: %s', traceback.format_exc())
+            logger.warning('Reverting entry')
             old_entry.reset_modlist(entry)
             ldap.update_entry(old_entry)
             self._revert_aci()
@@ -1296,39 +1300,41 @@ class permission_find(baseldap.LDAPSearch):
             else:
                 max_entries = self.api.Backend.ldap2.size_limit
 
+            if max_entries > 0:
+                # should we get more entries than current sizelimit, fail
+                assert len(entries) <= max_entries
+
             filters = ['(objectclass=ipaPermission)',
                        '(!(ipaPermissionType=V2))']
             if 'name' in options:
                 filters.append(ldap.make_filter_from_attr('cn',
                                                           options['name'],
                                                           exact=False))
+            index = tuple(self.args).index('criteria')
+            try:
+                term = args[index]
+                filters.append(self.get_term_filter(ldap, term))
+            except IndexError:
+                term = None
+
             attrs_list = list(self.obj.default_attributes)
             attrs_list += list(self.obj.attribute_members)
             if options.get('all'):
                 attrs_list.append('*')
             try:
-                legacy_entries = ldap.get_entries(
+                legacy_entries, truncated = ldap.find_entries(
                     base_dn=DN(self.obj.container_dn, self.api.env.basedn),
                     filter=ldap.combine_filters(filters, rules=ldap.MATCH_ALL),
-                    attrs_list=attrs_list)
+                    attrs_list=attrs_list, size_limit=max_entries)
                 # Retrieve the root entry (with all legacy ACIs) at once
                 root_entry = ldap.get_entry(DN(api.env.basedn), ['aci'])
             except errors.NotFound:
                 legacy_entries = ()
-            self.log.debug('potential legacy entries: %s', len(legacy_entries))
+            logger.debug('potential legacy entries: %s', len(legacy_entries))
             nonlegacy_names = {e.single_value['cn'] for e in entries}
             for entry in legacy_entries:
                 if entry.single_value['cn'] in nonlegacy_names:
                     continue
-                if max_entries > 0 and len(entries) > max_entries:
-                    # We've over the limit, pop the last entry and set
-                    # truncated flag
-                    # (this is easier to do than checking before adding
-                    # the entry to results)
-                    # (max_entries <= 0 means unlimited)
-                    entries.pop()
-                    truncated = True
-                    break
                 self.obj.upgrade_permission(entry, output_only=True,
                                             cached_acientry=root_entry)
                 # If all given options match, include the entry
@@ -1354,6 +1360,11 @@ class permission_find(baseldap.LDAPSearch):
                                        for value in values):
                                 break
                     else:
+                        if max_entries > 0 and len(entries) == max_entries:
+                            # We've reached the limit, set truncated flag
+                            # (max_entries <= 0 means unlimited)
+                            truncated = True
+                            break
                         entries.append(entry)
 
         for entry in entries:

@@ -5,13 +5,14 @@ app_DATA =				\
 	05-pre_upgrade_plugins.update	\
 	10-config.update		\
 	10-enable-betxn.update		\
+	10-ipapwd.update		\
 	10-selinuxusermap.update	\
 	10-rootdse.update		\
 	10-uniqueness.update		\
-	10-schema_compat.update		\
 	19-managed-entries.update	\
 	20-aci.update			\
 	20-dna.update			\
+	20-enable_dirsrv_plugins.update	\
 	20-host_nis_groups.update	\
 	20-indices.update		\
 	20-ipaservers_hostgroup.update	\
@@ -23,6 +24,8 @@ app_DATA =				\
 	20-winsync_index.update		\
 	20-idoverride_index.update	\
 	20-uuid.update  \
+	20-default_password_policy.update \
+	20-whoami.update	\
 	21-replicas_container.update	\
 	21-ca_renewal_container.update	\
 	21-certstore_container.update	\
@@ -59,13 +62,11 @@ app_DATA =				\
 	72-domainlevels.update		\
 	73-custodia.update		\
 	73-winsync.update		\
+	73-certmap.update		\
+	80-schema_compat.update \
 	90-post_upgrade_plugins.update	\
 	$(NULL)
 
 EXTRA_DIST =				\
 	$(app_DATA)			\
 	$(NULL)
-
-MAINTAINERCLEANFILES =			\
-	*~				\
-	Makefile.in

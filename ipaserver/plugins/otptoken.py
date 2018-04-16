@@ -72,7 +72,7 @@ TOKEN_TYPES = {
 }
 
 # NOTE: For maximum compatibility, KEY_LENGTH % 5 == 0
-KEY_LENGTH = 20
+KEY_LENGTH = 35
 
 class OTPTokenKey(Bytes):
     """A binary password type specified in base32."""
@@ -99,18 +99,23 @@ def _convert_owner(userobj, entry_attrs, options):
         entry_attrs['ipatokenowner'] = [userobj.get_primary_key_from_dn(o)
                                         for o in entry_attrs['ipatokenowner']]
 
+
 def _normalize_owner(userobj, entry_attrs):
     owner = entry_attrs.get('ipatokenowner', None)
     if owner:
         try:
-            entry_attrs['ipatokenowner'] = userobj._normalize_manager(owner)[0]
+            entry_attrs['ipatokenowner'] = userobj._normalize_manager(
+                owner
+            )[0]
         except NotFound:
-            userobj.handle_not_found(owner)
+            raise userobj.handle_not_found(owner)
+
 
 def _check_interval(not_before, not_after):
     if not_before and not_after:
         return not_before <= not_after
     return True
+
 
 def _set_token_type(entry_attrs, **options):
     klasses = [x.lower() for x in entry_attrs.get('objectclass', [])]
@@ -121,6 +126,7 @@ def _set_token_type(entry_attrs, **options):
 
     if not options.get('all', False) or options.get('pkey_only', False):
         entry_attrs.pop('objectclass', None)
+
 
 @register()
 class otptoken(LDAPObject):
@@ -143,7 +149,7 @@ class otptoken(LDAPObject):
     relationships = {
         'managedby': ('Managed by', 'man_by_', 'not_man_by_'),
     }
-    rdn_is_primary_key = True
+    allow_rename = True
 
     label = _('OTP Tokens')
     label_singular = _('OTP Token')
@@ -305,13 +311,12 @@ class otptoken_add(LDAPCreate):
         # If owner was not specified, default to the person adding this token.
         # If managedby was not specified, attempt a sensible default.
         if 'ipatokenowner' not in entry_attrs or 'managedby' not in entry_attrs:
-            result = self.api.Command.user_find(
-                whoami=True, no_members=False)['result']
-            if result:
-                cur_uid = result[0]['uid'][0]
+            cur_dn = DN(self.api.Backend.ldap2.conn.whoami_s()[4:])
+            if cur_dn:
+                cur_uid = cur_dn[0].value
                 prev_uid = entry_attrs.setdefault('ipatokenowner', cur_uid)
                 if cur_uid == prev_uid:
-                    entry_attrs.setdefault('managedby', result[0]['dn'])
+                    entry_attrs.setdefault('managedby', cur_dn.ldap_text())
 
         # Resolve the owner's dn
         _normalize_owner(self.api.Object.user, entry_attrs)

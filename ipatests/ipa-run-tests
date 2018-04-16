@@ -1,4 +1,4 @@
-#!/usr/bin/python2
+#!/usr/bin/python3
 
 # Authors:
 #   Petr Viktorin <pviktori@redhat.com>
@@ -28,18 +28,62 @@ so any relative paths given will be based on the ipatests module's path
 """
 
 import os
+import copy
 import sys
 
 import pytest
 
 import ipatests
 
-# This must be set so ipalib.api gets initialized property for tests:
-os.environ['IPA_UNIT_TEST_MODE'] = 'cli_test'
-
 # This is set to store --with-xunit report in an accessible place:
 os.environ['IPATEST_XUNIT_PATH'] = os.path.join(os.getcwd(), 'nosetests.xml')
 
-os.chdir(os.path.dirname(ipatests.__file__))
+HERE = os.path.dirname(os.path.abspath(ipatests.__file__))
 
-sys.exit(pytest.main(sys.argv[1:]))
+
+class ArgsManglePlugin(object):
+    """Modify pytest arguments
+
+    * Add confcutdir if hasn't been set already
+    * Mangle paths to support tests both relative to basedir and ipatests/
+    * Default to ipatests/ if no tests are specified
+    """
+    def pytest_load_initial_conftests(self, early_config, parser, args):
+        # During initial loading, parser supports only basic options
+        ns = early_config.known_args_namespace
+        if not ns.confcutdir:
+            # add config cut directory to only load fixtures from ipatests/
+            args.insert(0, '--confcutdir={}'.format(HERE))
+
+        if not ns.file_or_dir:
+            # No file or directory found, run all tests
+            args.append(HERE)
+        else:
+            for name in ns.file_or_dir:
+                idx = args.index(name)
+                # split on pytest separator
+                # ipatests/test_ipaplatform/test_importhook.py::test_override
+                filename, sep, suffix = name.partition('::')
+                # a file or directory relative to cwd or already absolute
+                if os.path.exists(filename):
+                    continue
+                # a file or directory relative to ipatests package
+                args[idx] = sep.join((os.path.join(HERE, filename), suffix))
+
+        # replace ignores, e.g. "--ignore test_integration" is changed to
+        # "--ignore path/to/ipatests/test_integration"
+        if ns.ignore:
+            for ignore in ns.ignore:
+                idx = args.index(ignore)
+                if os.path.exists(ignore):
+                    continue
+                args[idx] = os.path.join(HERE, ignore)
+
+        # rebuild early_config's known args with new args. The known args
+        # are used for initial conftest.py from ipatests, which adds
+        # additional arguments.
+        early_config.known_args_namespace = parser.parse_known_args(
+            args, namespace=copy.copy(early_config.option))
+
+
+sys.exit(pytest.main(plugins=[ArgsManglePlugin()]))

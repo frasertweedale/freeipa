@@ -135,7 +135,7 @@ widgets.APIBrowserWidget = declare([Stateful, Evented], {
             groups = this._get_params(parts[0]);
         }
 
-        if (filter) {
+        if (filter && groups) {
             filter = filter.toLowerCase();
             var new_groups = [];
             for (var i=0,l=groups.length; i<l; i++) {
@@ -153,10 +153,10 @@ widgets.APIBrowserWidget = declare([Stateful, Evented], {
                     new_groups.push(groups[i]);
                 }
             }
-            return new_groups;
-        } else {
-            return groups;
+            groups = new_groups;
         }
+
+        return groups;
     },
 
     /**
@@ -252,8 +252,8 @@ widgets.APIBrowserWidget = declare([Stateful, Evented], {
         }
 
         // switch widget
-        if (!widget.el) widget.render();
-        if (this.current_details_w !== widget) {
+        if (widget && !widget.el) widget.render();
+        if (widget && this.current_details_w !== widget) {
             this.details_el.empty();
             this.details_el.append(widget.el);
         }
@@ -264,7 +264,7 @@ widgets.APIBrowserWidget = declare([Stateful, Evented], {
         this.list_w.select(item);
 
         // set item
-        widget.set('item', item);
+        if (widget) widget.set('item', item);
         this.set('current', {
             item: item,
             type: type,

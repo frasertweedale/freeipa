@@ -25,42 +25,30 @@ system tasks.
 '''
 from __future__ import print_function
 
+import ctypes
+import logging
 import os
 import socket
-import base64
 import traceback
 import errno
+import sys
 
-from cffi import FFI
 from ctypes.util import find_library
 from functools import total_ordering
-
 from subprocess import CalledProcessError
-from nss.error import NSPRError
+
 from pyasn1.error import PyAsn1Error
 from six.moves import urllib
 
-from ipapython.ipa_log_manager import root_logger, log_mgr
 from ipapython import ipautil
 import ipapython.errors
-
-from ipalib import x509 # FIXME: do not import from ipalib
 
 from ipaplatform.constants import constants
 from ipaplatform.paths import paths
 from ipaplatform.redhat.authconfig import RedHatAuthConfig
 from ipaplatform.base.tasks import BaseTaskNamespace
 
-_ffi = FFI()
-_ffi.cdef("""
-int rpmvercmp (const char *a, const char *b);
-""")
-
-# use ctypes loader to get correct librpm.so library version according to
-# https://cffi.readthedocs.org/en/latest/overview.html#id8
-_librpm = _ffi.dlopen(find_library("rpm"))
-
-log = log_mgr.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def selinux_enabled():
@@ -81,40 +69,67 @@ def selinux_enabled():
 
 @total_ordering
 class IPAVersion(object):
+    _rpmvercmp_func = None
+
+    @classmethod
+    def _rpmvercmp(cls, a, b):
+        """Lazy load and call librpm's rpmvercmp
+        """
+        rpmvercmp_func = cls._rpmvercmp_func
+        if rpmvercmp_func is None:
+            librpm = ctypes.CDLL(find_library('rpm'))
+            rpmvercmp_func = librpm.rpmvercmp
+            # int rpmvercmp(const char *a, const char *b)
+            rpmvercmp_func.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+            rpmvercmp_func.restype = ctypes.c_int
+            cls._rpmvercmp_func = rpmvercmp_func
+        return rpmvercmp_func(a, b)
 
     def __init__(self, version):
-        self.version = version
+        self._version = version
+        self._bytes = version.encode('utf-8')
 
     @property
-    def _bytes(self):
-        return self.version.encode('utf-8')
+    def version(self):
+        return self._version
 
     def __eq__(self, other):
-        assert isinstance(other, IPAVersion)
-        return _librpm.rpmvercmp(self._bytes, other._bytes) == 0
+        if not isinstance(other, IPAVersion):
+            return NotImplemented
+        return self._rpmvercmp(self._bytes, other._bytes) == 0
 
     def __lt__(self, other):
-        assert isinstance(other, IPAVersion)
-        return _librpm.rpmvercmp(self._bytes, other._bytes) < 0
+        if not isinstance(other, IPAVersion):
+            return NotImplemented
+        return self._rpmvercmp(self._bytes, other._bytes) < 0
+
+    def __hash__(self):
+        return hash(self._version)
 
 
 class RedHatTaskNamespace(BaseTaskNamespace):
 
-    def restore_context(self, filepath, restorecon=paths.SBIN_RESTORECON):
-        """
-        restore security context on the file path
+    def restore_context(self, filepath, force=False):
+        """Restore SELinux security context on the given filepath.
+
         SELinux equivalent is /path/to/restorecon <filepath>
         restorecon's return values are not reliable so we have to
         ignore them (BZ #739604).
 
         ipautil.run() will do the logging.
         """
-
-        if not selinux_enabled():
+        restorecon = paths.SBIN_RESTORECON
+        if not selinux_enabled() or not os.path.exists(restorecon):
             return
 
-        if (os.path.exists(restorecon)):
-            ipautil.run([restorecon, filepath], raiseonerr=False)
+        # Force reset of context to match file_context for customizable
+        # files, and the default file context, changing the user, role,
+        # range portion as well as the type.
+        args = [restorecon]
+        if force:
+            args.append('-F')
+        args.append(filepath)
+        ipautil.run(args, raiseonerr=False)
 
     def check_selinux_status(self, restorecon=paths.RESTORECON):
         """
@@ -133,6 +148,39 @@ class RedHatTaskNamespace(BaseTaskNamespace):
             raise RuntimeError('SELinux is enabled but %s does not exist.\n'
                                'Install the policycoreutils package and start '
                                'the installation again.' % restorecon)
+
+    def check_ipv6_stack_enabled(self):
+        """Checks whether IPv6 kernel module is loaded.
+
+        Function checks if /proc/net/if_inet6 is present. If IPv6 stack is
+        enabled, it exists and contains the interfaces configuration.
+
+        :raises: RuntimeError when IPv6 stack is disabled
+        """
+        if not os.path.exists(paths.IF_INET6):
+            raise RuntimeError(
+                "IPv6 stack has to be enabled in the kernel and some "
+                "interface has to have ::1 address assigned. Typically "
+                "this is 'lo' interface. If you do not wish to use IPv6 "
+                "globally, disable it on the specific interfaces in "
+                "sysctl.conf except 'lo' interface.")
+
+        # XXX This is a hack to work around an issue with Travis CI by
+        # skipping IPv6 address test. The Dec 2017 update removed ::1 from
+        # loopback, see https://github.com/travis-ci/travis-ci/issues/8891.
+        if os.environ.get('TRAVIS') == 'true':
+            return
+
+        try:
+            localhost6 = ipautil.CheckedIPAddress('::1', allow_loopback=True)
+            if localhost6.get_matching_interface() is None:
+                raise ValueError("no interface for ::1 address found")
+        except ValueError:
+            raise RuntimeError(
+                 "IPv6 stack is enabled in the kernel but there is no "
+                 "interface that has ::1 address assigned. Add ::1 address "
+                 "resolution to 'lo' interface. You might need to enable IPv6 "
+                 "on the interface 'lo' in sysctl.conf.")
 
     def restore_pre_ipa_client_configuration(self, fstore, statestore,
                                              was_sssd_installed,
@@ -206,21 +254,26 @@ class RedHatTaskNamespace(BaseTaskNamespace):
         try:
             ipautil.run([paths.UPDATE_CA_TRUST])
         except CalledProcessError as e:
-            root_logger.error(
+            logger.error(
                 "Could not update systemwide CA trust database: %s", e)
             return False
         else:
-            root_logger.info("Systemwide CA database updated.")
+            logger.info("Systemwide CA database updated.")
             return True
 
     def insert_ca_certs_into_systemwide_ca_store(self, ca_certs):
+        # pylint: disable=ipa-forbidden-import
+        from ipalib import x509  # FixMe: break import cycle
+        from ipalib.errors import CertificateError
+        # pylint: enable=ipa-forbidden-import
+
         new_cacert_path = paths.SYSTEMWIDE_IPA_CA_CRT
 
         if os.path.exists(new_cacert_path):
             try:
                 os.remove(new_cacert_path)
             except OSError as e:
-                root_logger.error(
+                logger.error(
                     "Could not remove %s: %s", new_cacert_path, e)
                 return False
 
@@ -229,21 +282,21 @@ class RedHatTaskNamespace(BaseTaskNamespace):
         try:
             f = open(new_cacert_path, 'w')
         except IOError as e:
-            root_logger.info("Failed to open %s: %s" % (new_cacert_path, e))
+            logger.info("Failed to open %s: %s", new_cacert_path, e)
             return False
 
         f.write("# This file was created by IPA. Do not edit.\n"
                 "\n")
 
         has_eku = set()
-        for cert, nickname, trusted, ext_key_usage in ca_certs:
+        for cert, nickname, trusted, _ext_key_usage in ca_certs:
             try:
-                subject = x509.get_der_subject(cert, x509.DER)
-                issuer = x509.get_der_issuer(cert, x509.DER)
-                serial_number = x509.get_der_serial_number(cert, x509.DER)
-                public_key_info = x509.get_der_public_key_info(cert, x509.DER)
-            except (NSPRError, PyAsn1Error, ValueError) as e:
-                root_logger.warning(
+                subject = cert.subject_bytes
+                issuer = cert.issuer_bytes
+                serial_number = cert.serial_number_bytes
+                public_key_info = cert.public_key_info_bytes
+            except (PyAsn1Error, ValueError, CertificateError) as e:
+                logger.warning(
                     "Failed to decode certificate \"%s\": %s", nickname, e)
                 continue
 
@@ -252,9 +305,6 @@ class RedHatTaskNamespace(BaseTaskNamespace):
             issuer = urllib.parse.quote(issuer)
             serial_number = urllib.parse.quote(serial_number)
             public_key_info = urllib.parse.quote(public_key_info)
-
-            cert = base64.b64encode(cert)
-            cert = x509.make_pem(cert)
 
             obj = ("[p11-kit-object-v1]\n"
                    "class: certificate\n"
@@ -274,16 +324,16 @@ class RedHatTaskNamespace(BaseTaskNamespace):
                 obj += "trusted: true\n"
             elif trusted is False:
                 obj += "x-distrusted: true\n"
-            obj += "%s\n\n" % cert
+            obj += "{pem}\n\n".format(
+                pem=cert.public_bytes(x509.Encoding.PEM).decode('ascii'))
             f.write(obj)
 
-            if ext_key_usage is not None and public_key_info not in has_eku:
-                if not ext_key_usage:
-                    ext_key_usage = {x509.EKU_PLACEHOLDER}
+            if (cert.extended_key_usage is not None and
+                    public_key_info not in has_eku):
                 try:
-                    ext_key_usage = x509.encode_ext_key_usage(ext_key_usage)
+                    ext_key_usage = cert.extended_key_usage_bytes
                 except PyAsn1Error as e:
-                    root_logger.warning(
+                    logger.warning(
                         "Failed to encode extended key usage for \"%s\": %s",
                         nickname, e)
                     continue
@@ -320,7 +370,7 @@ class RedHatTaskNamespace(BaseTaskNamespace):
             try:
                 os.remove(new_cacert_path)
             except OSError as e:
-                root_logger.error(
+                logger.error(
                     "Could not remove %s: %s", new_cacert_path, e)
                 result = False
             else:
@@ -348,8 +398,8 @@ class RedHatTaskNamespace(BaseTaskNamespace):
             try:
                 self.set_hostname(old_hostname)
             except ipautil.CalledProcessError as e:
-                root_logger.debug(traceback.format_exc())
-                root_logger.error(
+                logger.debug("%s", traceback.format_exc())
+                logger.error(
                     "Failed to restore this machine hostname to %s (%s).",
                     old_hostname, e
                 )
@@ -386,7 +436,7 @@ class RedHatTaskNamespace(BaseTaskNamespace):
                 if original_state != state:
                     updated_vars[setting] = state
             except ipautil.CalledProcessError as e:
-                log.error("Cannot get SELinux boolean '%s': %s", setting, e)
+                logger.error("Cannot get SELinux boolean '%s': %s", setting, e)
                 failed_vars[setting] = state
 
         if updated_vars:
@@ -403,29 +453,6 @@ class RedHatTaskNamespace(BaseTaskNamespace):
 
         return True
 
-    def create_system_user(self, name, group, homedir, shell, uid=None, gid=None, comment=None, create_homedir=False):
-        """
-        Create a system user with a corresponding group
-
-        According to https://fedoraproject.org/wiki/Packaging:UsersAndGroups?rd=Packaging/UsersAndGroups#Soft_static_allocation
-        some system users should have fixed UID, GID and other parameters set.
-        This values should be constant and may be hardcoded.
-        Add other values for other users when needed.
-        """
-        if name == constants.PKI_USER:
-            if uid is None:
-                uid = 17
-            if gid is None:
-                gid = 17
-            if comment is None:
-                comment = 'CA System User'
-        if name == constants.DS_USER:
-            if comment is None:
-                comment = 'DS System User'
-
-        super(RedHatTaskNamespace, self).create_system_user(name, group,
-            homedir, shell, uid, gid, comment, create_homedir)
-
     def parse_ipa_version(self, version):
         """
         :param version: textual version
@@ -440,18 +467,65 @@ class RedHatTaskNamespace(BaseTaskNamespace):
             os.mkdir(paths.SYSTEMD_SYSTEM_HTTPD_D_DIR, 0o755)
 
         ipautil.copy_template_file(
-            os.path.join(ipautil.SHARE_DIR, 'ipa-httpd.conf.template'),
+            os.path.join(paths.USR_SHARE_IPA_DIR, 'ipa-httpd.conf.template'),
             paths.SYSTEMD_SYSTEM_HTTPD_IPA_CONF,
             dict(
-                KRB5CC_HTTPD=paths.KRB5CC_HTTPD,
                 KDCPROXY_CONFIG=paths.KDCPROXY_CONFIG,
                 IPA_HTTPD_KDCPROXY=paths.IPA_HTTPD_KDCPROXY,
-                POST='-{kdestroy} -A'.format(kdestroy=paths.KDESTROY)
+                KRB5CC_HTTPD=paths.KRB5CC_HTTPD,
             )
         )
 
         os.chmod(paths.SYSTEMD_SYSTEM_HTTPD_IPA_CONF, 0o644)
         self.restore_context(paths.SYSTEMD_SYSTEM_HTTPD_IPA_CONF)
+
+        ipautil.run([paths.SYSTEMCTL, "--system", "daemon-reload"],
+                    raiseonerr=False)
+
+    def configure_http_gssproxy_conf(self, ipaapi_user):
+        ipautil.copy_template_file(
+            os.path.join(paths.USR_SHARE_IPA_DIR, 'gssproxy.conf.template'),
+            paths.GSSPROXY_CONF,
+            dict(
+                HTTP_KEYTAB=paths.HTTP_KEYTAB,
+                HTTP_CCACHE=paths.HTTP_CCACHE,
+                HTTPD_USER=constants.HTTPD_USER,
+                IPAAPI_USER=ipaapi_user,
+            )
+        )
+
+        os.chmod(paths.GSSPROXY_CONF, 0o600)
+        self.restore_context(paths.GSSPROXY_CONF)
+
+    def configure_httpd_wsgi_conf(self):
+        """Configure WSGI for correct Python version (Fedora)
+
+        See https://pagure.io/freeipa/issue/7394
+        """
+        conf = paths.HTTPD_IPA_WSGI_MODULES_CONF
+        if sys.version_info.major == 2:
+            wsgi_module = constants.MOD_WSGI_PYTHON2
+        else:
+            wsgi_module = constants.MOD_WSGI_PYTHON3
+
+        if conf is None or wsgi_module is None:
+            logger.info("Nothing to do for configure_httpd_wsgi_conf")
+            return
+
+        confdir = os.path.dirname(conf)
+        if not os.path.isdir(confdir):
+            os.makedirs(confdir)
+
+        ipautil.copy_template_file(
+            os.path.join(
+                paths.USR_SHARE_IPA_DIR, 'ipa-httpd-wsgi.conf.template'
+            ),
+            conf,
+            dict(WSGI_MODULE=wsgi_module)
+        )
+
+        os.chmod(conf, 0o644)
+        self.restore_context(conf)
 
     def remove_httpd_service_ipa_conf(self):
         """Remove systemd config for httpd service of IPA"""
@@ -459,17 +533,41 @@ class RedHatTaskNamespace(BaseTaskNamespace):
             os.unlink(paths.SYSTEMD_SYSTEM_HTTPD_IPA_CONF)
         except OSError as e:
             if e.errno == errno.ENOENT:
-                root_logger.debug(
+                logger.debug(
                     'Trying to remove %s but file does not exist',
                     paths.SYSTEMD_SYSTEM_HTTPD_IPA_CONF
                 )
             else:
-                root_logger.error(
+                logger.error(
                     'Error removing %s: %s',
                     paths.SYSTEMD_SYSTEM_HTTPD_IPA_CONF, e
                 )
+            return
+
+        ipautil.run([paths.SYSTEMCTL, "--system", "daemon-reload"],
+                    raiseonerr=False)
 
     def set_hostname(self, hostname):
         ipautil.run([paths.BIN_HOSTNAMECTL, 'set-hostname', hostname])
+
+    def is_fips_enabled(self):
+        """
+        Checks whether this host is FIPS-enabled.
+
+        Returns a boolean indicating if the host is FIPS-enabled, i.e. if the
+        file /proc/sys/crypto/fips_enabled contains a non-0 value. Otherwise,
+        or if the file /proc/sys/crypto/fips_enabled does not exist,
+        the function returns False.
+        """
+        try:
+            with open(paths.PROC_FIPS_ENABLED, 'r') as f:
+                if f.read().strip() != '0':
+                    return True
+        except IOError:
+            # Consider that the host is not fips-enabled if the file does not
+            # exist
+            pass
+        return False
+
 
 tasks = RedHatTaskNamespace()

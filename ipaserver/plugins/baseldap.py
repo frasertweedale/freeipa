@@ -36,7 +36,7 @@ from ipalib.text import _
 from ipalib.util import json_serialize, validate_hostname
 from ipalib.capabilities import client_has_capability
 from ipalib.messages import add_message, SearchResultTruncated
-from ipapython.dn import DN
+from ipapython.dn import DN, RDN
 from ipapython.version import API_VERSION
 
 if six.PY3:
@@ -375,7 +375,7 @@ def add_external_post_callback(ldap, dn, entry_attrs, failed, completed,
         membertype - the object type of the member (e.g. host)
         externalattr - the attribute name that IPA uses to store the membership
                        of the entries that are not managed by IPA
-                       (e.g externalhost)
+                       (e.g. externalhost)
 
     Returns the number of completed entries so far (the number of entries
     handled by IPA incremented by the number of handled external entries) and
@@ -412,7 +412,7 @@ def add_external_post_callback(ldap, dn, entry_attrs, failed, completed,
             elif (membername in lc_external_entries and
                member_dn not in members):
                 # Already an external member, reset the error message
-                msg = unicode(errors.AlreadyGroupMember().message)
+                msg = unicode(errors.AlreadyGroupMember())
                 newerror = (entry[0], msg)
                 ind = failed[memberattr][membertype].index(entry)
                 failed[memberattr][membertype][ind] = newerror
@@ -445,7 +445,7 @@ def remove_external_post_callback(ldap, dn, entry_attrs, failed, completed,
         membertype - the object type of the member (e.g. host)
         externalattr - the attribute name that IPA uses to store the membership
                        of the entries that are not managed by IPA
-                       (e.g externalhost)
+                       (e.g. externalhost)
 
     Returns the number of completed entries so far (the number of entries
     handled by IPA incremented by the number of handled external entries) and
@@ -472,7 +472,7 @@ def remove_external_post_callback(ldap, dn, entry_attrs, failed, completed,
                     external_entries.remove(entry[0])
                 completed_external += 1
             else:
-                msg = unicode(errors.NotGroupMember().message)
+                msg = unicode(errors.NotGroupMember())
                 newerror = (entry[0], msg)
                 ind = failed[memberattr][membertype].index(entry)
                 failed[memberattr][membertype][ind] = newerror
@@ -549,7 +549,7 @@ class LDAPObject(Object):
     rdn_attribute = ''
     uuid_attribute = ''
     attribute_members = {}
-    rdn_is_primary_key = False # Do we need RDN change to do a rename?
+    allow_rename = False
     password_attributes = []
     # Can bind as this entry (has userPassword or krbPrincipalKey)
     bindable = False
@@ -654,7 +654,7 @@ class LDAPObject(Object):
             del entry_attrs[attr]
 
             for member in value:
-                memberdn = DN(member)
+                memberdn = DN(member.decode('utf-8'))
                 for ldap_obj_name in self.attribute_members[attr]:
                     ldap_obj = self.api.Object[ldap_obj_name]
                     try:
@@ -715,14 +715,16 @@ class LDAPObject(Object):
             result = self.backend.get_entries(
                 self.api.env.basedn,
                 filter=filter,
-                attrs_list=[''])
+                attrs_list=[''],
+                size_limit=-1,  # paged search will get everything anyway
+                paged_search=True)
         except errors.NotFound:
             result = []
 
         direct = set()
         indirect = set(entry.raw.get('memberof', []))
         for group_entry in result:
-            dn = str(group_entry.dn)
+            dn = str(group_entry.dn).encode('utf-8')
             if dn in indirect:
                 indirect.remove(dn)
                 direct.add(dn)
@@ -751,6 +753,10 @@ class LDAPObject(Object):
                 entry_attrs[attr] = False
 
     def handle_not_found(self, *keys):
+        """Handle NotFound exception
+
+        Must raise errors.NotFound again.
+        """
         pkey = ''
         if self.primary_key:
             pkey = keys[-1]
@@ -1013,7 +1019,7 @@ last, after all sets and adds."""),
                     dn, needldapattrs
                 )
             except errors.NotFound:
-                self.obj.handle_not_found(*keys)
+                raise self.obj.handle_not_found(*keys)
 
             # Provide a nice error message when user tries to delete an
             # attribute that does not exist on the entry (and user is not
@@ -1036,7 +1042,7 @@ last, after all sets and adds."""),
                     except ValueError:
                         if isinstance(delval, bytes):
                             # This is a Binary value, base64 encode it
-                            delval = unicode(base64.b64encode(delval))
+                            delval = base64.b64encode(delval).decode('ascii')
                         raise errors.AttrValueNotFound(attr=attr, value=delval)
 
         # normalize all values
@@ -1218,7 +1224,7 @@ class LDAPCreate(BaseLDAPCommand, crud.Create):
                 entry_attrs = self._exc_wrapper(keys, options, ldap.get_entry)(
                     entry_attrs.dn, attrs_list)
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         self.obj.get_indirect_members(entry_attrs, attrs_list)
 
@@ -1318,7 +1324,7 @@ class LDAPRetrieve(LDAPQuery):
                 dn, attrs_list
             )
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         self.obj.get_indirect_members(entry_attrs, attrs_list)
 
@@ -1384,7 +1390,7 @@ class LDAPUpdate(LDAPQuery, crud.Update):
     def get_options(self):
         for option in super(LDAPUpdate, self).get_options():
             yield option
-        if self.obj.rdn_is_primary_key:
+        if self.obj.allow_rename:
             yield self._get_rename_option()
 
     def execute(self, *keys, **options):
@@ -1419,15 +1425,19 @@ class LDAPUpdate(LDAPQuery, crud.Update):
         _check_limit_object_class(self.api.Backend.ldap2.schema.attribute_types(self.obj.disallow_object_classes), list(entry_attrs), allow_only=False)
 
         rdnupdate = False
-        try:
-            if self.obj.rdn_is_primary_key and 'rename' in options:
-                if not options['rename']:
-                    raise errors.ValidationError(name='rename', error=u'can\'t be empty')
-                entry_attrs[self.obj.primary_key.name] = options['rename']
+        if 'rename' in options:
+            if not options['rename']:
+                raise errors.ValidationError(
+                    name='rename', error=u'can\'t be empty')
+            entry_attrs[self.obj.primary_key.name] = options['rename']
 
-            if self.obj.rdn_is_primary_key and self.obj.primary_key.name in entry_attrs:
+        # if setattr was used to change the RDN, the primary_key.name is
+        # already in entry_attrs
+        if self.obj.allow_rename and self.obj.primary_key.name in entry_attrs:
+            # perform RDN change if the primary key is also RDN
+            if (RDN((self.obj.primary_key.name, keys[-1])) ==
+                    entry_attrs.dn[0]):
                 try:
-                    # RDN change
                     new_dn = DN((self.obj.primary_key.name,
                                  entry_attrs[self.obj.primary_key.name]),
                                 *entry_attrs.dn[1:])
@@ -1435,17 +1445,21 @@ class LDAPUpdate(LDAPQuery, crud.Update):
                         entry_attrs.dn,
                         new_dn)
 
-                    rdnkeys = keys[:-1] + (entry_attrs[self.obj.primary_key.name], )
+                    rdnkeys = (keys[:-1] +
+                               (entry_attrs[self.obj.primary_key.name], ))
                     entry_attrs.dn = self.obj.get_dn(*rdnkeys)
                     options['rdnupdate'] = True
                     rdnupdate = True
                 except errors.EmptyModlist:
                     # Attempt to rename to the current name, ignore
                     pass
+                except errors.NotFound:
+                    raise self.obj.handle_not_found(*keys)
                 finally:
                     # Delete the primary_key from entry_attrs either way
                     del entry_attrs[self.obj.primary_key.name]
 
+        try:
             # Exception callbacks will need to test for options['rdnupdate']
             # to decide what to do. An EmptyModlist in this context doesn't
             # mean an error occurred, just that there were no other updates to
@@ -1459,7 +1473,7 @@ class LDAPUpdate(LDAPQuery, crud.Update):
             if not rdnupdate:
                 raise e
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         try:
             entry_attrs = self._exc_wrapper(keys, options, ldap.get_entry)(
@@ -1538,14 +1552,16 @@ class LDAPDelete(LDAPMultiQuery):
                         for entry_attrs in subentries:
                             delete_subtree(entry_attrs.dn)
                 try:
-                    self._exc_wrapper(nkeys, options, ldap.delete_entry)(base_dn)
+                    self._exc_wrapper(nkeys, options, ldap.delete_entry)(
+                        base_dn
+                    )
                 except errors.NotFound:
-                    self.obj.handle_not_found(*nkeys)
+                    raise self.obj.handle_not_found(*nkeys)
 
             try:
                 self._exc_wrapper(nkeys, options, ldap.delete_entry)(dn)
             except errors.NotFound:
-                self.obj.handle_not_found(*nkeys)
+                raise self.obj.handle_not_found(*nkeys)
             except errors.NotAllowedOnNonLeaf:
                 if not self.subtree_delete:
                     raise
@@ -1702,7 +1718,7 @@ class LDAPAddMember(LDAPModMember):
                 dn, attrs_list
             )
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         self.obj.get_indirect_members(entry_attrs, attrs_list)
 
@@ -1803,7 +1819,7 @@ class LDAPRemoveMember(LDAPModMember):
                 dn, attrs_list
             )
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         self.obj.get_indirect_members(entry_attrs, attrs_list)
 
@@ -1922,6 +1938,47 @@ class LDAPSearch(BaseLDAPCommand, crud.Search):
             for option in self.get_member_options(attr):
                 yield option
 
+    def get_attr_filter(self, ldap, **options):
+        """
+        Returns a MATCH_ALL filter containing all required attributes from the
+        options
+        """
+        search_kw = self.args_options_2_entry(**options)
+        search_kw['objectclass'] = self.obj.object_class
+
+        filters = []
+        for name, value in search_kw.items():
+            default = self.get_default_of(name, **options)
+            fltr = ldap.make_filter_from_attr(name, value, ldap.MATCH_ALL)
+            if default is not None and value == default:
+                fltr = ldap.combine_filters([fltr, '(!({}=*))'.format(name)])
+            filters.append(fltr)
+
+        return ldap.combine_filters(filters, rules=ldap.MATCH_ALL)
+
+    def get_term_filter(self, ldap, term):
+        """
+        Returns a filter to search for a value (term) in any of the
+        search attributes of an entry.
+        """
+        if self.obj.search_attributes:
+            search_attrs = self.obj.search_attributes
+        else:
+            search_attrs = self.obj.default_attributes
+        if self.obj.search_attributes_config:
+            config = ldap.get_ipa_config()
+            config_attrs = config.get(
+                self.obj.search_attributes_config, [])
+            if len(config_attrs) == 1 and (
+              isinstance(config_attrs[0], six.string_types)):
+                search_attrs = config_attrs[0].split(',')
+
+        search_kw = {}
+        for a in search_attrs:
+            search_kw[a] = term
+
+        return ldap.make_filter(search_kw, exact=False)
+
     def get_member_filter(self, ldap, **options):
         filter = ''
         for attr in self.member_attributes:
@@ -1981,26 +2038,8 @@ class LDAPSearch(BaseLDAPCommand, crud.Search):
                 attrs_list.difference_update(self.obj.attribute_members)
             attrs_list = list(attrs_list)
 
-        if self.obj.search_attributes:
-            search_attrs = self.obj.search_attributes
-        else:
-            search_attrs = self.obj.default_attributes
-        if self.obj.search_attributes_config:
-            config = ldap.get_ipa_config()
-            config_attrs = config.get(
-                self.obj.search_attributes_config, [])
-            if len(config_attrs) == 1 and (
-                isinstance(config_attrs[0], six.string_types)):
-                search_attrs = config_attrs[0].split(',')
-
-        search_kw['objectclass'] = self.obj.object_class
-        attr_filter = ldap.make_filter(search_kw, rules=ldap.MATCH_ALL)
-
-        search_kw = {}
-        for a in search_attrs:
-            search_kw[a] = term
-        term_filter = ldap.make_filter(search_kw, exact=False)
-
+        attr_filter = self.get_attr_filter(ldap, **options)
+        term_filter = self.get_term_filter(ldap, term)
         member_filter = self.get_member_filter(ldap, **options)
 
         filter = ldap.combine_filters(
@@ -2022,10 +2061,13 @@ class LDAPSearch(BaseLDAPCommand, crud.Search):
         except errors.EmptyResult:
             (entries, truncated) = ([], False)
         except errors.NotFound:
-            self.api.Object[self.obj.parent_object].handle_not_found(*keys)
+            return self.api.Object[self.obj.parent_object].handle_not_found(
+                *keys)
 
         for callback in self.get_callbacks('post'):
-            truncated = callback(self, ldap, entries, truncated, *args, **options)
+            truncated = callback(
+                self, ldap, entries, truncated, *args, **options
+            )
 
         if self.sort_result_entries:
             if self.obj.primary_key:
@@ -2337,7 +2379,7 @@ class BaseLDAPModAttribute(LDAPQuery):
 
             self._exc_wrapper(keys, options, ldap.update_entry)(update)
         except errors.NotFound:
-            self.obj.handle_not_found(*keys)
+            raise self.obj.handle_not_found(*keys)
 
         try:
             entry_attrs = self._exc_wrapper(keys, options, ldap.get_entry)(
@@ -2375,7 +2417,7 @@ class BaseLDAPModAttribute(LDAPQuery):
 
 
 class BaseLDAPAddAttribute(BaseLDAPModAttribute):
-    msg_summary = _('added attribute value to entry %(value)')
+    msg_summary = _('added attribute value to entry %(value)s')
 
     def _update_attrs(self, update, entry_attrs):
         for name, value in entry_attrs.items():
@@ -2391,7 +2433,7 @@ class BaseLDAPAddAttribute(BaseLDAPModAttribute):
 
 
 class BaseLDAPRemoveAttribute(BaseLDAPModAttribute):
-    msg_summary = _('removed attribute values from entry %(value)')
+    msg_summary = _('removed attribute values from entry %(value)s')
 
     def _update_attrs(self, update, entry_attrs):
         for name, value in entry_attrs.items():

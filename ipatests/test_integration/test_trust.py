@@ -17,12 +17,11 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import nose
 import re
+import unittest
 
 from ipatests.test_integration.base import IntegrationTest
-from ipatests.test_integration import tasks
-from ipatests.test_integration import util
+from ipatests.pytest_plugins.integration import tasks
 from ipaplatform.paths import paths
 
 
@@ -31,10 +30,13 @@ class ADTrustBase(IntegrationTest):
 
     topology = 'line'
     num_ad_domains = 1
-    optional_extra_roles = ['ad_subdomain']
+    optional_extra_roles = ['ad_subdomain', 'ad_treedomain']
 
     @classmethod
     def install(cls, mh):
+        if not cls.master.transport.file_exists('/usr/bin/rpcclient'):
+            raise unittest.SkipTest("Package samba-client not available "
+                                "on {}".format(cls.master.hostname))
         super(ADTrustBase, cls).install(mh)
         cls.ad = cls.ad_domains[0].ads[0]
         cls.ad_domain = cls.ad.domain.name
@@ -48,6 +50,14 @@ class ADTrustBase(IntegrationTest):
                                    cls.child_ad.hostname.split('.')[1:])
         except LookupError:
             cls.ad_subdomain = None
+
+        # Determine whether the tree domain AD is available
+        try:
+            cls.tree_ad = cls.host_by_role(cls.optional_extra_roles[1])
+            cls.ad_treedomain = '.'.join(
+                                    cls.tree_ad.hostname.split('.')[1:])
+        except LookupError:
+            cls.ad_treedomain = None
 
         cls.configure_dns_and_time()
 
@@ -69,8 +79,8 @@ class ADTrustBase(IntegrationTest):
                     % dict(idauth=_sid_identifier_authority)
         stdout_re = re.escape('  ipaNTSecurityIdentifier: ') + sid_regex
 
-        util.run_repeatedly(cls.master, command,
-                            test=lambda x: re.search(stdout_re, x))
+        tasks.run_repeatedly(cls.master, command,
+                             test=lambda x: re.search(stdout_re, x))
 
     @classmethod
     def configure_dns_and_time(cls):
@@ -89,15 +99,16 @@ class ADTrustBase(IntegrationTest):
         """
 
         if self.ad_subdomain is None:
-            raise nose.SkipTest('AD subdomain is not available.')
+            raise unittest.SkipTest('AD subdomain is not available.')
 
         result = self.master.run_command(['ipa',
                                           'trustdomain-find',
                                           self.ad_domain])
 
-        # Check that both trustdomains appear in the result
+        # Check that all trustdomains appear in the result
         assert self.ad_domain in result.stdout_text
         assert self.ad_subdomain in result.stdout_text
+        assert self.ad_treedomain in result.stdout_text
 
 
 class ADTrustSubdomainBase(ADTrustBase):
@@ -113,20 +124,26 @@ class ADTrustSubdomainBase(ADTrustBase):
     @classmethod
     def install(cls, mh):
         super(ADTrustSubdomainBase, cls).install(mh)
-        cls.ad = cls.ad_domains[0].ads[0]
-        cls.ad_domain = cls.ad.domain.name
-        cls.install_adtrust()
-        cls.check_sid_generation()
+        if not cls.ad_subdomain:
+            raise unittest.SkipTest('AD subdomain is not available.')
 
-        # Determine whether the subdomain AD is available
-        # if not, skip the whole suite
-        try:
-            cls.child_ad = cls.host_by_role(cls.optional_extra_roles[0])
-            cls.ad_subdomain = '.'.join(cls.child_ad.hostname.split('.')[1:])
-        except LookupError:
-            raise nose.SkipTest('AD subdomain is not available.')
 
-        cls.configure_dns_and_time()
+class ADTrustTreedomainBase(ADTrustBase):
+    """
+    Base class for tests involving tree root domains of trusted forests
+    """
+
+    @classmethod
+    def configure_dns_and_time(cls):
+        tasks.configure_dns_for_trust(cls.master, cls.ad_treedomain)
+        tasks.sync_time(cls.master, cls.tree_ad)
+
+    @classmethod
+    def install(cls, mh):
+        super(ADTrustTreedomainBase, cls).install(mh)
+        if not cls.ad_treedomain:
+            raise unittest.SkipTest('AD tree root domain is not available.')
+
 
 class TestBasicADTrust(ADTrustBase):
     """Basic Integration test for Active Directory"""
@@ -171,8 +188,8 @@ class TestBasicADTrust(ADTrustBase):
                                 stdin_text=original_passwd)
 
         # change password for the user to be able to kinit
-        util.ldappasswd_user_change(ipauser, original_passwd, new_passwd,
-                                    self.master)
+        tasks.ldappasswd_user_change(ipauser, original_passwd, new_passwd,
+                                     self.master)
 
         # try to kinit as ipauser
         self.master.run_command(
@@ -241,8 +258,11 @@ class TestEnforcedPosixADTrust(TestPosixADTrust):
     This test is intented to copycat PosixADTrust, since enforcing the POSIX
     trust type should not make a difference.
     """
+    """Re-difene method from test_establish_trust_with_posix_attributes
+    to test_establish_trust. win server 2016 no more have support for MFU/NIS,
+    so autodetection doesn't work"""
 
-    def test_establish_trust_with_posix_attributes(self):
+    def test_establish_trust(self):
         tasks.establish_trust_with_ad(self.master, self.ad_domain,
             extra_args=['--range-type', 'ipa-ad-trust-posix'])
 
@@ -316,7 +336,7 @@ class TestNonexternalTrustWithSubdomain(ADTrustSubdomainBase):
     """
     def test_establish_trust(self):
         """ Tests establishing non-external trust with Active Directory """
-        self.master.run_command(['kinit', '-kt', paths.IPA_KEYTAB,
+        self.master.run_command(['kinit', '-kt', paths.HTTP_KEYTAB,
                                  'HTTP/%s' % self.master.hostname])
         self.master.run_command(['systemctl', 'restart', 'krb5kdc.service'])
         self.master.run_command(['kdestroy', '-A'])
@@ -336,7 +356,74 @@ class TestNonexternalTrustWithSubdomain(ADTrustSubdomainBase):
             self.ad_subdomain) in result.stderr_text)
 
     def test_all_trustdomains_found(self):
-        raise nose.SkipTest(
+        raise unittest.SkipTest(
+            'Test case unapplicable, present for inheritance reason only')
+
+
+class TestExternalTrustWithTreedomain(ADTrustTreedomainBase):
+    """
+    Test establishing external trust with tree root domain
+    """
+
+    def test_establish_trust(self):
+        """ Tests establishing external trust with Active Directory """
+        tasks.establish_trust_with_ad(
+            self.master, self.ad_treedomain,
+            extra_args=['--range-type', 'ipa-ad-trust', '--external=True'])
+
+    def test_all_trustdomains_found(self):
+        """ Test that only one trustdomain is found """
+        result = self.master.run_command(['ipa', 'trustdomain-find',
+                                          self.ad_treedomain])
+
+        assert self.ad_treedomain in result.stdout_text
+        assert "Number of entries returned 1" in result.stdout_text
+
+    def test_user_gid_uid_resolution_in_nonposix_trust(self):
+        """ Check that user has SID-generated UID """
+        testuser = 'treetestuser@{0}'.format(self.ad_treedomain)
+        result = self.master.run_command(['getent', 'passwd', testuser])
+
+        testuser_regex = ("^treetestuser@{0}:\*:(?!10242)(\d+):"
+                          "(?!10247)(\d+):TreeTest User:"
+                          "/home/{1}/treetestuser:/bin/sh$".format(
+                              re.escape(self.ad_treedomain),
+                              re.escape(self.ad_treedomain)))
+
+        assert re.search(testuser_regex, result.stdout_text)
+
+    def test_remove_nonposix_trust(self):
+        tasks.remove_trust_with_ad(self.master, self.ad_treedomain)
+        tasks.clear_sssd_cache(self.master)
+
+
+class TestNonexternalTrustWithTreedomain(ADTrustTreedomainBase):
+    """
+    Tests that a non-external trust to a tree root domain cannot be established
+    """
+    def test_establish_trust(self):
+        """ Tests establishing non-external trust with Active Directory """
+        self.master.run_command(['kinit', '-kt', paths.HTTP_KEYTAB,
+                                 'HTTP/%s' % self.master.hostname])
+        self.master.run_command(['systemctl', 'restart', 'krb5kdc.service'])
+        self.master.run_command(['kdestroy', '-A'])
+
+        tasks.kinit_admin(self.master)
+        self.master.run_command(['klist'])
+        self.master.run_command(['smbcontrol', 'all', 'debug', '100'])
+
+        result = self.master.run_command([
+            'ipa', 'trust-add', '--type', 'ad', self.ad_treedomain, '--admin',
+            'Administrator', '--password', '--range-type', 'ipa-ad-trust'
+            ], stdin_text=self.master.config.ad_admin_password,
+            raiseonerr=False)
+
+        assert result != 0
+        assert ("Domain '{0}' is not a root domain".format(
+            self.ad_treedomain) in result.stderr_text)
+
+    def test_all_trustdomains_found(self):
+        raise unittest.SkipTest(
             'Test case unapplicable, present for inheritance reason only')
 
 

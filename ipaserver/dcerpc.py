@@ -22,31 +22,37 @@
 # Make sure we only run this module at the server where samba4-python
 # package is installed to avoid issues with unavailable modules
 
+import logging
 import re
 import time
 
 from ipalib import api, _
 from ipalib import errors
 from ipapython import ipautil
-from ipapython.ipa_log_manager import root_logger
 from ipapython.dn import DN
+from ipapython.ipaldap import ldap_initialize
 from ipaserver.install import installutils
+from ipaserver.dcerpc_common import (TRUST_BIDIRECTIONAL,
+                                     TRUST_JOIN_EXTERNAL,
+                                     trust_type_string)
+
 from ipalib.util import normalize_name
 
 import os
 import struct
+import random
+
 from samba import param
 from samba import credentials
 from samba.dcerpc import security, lsa, drsblobs, nbt, netlogon
 from samba.ndr import ndr_pack, ndr_print
 from samba import net
+from samba import arcfour_encrypt
 import samba
-import random
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
-from cryptography.hazmat.backends import default_backend
+
 import ldap as _ldap
-from ipapython.ipaldap import IPAdmin
-from ipaserver.session import krbccache_dir, krbccache_prefix
+from ipapython import ipaldap
+from ipapython.dnsutil import DNSName
 from dns import resolver, rdatatype
 from dns.exception import DNSException
 import pysss_nss_idmap
@@ -73,14 +79,7 @@ The code in this module relies heavily on samba4-python package
 and Samba4 python bindings.
 """)
 
-# Both constants can be used as masks against trust direction
-# because bi-directional has two lower bits set.
-TRUST_ONEWAY = 1
-TRUST_BIDIRECTIONAL = 3
-
-# Trust join behavior
-# External trust -- allow creating trust to a non-root domain in the forest
-TRUST_JOIN_EXTERNAL = 1
+logger = logging.getLogger(__name__)
 
 
 def is_sid_valid(sid):
@@ -114,16 +113,24 @@ dcerpc_error_codes = {
                   # we simply will skip the binding
         access_denied_error,
     -1073741772:  # NT_STATUS_OBJECT_NAME_NOT_FOUND
-        errors.RemoteRetrieveError(
-            reason=_('CIFS server configuration does not allow '
-                     'access to \\\\pipe\\lsarpc')),
+        errors.NotFound(
+            reason=_('Cannot find specified domain or server name')),
 }
 
 dcerpc_error_messages = {
     "NT_STATUS_OBJECT_NAME_NOT_FOUND":
         errors.NotFound(
             reason=_('Cannot find specified domain or server name')),
+    "The object name is not found.":
+        errors.NotFound(
+            reason=_('Cannot find specified domain or server name')),
     "WERR_NO_LOGON_SERVERS":
+        errors.RemoteRetrieveError(
+            reason=_('AD DC was unable to reach any IPA domain controller. '
+                     'Most likely it is a DNS or firewall issue')),
+    # This is a very long key, don't change it
+    "There are currently no logon servers available to "
+    "service the logon request.":
         errors.RemoteRetrieveError(
             reason=_('AD DC was unable to reach any IPA domain controller. '
                      'Most likely it is a DNS or firewall issue')),
@@ -139,6 +146,7 @@ pysss_type_key_translation_dict = {
     pysss_nss_idmap.ID_BOTH: 'both',
 }
 
+
 class TrustTopologyConflictSolved(Exception):
     """
     Internal trust error: raised when previously detected
@@ -149,11 +157,20 @@ class TrustTopologyConflictSolved(Exception):
     """
     pass
 
-def assess_dcerpc_exception(num=None, message=None):
+
+def assess_dcerpc_error(error):
     """
     Takes error returned by Samba bindings and converts it into
     an IPA error class.
     """
+    if isinstance(error, RuntimeError):
+        error_tuple = error.args
+    else:
+        error_tuple = error
+    if len(error_tuple) != 2:
+        raise RuntimeError("Unable to parse error: {err!r}".format(err=error))
+
+    num, message = error_tuple
     if num and num in dcerpc_error_codes:
         return dcerpc_error_codes[num]
     if message and message in dcerpc_error_messages:
@@ -164,25 +181,14 @@ def assess_dcerpc_exception(num=None, message=None):
     return errors.RemoteRetrieveError(reason=reason)
 
 
-def arcfour_encrypt(key, data):
-    algorithm = algorithms.ARC4(key)
-    cipher = Cipher(algorithm, mode=None, backend=default_backend())
-    encryptor = cipher.encryptor()
-    return encryptor.update(data)
-
-
 class ExtendedDNControl(LDAPControl):
-    # This class attempts to implement LDAP control that would work
-    # with both python-ldap 2.4.x and 2.3.x, thus there is mix of properties
-    # from both worlds and encodeControlValue has default parameter
     def __init__(self):
-        self.controlValue = 1
-        self.controlType = "1.2.840.113556.1.4.529"
-        self.criticality = False
-        self.integerValue = 1
-
-    def encodeControlValue(self, value=None):
-        return '0\x03\x02\x01\x01'
+        LDAPControl.__init__(
+            self,
+            controlType="1.2.840.113556.1.4.529",
+            criticality=False,
+            encodedControlValue=b'0\x03\x02\x01\x01'
+        )
 
 
 class DomainValidator(object):
@@ -253,8 +259,8 @@ class DomainValidator(object):
                 except KeyError as exc:
                     # Some piece of trusted domain info in LDAP is missing
                     # Skip the domain, but leave log entry for investigation
-                    api.log.warning("Trusted domain '%s' entry misses an "
-                                    "attribute: %s", e.dn, exc)
+                    logger.warning("Trusted domain '%s' entry misses an "
+                                   "attribute: %s", e.dn, exc)
                     continue
 
                 result[t_partner] = (fname_norm,
@@ -463,7 +469,7 @@ class DomainValidator(object):
         return pysss_type_key_translation_dict.get(object_type)
 
     def get_trusted_domain_object_from_sid(self, sid):
-        root_logger.debug("Converting SID to object name: %s" % sid)
+        logger.debug("Converting SID to object name: %s", sid)
 
         # Check if the given SID is valid
         if not self.is_trusted_sid_valid(sid):
@@ -481,7 +487,7 @@ class DomainValidator(object):
                 return result.get(pysss_nss_idmap.NAME_KEY)
 
         # If unsuccessful, search AD DC LDAP
-        root_logger.debug("Searching AD DC LDAP")
+        logger.debug("Searching AD DC LDAP")
 
         escaped_sid = escape_filter_chars(
             security.dom_sid(sid).__ndr_pack__(),
@@ -629,57 +635,13 @@ class DomainValidator(object):
         return u'S-%d-%d-%s' % (sid_rev_num, ia,
                                 '-'.join([str(s) for s in subs]),)
 
-    def kinit_as_http(self, domain):
-        """
-        Initializes ccache with http service credentials.
-
-        Applies session code defaults for ccache directory and naming prefix.
-        Session code uses krbccache_prefix+<pid>, we use
-        krbccache_prefix+<TD>+<domain netbios name> so there is no clash.
-
-        Returns tuple (ccache path, principal) where (None, None) signifes an
-        error on ccache initialization
-        """
-
-        domain_suffix = domain.replace('.', '-')
-
-        ccache_name = "%sTD%s" % (krbccache_prefix, domain_suffix)
-        ccache_path = os.path.join(krbccache_dir, ccache_name)
-
-        realm = api.env.realm
-        hostname = api.env.host
-        principal = 'HTTP/%s@%s' % (hostname, realm)
-        keytab = paths.IPA_KEYTAB
-
-        # Destroy the contents of the ccache
-        root_logger.debug('Destroying the contents of the separate ccache')
-
-        ipautil.run(
-            [paths.KDESTROY, '-A', '-c', ccache_path],
-            env={'KRB5CCNAME': ccache_path},
-            raiseonerr=False)
-
-        # Destroy the contents of the ccache
-        root_logger.debug('Running kinit from ipa.keytab to obtain HTTP '
-                          'service principal with MS-PAC attached.')
-
-        result = ipautil.run(
-            [paths.KINIT, '-kt', keytab, principal],
-            env={'KRB5CCNAME': ccache_path},
-            raiseonerr=False)
-
-        if result.returncode == 0:
-            return (ccache_path, principal)
-        else:
-            return (None, None)
-
     def kinit_as_administrator(self, domain):
         """
         Initializes ccache with http service credentials.
 
         Applies session code defaults for ccache directory and naming prefix.
-        Session code uses krbccache_prefix+<pid>, we use
-        krbccache_prefix+<TD>+<domain netbios name> so there is no clash.
+        Session code uses kinit_+<pid>, we use
+        kinit_+<TD>+<domain netbios name> so there is no clash.
 
         Returns tuple (ccache path, principal) where (None, None) signifes an
         error on ccache initialization
@@ -690,13 +652,13 @@ class DomainValidator(object):
 
         domain_suffix = domain.replace('.', '-')
 
-        ccache_name = "%sTDA%s" % (krbccache_prefix, domain_suffix)
-        ccache_path = os.path.join(krbccache_dir, ccache_name)
+        ccache_name = "kinit_TDA%s" % (domain_suffix)
+        ccache_path = os.path.join(paths.IPA_CCACHES, ccache_name)
 
         (principal, password) = self._admin_creds.split('%', 1)
 
         # Destroy the contents of the ccache
-        root_logger.debug('Destroying the contents of the separate ccache')
+        logger.debug('Destroying the contents of the separate ccache')
 
         ipautil.run(
             [paths.KDESTROY, '-A', '-c', ccache_path],
@@ -704,7 +666,7 @@ class DomainValidator(object):
             raiseonerr=False)
 
         # Destroy the contents of the ccache
-        root_logger.debug('Running kinit with credentials of AD administrator')
+        logger.debug('Running kinit with credentials of AD administrator')
 
         result = ipautil.run(
             [paths.KINIT, principal],
@@ -760,15 +722,16 @@ class DomainValidator(object):
                 entries = None
 
                 try:
-                    conn = IPAdmin(host=host,
-                                   port=389,  # query the AD DC
-                                   no_schema=True,
-                                   decode_attrs=False,
-                                   sasl_nocanon=True)
+                    ldap_uri = ipaldap.get_ldap_uri(host)
+                    conn = ipaldap.LDAPClient(
+                        ldap_uri,
+                        no_schema=True,
+                        decode_attrs=False,
+                        sasl_nocanon=True)
                     # sasl_nocanon used to avoid hard requirement for PTR
                     # records pointing back to the same host name
 
-                    conn.do_sasl_gssapi_bind()
+                    conn.gssapi_bind()
 
                     if basedn is None:
                         # Use domain root base DN
@@ -779,9 +742,9 @@ class DomainValidator(object):
                     msg = "Search on AD DC {host}:{port} failed with: {err}"\
                           .format(host=host, port=str(port), err=str(e))
                     if quiet:
-                        root_logger.debug(msg)
+                        logger.debug('%s', msg)
                     else:
-                        root_logger.warning(msg)
+                        logger.warning('%s', msg)
 
                 return entries
 
@@ -798,7 +761,8 @@ class DomainValidator(object):
 
         if not self._creds:
             self._parm = param.LoadParm()
-            self._parm.load(os.path.join(ipautil.SHARE_DIR, "smb.conf.empty"))
+            self._parm.load(
+                os.path.join(paths.USR_SHARE_IPA_DIR, "smb.conf.empty"))
             self._parm.set('netbios name', self.flatname)
             self._creds = credentials.Credentials()
             self._creds.set_kerberos_state(credentials.MUST_USE_KERBEROS)
@@ -848,13 +812,15 @@ class DomainValidator(object):
 
         # Both methods should not fail at the same time
         if finddc_error and len(info['gc']) == 0:
-            raise assess_dcerpc_exception(message=str(finddc_error))
+            raise assess_dcerpc_error(finddc_error)
 
         self._info[domain] = info
         return info
 
 
 def string_to_array(what):
+    if six.PY3 and isinstance(what, bytes):
+        return [v for v in what]
     return [ord(v) for v in what]
 
 
@@ -862,7 +828,7 @@ class TrustDomainInstance(object):
 
     def __init__(self, hostname, creds=None):
         self.parm = param.LoadParm()
-        self.parm.load(os.path.join(ipautil.SHARE_DIR, "smb.conf.empty"))
+        self.parm.load(os.path.join(paths.USR_SHARE_IPA_DIR, "smb.conf.empty"))
         if len(hostname) > 0:
             self.parm.set('netbios name', hostname)
         self.creds = creds
@@ -881,8 +847,7 @@ class TrustDomainInstance(object):
             result = lsa.lsarpc(binding, self.parm, self.creds)
             return result
         except RuntimeError as e:
-            num, message = e.args  # pylint: disable=unpacking-non-sequence
-            raise assess_dcerpc_exception(num=num, message=message)
+            raise assess_dcerpc_error(e)
 
     def init_lsa_pipe(self, remote_host):
         """
@@ -954,7 +919,7 @@ class TrustDomainInstance(object):
             else:
                 result = netrc.finddc(address=remote_host, flags=flags)
         except RuntimeError as e:
-            raise assess_dcerpc_exception(message=str(e))
+            raise assess_dcerpc_error(e)
 
         if not result:
             return False
@@ -969,23 +934,31 @@ class TrustDomainInstance(object):
         # We need to do rootDSE search with LDAP_SERVER_EXTENDED_DN_OID
         # control to reveal the SID
         ldap_uri = 'ldap://%s' % (result.pdc_dns_name)
-        conn = _ldap.initialize(ldap_uri)
+        conn = ldap_initialize(ldap_uri)
         conn.set_option(_ldap.OPT_SERVER_CONTROLS, [ExtendedDNControl()])
         search_result = None
         try:
             _objtype, res = conn.search_s('', _ldap.SCOPE_BASE)[0]
+            for o in res.keys():
+                if isinstance(res[o], list):
+                    t = res[o]
+                    for z, v in enumerate(t):
+                        if isinstance(v, bytes):
+                            t[z] = v.decode('utf-8')
+                elif isinstance(res[o], bytes):
+                    res[o] = res[o].decode('utf-8')
             search_result = res['defaultNamingContext'][0]
             self.info['dns_hostname'] = res['dnsHostName'][0]
         except _ldap.LDAPError as e:
-            root_logger.error(
-                "LDAP error when connecting to %(host)s: %(error)s" %
-                dict(host=unicode(result.pdc_name), error=str(e)))
+            logger.error(
+                "LDAP error when connecting to %s: %s",
+                unicode(result.pdc_name), str(e))
         except KeyError as e:
-            root_logger.error("KeyError: {err}, LDAP entry from {host} "
-                              "returned malformed. Your DNS might be "
-                              "misconfigured."
-                              .format(host=unicode(result.pdc_name),
-                                      err=unicode(e)))
+            logger.error("KeyError: %s, LDAP entry from %s "
+                         "returned malformed. Your DNS might be "
+                         "misconfigured.",
+                         unicode(e),
+                         unicode(result.pdc_name))
 
         if search_result:
             self.info['sid'] = self.parse_naming_context(search_result)
@@ -1007,8 +980,7 @@ class TrustDomainInstance(object):
             result = self._pipe.QueryInfoPolicy2(self._policy_handle,
                                                  lsa.LSA_POLICY_INFO_DNS)
         except RuntimeError as e:
-            num, message = e.args  # pylint: disable=unpacking-non-sequence
-            raise assess_dcerpc_exception(num=num, message=message)
+            raise assess_dcerpc_error(e)
 
         self.info['name'] = unicode(result.name.string)
         self.info['dns_domain'] = unicode(result.dns_domain.string)
@@ -1021,8 +993,7 @@ class TrustDomainInstance(object):
             result = self._pipe.QueryInfoPolicy2(self._policy_handle,
                                                  lsa.LSA_POLICY_INFO_ROLE)
         except RuntimeError as e:
-            num, message = e.args  # pylint: disable=unpacking-non-sequence
-            raise assess_dcerpc_exception(num=num, message=message)
+            raise assess_dcerpc_error(e)
 
         self.info['is_pdc'] = (result.role == lsa.LSA_ROLE_PRIMARY)
 
@@ -1143,7 +1114,7 @@ class TrustDomainInstance(object):
         # Collision information contains entries for specific trusted domains
         # we collide with. Look into TLN collisions and add a TLN exclusion
         # entry to the specific domain trust.
-        root_logger.error("Attempt to solve forest trust topology conflicts")
+        logger.error("Attempt to solve forest trust topology conflicts")
         for rec in cinfo.entries:
             if rec.type == lsa.LSA_FOREST_TRUST_COLLISION_TDO:
                 dominfo = self._pipe.lsaRQueryForestTrustInformation(
@@ -1155,14 +1126,14 @@ class TrustDomainInstance(object):
                 # trusted domain (forest).
                 if not dominfo:
                     result.append(rec)
-                    root_logger.error("Unable to resolve conflict for "
-                                      "DNS domain %s in the forest %s "
-                                      "for domain trust %s. Trust cannot "
-                                      "be established unless this conflict "
-                                      "is fixed manually."
-                                      % (another_domain.info['dns_domain'],
-                                         self.info['dns_domain'],
-                                         rec.name.string))
+                    logger.error("Unable to resolve conflict for "
+                                 "DNS domain %s in the forest %s "
+                                 "for domain trust %s. Trust cannot "
+                                 "be established unless this conflict "
+                                 "is fixed manually.",
+                                 another_domain.info['dns_domain'],
+                                 self.info['dns_domain'],
+                                 rec.name.string)
                     continue
 
                 # Copy over the entries, extend with TLN exclusion
@@ -1198,27 +1169,27 @@ class TrustDomainInstance(object):
                              fti, 0)
                 if cninfo:
                     result.append(rec)
-                    root_logger.error("When defining exception for DNS "
-                                      "domain %s in forest %s for "
-                                      "trusted forest %s, "
-                                      "got collision info back:\n%s"
-                                      % (another_domain.info['dns_domain'],
-                                         self.info['dns_domain'],
-                                         rec.name.string,
-                                         ndr_print(cninfo)))
+                    logger.error("When defining exception for DNS "
+                                 "domain %s in forest %s for "
+                                 "trusted forest %s, "
+                                 "got collision info back:\n%s",
+                                 another_domain.info['dns_domain'],
+                                 self.info['dns_domain'],
+                                 rec.name.string,
+                                 ndr_print(cninfo))
             else:
                 result.append(rec)
-                root_logger.error("Unable to resolve conflict for "
-                                  "DNS domain %s in the forest %s "
-                                  "for in-forest domain %s. Trust cannot "
-                                  "be established unless this conflict "
-                                  "is fixed manually."
-                                  % (another_domain.info['dns_domain'],
-                                     self.info['dns_domain'],
-                                     rec.name.string))
+                logger.error("Unable to resolve conflict for "
+                             "DNS domain %s in the forest %s "
+                             "for in-forest domain %s. Trust cannot "
+                             "be established unless this conflict "
+                             "is fixed manually.",
+                             another_domain.info['dns_domain'],
+                             self.info['dns_domain'],
+                             rec.name.string)
 
         if len(result) == 0:
-            root_logger.error("Successfully solved all conflicts")
+            logger.error("Successfully solved all conflicts")
             raise TrustTopologyConflictSolved()
 
         # Otherwise, raise TrustTopologyConflictError() exception
@@ -1250,9 +1221,9 @@ class TrustDomainInstance(object):
                         ftlevel,
                         ftinfo, 0)
             if cinfo:
-                root_logger.error("When setting forest trust information, "
-                                  "got collision info back:\n%s"
-                                  % (ndr_print(cinfo)))
+                logger.error("When setting forest trust information, "
+                             "got collision info back:\n%s",
+                             ndr_print(cinfo))
                 self.clear_ftinfo_conflict(another_domain, cinfo)
 
     def establish_trust(self, another_domain, trustdom_secret,
@@ -1289,13 +1260,32 @@ class TrustDomainInstance(object):
             dname = lsa.String()
             dname.string = another_domain.info['dns_domain']
             res = self._pipe.QueryTrustedDomainInfoByName(
-                                self._policy_handle,
-                                dname,
-                                lsa.LSA_TRUSTED_DOMAIN_INFO_FULL_INFO)
+                self._policy_handle,
+                dname,
+                lsa.LSA_TRUSTED_DOMAIN_INFO_FULL_INFO
+            )
+            if res.info_ex.trust_type != lsa.LSA_TRUST_TYPE_UPLEVEL:
+                msg = _('There is already a trust to {ipa_domain} with '
+                        'unsupported type {trust_type}. Please remove '
+                        'it manually on AD DC side.')
+                ttype = trust_type_string(
+                    res.info_ex.trust_type, res.info_ex.trust_attributes
+                )
+                err = unicode(msg).format(
+                    ipa_domain=another_domain.info['dns_domain'],
+                    trust_type=ttype)
+
+                raise errors.ValidationError(
+                    name=_('AD domain controller'),
+                    error=err
+                )
+
             self._pipe.DeleteTrustedDomain(self._policy_handle,
                                            res.info_ex.sid)
         except RuntimeError as e:
-            num, message = e.args  # pylint: disable=unpacking-non-sequence
+            # pylint: disable=unbalanced-tuple-unpacking
+            num, _message = e.args
+            # pylint: enable=unbalanced-tuple-unpacking
             # Ignore anything but access denied (NT_STATUS_ACCESS_DENIED)
             if num == -1073741790:
                 raise access_denied_error
@@ -1306,8 +1296,7 @@ class TrustDomainInstance(object):
                                            info, self.auth_info,
                                            security.SEC_STD_DELETE)
         except RuntimeError as e:
-            num, message = e.args  # pylint: disable=unpacking-non-sequence
-            raise assess_dcerpc_exception(num=num, message=message)
+            raise assess_dcerpc_error(e)
 
         # We should use proper trustdom handle in order to modify the
         # trust settings. Samba insists this has to be done with LSA
@@ -1343,8 +1332,8 @@ class TrustDomainInstance(object):
                                       trustdom_handle,
                                       lsa.LSA_TRUSTED_DOMAIN_INFO_INFO_EX, info)
             except RuntimeError as e:
-                root_logger.error(
-                      'unable to set trust transitivity status: %s' % (str(e)))
+                logger.error(
+                      'unable to set trust transitivity status: %s', str(e))
 
         # Updating forest trust info may fail
         # If it failed due to topology conflict, it may be fixed automatically
@@ -1373,8 +1362,7 @@ class TrustDomainInstance(object):
                                            data=data)
                 return result
             except RuntimeError as e:
-                num, message = e.args  # pylint: disable=unpacking-non-sequence
-                raise assess_dcerpc_exception(num=num, message=message)
+                raise assess_dcerpc_error(e)
 
         result = retrieve_netlogon_info_2(None, self,
                                           netlogon.NETLOGON_CONTROL_TC_VERIFY,
@@ -1415,7 +1403,7 @@ class TrustDomainInstance(object):
 
                     raise errors.ACIError(info=error_message)
 
-                raise assess_dcerpc_exception(*result.pdc_connection_status)
+                raise assess_dcerpc_error(result.pdc_connection_status)
 
             return True
 
@@ -1454,7 +1442,7 @@ def fetch_domains(api, mydomain, trustdomain, creds=None, server=None):
             result = netrc.finddc(domain=trustdomain,
                                   flags=nbt.NBT_SERVER_LDAP | nbt.NBT_SERVER_DS)
     except RuntimeError as e:
-        raise assess_dcerpc_exception(message=str(e))
+        raise assess_dcerpc_error(e)
 
     td.info['dc'] = unicode(result.pdc_dns_name)
     td.info['name'] = unicode(result.dns_domain)
@@ -1475,7 +1463,9 @@ def fetch_domains(api, mydomain, trustdomain, creds=None, server=None):
             ccache_name, _principal = domval.kinit_as_administrator(
                 trustdomain)
         else:
-            ccache_name, _principal = domval.kinit_as_http(trustdomain)
+            raise errors.ValidationError(name=_('Credentials'),
+                                         error=_('Missing credentials for '
+                                                 'cross-forest communication'))
         td.creds = credentials.Credentials()
         td.creds.set_kerberos_state(credentials.MUST_USE_KERBEROS)
         if ccache_name:
@@ -1622,7 +1612,22 @@ class TrustDomainJoins(object):
                      entry.single_value.get('modifytimestamp').timetuple()
                 )*1e7+116444736000000000)
 
+        forest = DNSName(self.local_domain.info['dns_forest'])
+        # tforest is IPA forest. keep the line below for future checks
+        # tforest = DNSName(self.remote_domain.info['dns_forest'])
         for dom in realm_domains['associateddomain']:
+            d = DNSName(dom)
+
+            # We should skip all DNS subdomains of our forest
+            # because we are going to add *.<forest> TLN anyway
+            if forest.is_superdomain(d) and forest != d:
+                continue
+
+            # We also should skip single label TLDs as they
+            # cannot be added as TLNs
+            if len(d.labels) == 1:
+                continue
+
             ftinfo = dict()
             ftinfo['rec_name'] = dom
             ftinfo['rec_time'] = trust_timestamp

@@ -1,0 +1,15 @@
+[Unit]
+Description=IPA key daemon
+
+[Service]
+EnvironmentFile=@sysconfenvdir@/ipa-dnskeysyncd
+ExecStart=@libexecdir@/ipa/ipa-dnskeysyncd
+User=@ODS_USER@
+Group=@NAMED_GROUP@
+SupplementaryGroups=@ODS_USER@
+PrivateTmp=yes
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,9 +1,8 @@
 NULL =
 
-PLUGIN_COMMON_DIR=../common
+PLUGIN_COMMON_DIR = $(srcdir)/../common
 
 AM_CPPFLAGS =							\
-	-I.							\
 	-I$(srcdir)						\
 	-I$(PLUGIN_COMMON_DIR)					\
 	-DPREFIX=\""$(prefix)"\" 				\
@@ -11,6 +10,7 @@ AM_CPPFLAGS =							\
 	-DLIBDIR=\""$(libdir)"\" 				\
 	-DLIBEXECDIR=\""$(libexecdir)"\"			\
 	-DDATADIR=\""$(datadir)"\"				\
+	$(DIRSRV_CFLAGS)					\
 	$(LDAP_CFLAGS)					\
 	$(WARN_CFLAGS)						\
 	$(NULL)
@@ -22,6 +22,7 @@ plugin_LTLIBRARIES = 			\
 
 libipa_winsync_la_SOURCES = 		\
 	ipa-winsync.c			\
+	ipa-winsync.h			\
 	ipa-winsync-config.c			\
 	$(NULL)
 
@@ -40,7 +41,3 @@ EXTRA_DIST =			\
 	README			\
 	$(app_DATA)		\
 	$(NULL)
-
-MAINTAINERCLEANFILES =		\
-	*~			\
-	Makefile.in

@@ -31,7 +31,10 @@ define([
         './widgets/App',
         './widgets/FacetContainer',
         './ipa',
+        './rpc',
         './reg',
+        './config',
+        './widget',
         './navigation/Menu',
         './navigation/Router',
         './navigation/routing',
@@ -39,7 +42,8 @@ define([
         './plugins/load_page'
        ],
        function(declare, array, Deferred, on, topic, query, dom_class, auth,
-            JSON, App_widget, FacetContainer, IPA, reg, Menu, Router, routing, menu_spec) {
+            JSON, App_widget, FacetContainer, IPA, rpc, reg, config, widget_mod,
+            Menu, Router, routing, menu_spec) {
 
     /**
      * Application controller
@@ -64,6 +68,16 @@ define([
         initialized: false,
 
         facet_changing: false,
+
+        /**
+         * Listeners for user menu items
+         */
+         on_profile_listener: null,
+         on_passwd_reset_listener: null,
+         on_logout_listener: null,
+         on_item_select_listener: null,
+         on_configuration_listerer: null,
+         on_about_listener: null,
 
         /**
          * Currently displayed facet
@@ -106,11 +120,7 @@ define([
                 }
             };
 
-            on(this.app_widget.menu_widget, 'item-select', this.on_menu_click.bind(this));
-            on(this.app_widget, 'profile-click', this.on_profile.bind(this));
-            on(this.app_widget, 'logout-click', this.on_logout.bind(this));
-            on(this.app_widget, 'password-reset-click', this.on_password_reset.bind(this));
-            on(this.app_widget, 'about-click', this.on_about.bind(this));
+            this.register_user_menu_listeners();
 
             on(this.router, 'facet-show', this.on_facet_show.bind(this));
             on(this.router, 'facet-change', this.on_facet_change.bind(this));
@@ -129,6 +139,31 @@ define([
             IPA.opened_dialogs.start_handling(this);
         },
 
+        register_user_menu_listeners: function() {
+            this.on_profile_listener = on(this.app_widget, 'profile-click',
+                    this.on_profile.bind(this));
+            this.on_passwd_reset_listener = on(this.app_widget,
+                    'password-reset-click', this.on_password_reset.bind(this));
+            this.on_logout_listener = on(this.app_widget, 'logout-click',
+                    this.on_logout.bind(this));
+            this.on_item_select_listener = on(this.app_widget.menu_widget,
+                    'item-select', this.on_menu_click.bind(this));
+            this.on_configuration_listerer = on(this.app_widget,
+                    'configuration-click', this.on_configuration.bind(this));
+            this.on_about_listener = on(this.app_widget,
+                    'about-click', this.on_about.bind(this));
+        },
+
+        /**
+         * Turns off one item in user dropdown menu and remove its listener.
+         * @param {string} name of the user menu item which should be disabled
+         * @param {Object} listener disable di
+         */
+        disable_user_menu_item: function(name, listener) {
+            this.app_widget.disable_user_menu_item(name);
+            listener.remove();
+        },
+
         /**
          * Gets:
          *  * metadata
@@ -145,16 +180,22 @@ define([
          */
         choose_profile: function() {
 
-            // TODO: change IPA.whoami.cn[0] to something readable
-            this.update_logged_in(true, IPA.whoami.cn[0]);
+            this.update_logged_in(true);
             var selfservice = this.is_selfservice();
 
 
             this.app_widget.menu_widget.ignore_changes = true;
 
             if (selfservice) {
-                this.menu.name = menu_spec.self_service.name;
-                this.menu.add_items(menu_spec.self_service.items);
+                if (this.is_aduser_selfservice()) {
+                    this.menu.name = menu_spec.ad_self_service.name;
+                    this.menu.add_items(menu_spec.ad_self_service.items);
+                    this.disable_user_menu_item('password_reset',
+                            this.on_passwd_reset_listener);
+                } else {
+                    this.menu.name = menu_spec.self_service.name;
+                    this.menu.add_items(menu_spec.self_service.items);
+                }
             } else {
                 this.menu.name = menu_spec.admin.name;
                 this.menu.add_items(menu_spec.admin.items);
@@ -172,7 +213,6 @@ define([
             this.hide_facet();
 
             IPA.update_password_expiration();
-
 
             // now we are ready for displaying a facet,
             // it can match a facet if hash is set
@@ -199,9 +239,8 @@ define([
         },
 
         is_selfservice: function() {
-            var whoami = IPA.whoami;
+            var whoami = IPA.whoami.data;
             var self_service = true;
-
 
             if (whoami.hasOwnProperty('memberof_group') &&
                 whoami.memberof_group.indexOf('admins') !== -1) {
@@ -222,13 +261,39 @@ define([
             return self_service;
         },
 
-        update_logged_in: function(logged_in, fullname) {
+        is_aduser_selfservice: function() {
+            var selfservice = IPA.whoami.metadata.object === 'idoverrideuser';
+            // quite ugly, needed for users and iduseroverride to hide breadcrumb
+            IPA.is_aduser_selfservice = selfservice;
+
+            return selfservice;
+        },
+
+        update_logged_in: function(logged_in) {
             this.app_widget.set('logged', logged_in);
+
+            var whoami = IPA.whoami;
+            var fullname = '';
+            var entity = whoami.metadata.object;
+
+            if (whoami.data.cn) {
+                fullname = whoami.data.cn[0];
+            } else if (whoami.data.displayname) {
+                fullname = whoami.data.displayname[0];
+            } else if (whoami.data.gecos) {
+                fullname = whoami.data.gecos[0];
+            } else if (whoami.data.krbprincipalname) {
+                fullname = whoami.data.krbprincipalname[0];
+            } else if (whoami.data.ipaoriginaluid) {
+                fullname = whoami.data.ipaoriginaluid[0];
+            }
+
             this.app_widget.set('fullname', fullname);
         },
 
         on_profile: function() {
-            routing.navigate(['entity', 'user', 'details', [IPA.whoami.uid[0]]]);
+            routing.navigate(['entity', IPA.whoami.metadata.object, 'details',
+                 IPA.whoami.metadata.arguments]);
         },
 
         on_logout: function(event) {
@@ -237,6 +302,49 @@ define([
 
         on_password_reset: function() {
             IPA.password_selfservice();
+        },
+
+        on_configuration: function() {
+            var dialog = IPA.dialog({
+                title: '@i18n:customization.customization',
+                fields: [
+                    {
+                        $type: 'text',
+                        name: 'pagination_size',
+                        label: '@i18n:customization.table_pagination',
+                        validators: ['positive_integer']
+                    }
+                ]
+            });
+
+            dialog.create_button({
+                name: 'save',
+                label: '@i18n:buttons.save',
+                click: function () {
+                    if (!dialog.validate()) {
+                        widget_mod.focus_invalid(dialog);
+                        return;
+                    }
+                    var widget = dialog.get_field('pagination_size').widget;
+                    var new_value = widget.get_value()[0];
+                    config.set('table_page_size', new_value, true);
+                    topic.publish('change-pagination');
+                    dialog.close();
+                }
+            });
+
+            dialog.create_button({
+                name: 'cancel',
+                label: '@i18n:buttons.cancel',
+                click: function () {
+                    dialog.close();
+                }
+            });
+
+            dialog.open();
+
+            var size = config.get('table_page_size').toString();
+            dialog.get_field('pagination_size').set_value([size]);
         },
 
         on_about: function() {

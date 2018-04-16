@@ -21,12 +21,12 @@
 Test the `ipaserver/plugins/service.py` module.
 """
 
-from ipalib import api, errors, x509
+from ipalib import api, errors
 from ipatests.test_xmlrpc.xmlrpc_test import Declarative, fuzzy_uuid, fuzzy_hash
 from ipatests.test_xmlrpc.xmlrpc_test import fuzzy_digits, fuzzy_date, fuzzy_issuer
 from ipatests.test_xmlrpc.xmlrpc_test import fuzzy_hex, XMLRPC_test
 from ipatests.test_xmlrpc import objectclasses
-from ipatests.test_xmlrpc.testcert import get_testcert
+from ipatests.test_xmlrpc.testcert import get_testcert, subject_base
 from ipatests.test_xmlrpc.test_user_plugin import get_user_result, get_group_dn
 
 from ipatests.test_xmlrpc.tracker.service_plugin import ServiceTracker
@@ -50,8 +50,8 @@ host3dn = DN(('fqdn',fqdn3),('cn','computers'),('cn','accounts'),api.env.basedn)
 role1 = u'Test Role'
 role1_dn = DN(('cn', role1), api.env.container_rolegroup, api.env.basedn)
 
-servercert= get_testcert(DN(('CN', api.env.host), x509.subject_base()),
-                         'unittest/%s@%s' % (api.env.host, api.env.realm))
+servercert = get_testcert(DN(('CN', api.env.host), subject_base()),
+                          'unittest/%s@%s' % (api.env.host, api.env.realm))
 randomissuercert = (
     "MIICbzCCAdigAwIBAgICA/4wDQYJKoZIhvcNAQEFBQAwKTEnMCUGA1UEAxMeSVBBIFRlc3Q"
     "gQ2VydGlmaWNhdGUgQXV0aG9yaXR5MB4XDTEwMDgwOTE1MDIyN1oXDTIwMDgwOTE1MDIyN1"
@@ -270,6 +270,11 @@ class test_service(Declarative):
                     ipakrbrequirespreauth=True,
                     ipakrbokasdelegate=False,
                     ipakrboktoauthasdelegate=False,
+                    krbpwdpolicyreference=[DN(
+                        u'cn=Default Service Password Policy',
+                        api.env.container_service,
+                        api.env.basedn,
+                    )],
                 ),
             ),
         ),
@@ -334,6 +339,11 @@ class test_service(Declarative):
                         ipakrbrequirespreauth=True,
                         ipakrbokasdelegate=False,
                         ipakrboktoauthasdelegate=False,
+                        krbpwdpolicyreference=[DN(
+                            u'cn=Default Service Password Policy',
+                            api.env.container_service,
+                            api.env.basedn,
+                        )],
                     ),
                 ],
             ),
@@ -455,8 +465,8 @@ class test_service(Declarative):
                     subject=randomissuer,
                     serial_number=fuzzy_digits,
                     serial_number_hex=fuzzy_hex,
-                    md5_fingerprint=fuzzy_hash,
                     sha1_fingerprint=fuzzy_hash,
+                    sha256_fingerprint=fuzzy_hash,
                     issuer=fuzzy_issuer,
                 ),
             ),
@@ -475,11 +485,11 @@ class test_service(Declarative):
                     managedby_host=[fqdn1],
                     valid_not_before=fuzzy_date,
                     valid_not_after=fuzzy_date,
-                    subject=DN(('CN',api.env.host),x509.subject_base()),
+                    subject=DN(('CN', api.env.host), subject_base()),
                     serial_number=fuzzy_digits,
                     serial_number_hex=fuzzy_hex,
-                    md5_fingerprint=fuzzy_hash,
                     sha1_fingerprint=fuzzy_hash,
+                    sha256_fingerprint=fuzzy_hash,
                     issuer=fuzzy_issuer,
                 ),
             ),
@@ -512,11 +522,11 @@ class test_service(Declarative):
                     ipakrbauthzdata=[u'MS-PAC'],
                     valid_not_before=fuzzy_date,
                     valid_not_after=fuzzy_date,
-                    subject=DN(('CN',api.env.host),x509.subject_base()),
+                    subject=DN(('CN', api.env.host), subject_base()),
                     serial_number=fuzzy_digits,
                     serial_number_hex=fuzzy_hex,
-                    md5_fingerprint=fuzzy_hash,
                     sha1_fingerprint=fuzzy_hash,
+                    sha256_fingerprint=fuzzy_hash,
                     issuer=fuzzy_issuer,
                 ),
             ),
@@ -541,11 +551,11 @@ class test_service(Declarative):
                     # test case.
                     valid_not_before=fuzzy_date,
                     valid_not_after=fuzzy_date,
-                    subject=DN(('CN',api.env.host),x509.subject_base()),
+                    subject=DN(('CN', api.env.host), subject_base()),
                     serial_number=fuzzy_digits,
                     serial_number_hex=fuzzy_hex,
-                    md5_fingerprint=fuzzy_hash,
                     sha1_fingerprint=fuzzy_hash,
+                    sha256_fingerprint=fuzzy_hash,
                     issuer=fuzzy_issuer,
                 ),
             ),
@@ -566,11 +576,11 @@ class test_service(Declarative):
                     ipakrbauthzdata=[u'MS-PAC'],
                     valid_not_before=fuzzy_date,
                     valid_not_after=fuzzy_date,
-                    subject=DN(('CN',api.env.host),x509.subject_base()),
+                    subject=DN(('CN', api.env.host), subject_base()),
                     serial_number=fuzzy_digits,
                     serial_number_hex=fuzzy_hex,
-                    md5_fingerprint=fuzzy_hash,
                     sha1_fingerprint=fuzzy_hash,
+                    sha256_fingerprint=fuzzy_hash,
                     issuer=fuzzy_issuer,
                     krbticketflags=[u'1048704'],
                     ipakrbokasdelegate=True,
@@ -594,11 +604,11 @@ class test_service(Declarative):
                     ipakrbauthzdata=[u'MS-PAC'],
                     valid_not_before=fuzzy_date,
                     valid_not_after=fuzzy_date,
-                    subject=DN(('CN',api.env.host),x509.subject_base()),
+                    subject=DN(('CN', api.env.host), subject_base()),
                     serial_number=fuzzy_digits,
                     serial_number_hex=fuzzy_hex,
-                    md5_fingerprint=fuzzy_hash,
                     sha1_fingerprint=fuzzy_hash,
+                    sha256_fingerprint=fuzzy_hash,
                     issuer=fuzzy_issuer,
                     krbticketflags=[u'1048577'],
                 ),
@@ -620,11 +630,11 @@ class test_service(Declarative):
                     ipakrbauthzdata=[u'MS-PAC'],
                     valid_not_before=fuzzy_date,
                     valid_not_after=fuzzy_date,
-                    subject=DN(('CN',api.env.host),x509.subject_base()),
+                    subject=DN(('CN', api.env.host), subject_base()),
                     serial_number=fuzzy_digits,
                     serial_number_hex=fuzzy_hex,
-                    md5_fingerprint=fuzzy_hash,
                     sha1_fingerprint=fuzzy_hash,
+                    sha256_fingerprint=fuzzy_hash,
                     issuer=fuzzy_issuer,
                     krbticketflags=[u'1'],
                     ipakrbokasdelegate=False,

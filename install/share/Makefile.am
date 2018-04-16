@@ -7,7 +7,7 @@ SUBDIRS =  				\
 	$(NULL)
 
 appdir = $(IPA_DATA_DIR)
-app_DATA =				\
+dist_app_DATA =				\
 	05rfc2247.ldif			\
 	15rfc2307bis.ldif		\
 	15rfc4876.ldif			\
@@ -26,10 +26,10 @@ app_DATA =				\
 	70topology.ldif			\
 	71idviews.ldif			\
 	72domainlevels.ldif			\
-	anonymous-vlv.ldif		\
+	73certmap.ldif			\
+	anon-princ-aci.ldif		\
 	bootstrap-template.ldif		\
 	ca-topology.uldif		\
-	caJarSigningCert.cfg.template	\
 	custodia.conf.template		\
 	default-aci.ldif		\
 	default-hbac.ldif		\
@@ -37,6 +37,7 @@ app_DATA =				\
 	default-trust-view.ldif		\
 	delegation.ldif			\
 	replica-acis.ldif		\
+	replica-prevent-time-skew.ldif  \
 	ds-nfiles.ldif			\
 	dns.ldif			\
 	dnssec.ldif			\
@@ -64,7 +65,6 @@ app_DATA =				\
 	opendnssec_conf.template	\
 	opendnssec_kasp.template	\
 	unique-attributes.ldif		\
-	schema_compat.uldif		\
 	ldapi.ldif			\
 	wsgi.py				\
 	repoint-managed-entries.ldif	\
@@ -79,21 +79,23 @@ app_DATA =				\
 	sudobind.ldif			\
 	automember.ldif			\
 	replica-automember.ldif		\
-	replica-s4u2proxy.ldif		\
-	copy-schema-to-ca.py		\
 	sasl-mapping-fallback.ldif	\
 	schema-update.ldif		\
 	vault.ldif			\
-	kdcproxy.conf			\
 	kdcproxy-enable.uldif		\
 	kdcproxy-disable.uldif		\
 	ipa-httpd.conf.template		\
+	ipa-httpd-wsgi.conf.template	\
+	gssapi.login			\
+	gssproxy.conf.template		\
+	kdcproxy.wsgi			\
+	ipakrb5.aug			\
+	ipa.conf.template		\
+	ipa-kdc-proxy.conf.template	\
+	ipa-pki-proxy.conf.template	\
+	ipa-rewrite.conf.template	\
 	$(NULL)
 
-EXTRA_DIST =				\
-	$(app_DATA)			\
-	$(NULL)
-
-MAINTAINERCLEANFILES =			\
-	*~				\
-	Makefile.in
+kdcproxyconfdir = $(IPA_SYSCONF_DIR)/kdcproxy
+dist_kdcproxyconf_DATA =			\
+	kdcproxy.conf

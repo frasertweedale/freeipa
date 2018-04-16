@@ -21,8 +21,9 @@
 """
 All constants centralised in one file.
 """
+
+import os
 import socket
-from ipaplatform.paths import paths
 from ipapython.dn import DN
 from ipapython.version import VERSION, API_VERSION
 
@@ -33,9 +34,6 @@ except Exception:
         FQDN = socket.gethostname()
     except Exception:
         FQDN = None
-
-# Path to CA certificate bundle
-CACERT = paths.IPA_CA_CRT
 
 # regular expression NameSpace member names must match:
 NAME_REGEX = r'^[a-z][_a-z0-9]*[a-z0-9]$|^[a-z]$'
@@ -71,9 +69,12 @@ DEFAULT_CONFIG = (
     ('version', VERSION),
 
     # Domain, realm, basedn:
-    ('domain', 'example.com'),
-    ('realm', 'EXAMPLE.COM'),
-    ('basedn', DN(('dc', 'example'), ('dc', 'com'))),
+    # Following values do not have any reasonable default.
+    # Do not initialize them so the code which depends on them blows up early
+    # and does not do crazy stuff with default values instead of real ones.
+    # ('domain', 'example.com'),
+    # ('realm', 'EXAMPLE.COM'),
+    # ('basedn', DN(('dc', 'example'), ('dc', 'com'))),
 
     # LDAP containers:
     ('container_accounts', DN(('cn', 'accounts'))),
@@ -125,15 +126,20 @@ DEFAULT_CONFIG = (
     ('container_ca', DN(('cn', 'cas'), ('cn', 'ca'))),
     ('container_dnsservers', DN(('cn', 'servers'), ('cn', 'dns'))),
     ('container_custodia', DN(('cn', 'custodia'), ('cn', 'ipa'), ('cn', 'etc'))),
+    ('container_sysaccounts', DN(('cn', 'sysaccounts'), ('cn', 'etc'))),
+    ('container_certmap', DN(('cn', 'certmap'))),
+    ('container_certmaprules', DN(('cn', 'certmaprules'), ('cn', 'certmap'))),
 
     # Ports, hosts, and URIs:
-    ('xmlrpc_uri', 'http://localhost:8888/ipa/xml'),
-    # jsonrpc_uri is set in Env._finalize_core()
-    ('ldap_uri', 'ldap://localhost:389'),
+    # Following values do not have any reasonable default.
+    # Do not initialize them so the code which depends on them blows up early
+    # and does not do crazy stuff with default values instead of real ones.
+    # ('server', 'localhost'),
+    # ('xmlrpc_uri', 'http://localhost:8888/ipa/xml'),
+    # ('jsonrpc_uri', 'http://localhost:8888/ipa/json'),
+    # ('ldap_uri', 'ldap://localhost:389'),
 
     ('rpc_protocol', 'jsonrpc'),
-
-    ('nss_dir', paths.IPA_NSSDB_DIR),
 
     # Define an inclusive range of SSL/TLS version support
     ('tls_version_min', 'tls1.0'),
@@ -141,6 +147,8 @@ DEFAULT_CONFIG = (
 
     # Time to wait for a service to start, in seconds
     ('startup_timeout', 300),
+    # How long http connection should wait for reply [seconds].
+    ('http_timeout', 30),
 
     # Web Application mount points
     ('mount_ipa', '/ipa/'),
@@ -149,11 +157,7 @@ DEFAULT_CONFIG = (
     ('webui_prod', True),
 
     # Session stuff:
-
-    # Maximum time before a session expires forcing credentials to be reacquired.
-    ('session_auth_duration', '20 minutes'),
-    # How a session expiration is computed, see SessionManager.set_session_expiration_time()
-    ('session_duration_type', 'inactivity_timeout'),
+    ('kinit_lifetime', None),
 
     # Debugging:
     ('verbose', 0),
@@ -226,16 +230,17 @@ DEFAULT_CONFIG = (
     ('dot_ipa', object),  # ~/.ipa directory
     ('context', object),  # Name of context, default is 'default'
     ('confdir', object),  # Directory containing config files
+    ('env_confdir', None),  # conf dir specified by IPA_CONFDIR env variable
     ('conf', object),  # File containing context specific config
     ('conf_default', object),  # File containing context independent config
     ('plugins_on_demand', object),  # Whether to finalize plugins on-demand (bool)
+    ('nss_dir', object),  # Path to nssdb, default {confdir}/nssdb
+    ('tls_ca_cert', object),  # Path to CA cert file
 
     # Set in Env._finalize_core():
     ('in_server', object),  # Whether or not running in-server (bool)
     ('logdir', object),  # Directory containing log files
     ('log', object),  # Path to context specific log file
-    ('jsonrpc_uri', object),  # derived from xmlrpc_uri in Env._finalize_core()
-    ('server', object),  # derived from jsonrpc_uri in Env._finalize_core()
 
 )
 
@@ -276,6 +281,41 @@ IPA_CA_CN = u'ipa'
 IPA_CA_RECORD = "ipa-ca"
 IPA_CA_NICKNAME = 'caSigningCert cert-pki-ca'
 RENEWAL_CA_NAME = 'dogtag-ipa-ca-renew-agent'
+RENEWAL_REUSE_CA_NAME = 'dogtag-ipa-ca-renew-agent-reuse'
+# How long dbus clients should wait for CA certificate RPCs [seconds]
+CA_DBUS_TIMEOUT = 120
 
 # regexp definitions
 PATTERN_GROUPUSER_NAME = '^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*[a-zA-Z0-9_.$-]?$'
+
+# Kerberos Anonymous principal name
+ANON_USER = 'WELLKNOWN/ANONYMOUS'
+
+# IPA API Framework user
+IPAAPI_USER = 'ipaapi'
+IPAAPI_GROUP = 'ipaapi'
+
+# TLS related constants
+TLS_VERSIONS = [
+    "ssl2",
+    "ssl3",
+    "tls1.0",
+    "tls1.1",
+    "tls1.2"
+]
+TLS_VERSION_MINIMAL = "tls1.0"
+
+
+# Use cache path
+USER_CACHE_PATH = (
+    os.environ.get('XDG_CACHE_HOME') or
+    os.path.join(
+        os.environ.get(
+            'HOME',
+            os.path.expanduser('~')
+        ),
+        '.cache'
+    )
+)
+
+SOFTHSM_DNSSEC_TOKEN_LABEL = u'ipaDNSSEC'

@@ -1,4 +1,4 @@
-#! /usr/bin/python2 -E
+#!/usr/bin/python3 -E
 # Authors: Rob Crittenden <rcritten@redhat.com>
 #
 # Based on ipa-replica-manage by Karl MacMillan <kmacmillan@mentalrootkit.com>
@@ -22,17 +22,19 @@
 
 from __future__ import print_function
 
+import logging
 import sys
 import os
 
-from ipapython.ipa_log_manager import root_logger
+from ipaplatform.paths import paths
 from ipaserver.install import (replication, installutils, bindinstance,
-    cainstance, certs)
+    cainstance)
 from ipalib import api, errors
-from ipalib.constants import CACERT
 from ipalib.util import has_managed_topology
 from ipapython import ipautil, ipaldap, version
 from ipapython.dn import DN
+
+logger = logging.getLogger(os.path.basename(__file__))
 
 # dict of command name and tuples of min/max num of args needed
 commands = {
@@ -50,7 +52,7 @@ commands = {
 
 
 def parse_options():
-    from optparse import OptionParser
+    from optparse import OptionParser  # pylint: disable=deprecated-module
 
     parser = OptionParser(version=version.VERSION)
     parser.add_option("-H", "--host", dest="host", help="starting host")
@@ -93,8 +95,10 @@ def list_replicas(realm, host, replica, dirman_passwd, verbose):
 
     try:
         # connect to main IPA LDAP server
-        conn = ipaldap.IPAdmin(host, 636, cacert=CACERT)
-        conn.do_simple_bind(bindpw=dirman_passwd)
+        ldap_uri = ipaldap.get_ldap_uri(host, 636, cacert=paths.IPA_CA_CRT)
+        conn = ipaldap.LDAPClient(ldap_uri, cacert=paths.IPA_CA_CRT)
+        conn.simple_bind(bind_dn=ipaldap.DIRMAN_DN,
+                         bind_password=dirman_passwd)
 
         dn = DN(('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'), ipautil.realm_to_suffix(realm))
         entries = conn.get_entries(dn, conn.SCOPE_ONELEVEL)
@@ -273,14 +277,13 @@ def del_master(realm, hostname, options):
             sys.exit("There were issues removing a connection: %s" % e)
 
     # 6. Pick CA renewal master
-    ca = cainstance.CAInstance(api.env.realm, certs.NSS_DIR)
+    ca = cainstance.CAInstance(api.env.realm)
     if ca.is_renewal_master(hostname):
         ca.set_renewal_master(options.host)
 
     # 7. And clean up the removed replica DNS entries if any.
     try:
-        if bindinstance.dns_container_exists(options.host, api.env.basedn,
-                                             dm_password=options.dirman_passwd):
+        if bindinstance.dns_container_exists(api.env.basedn):
             bind = bindinstance.BindInstance()
             bind.update_system_records()
     except Exception as e:
@@ -294,8 +297,10 @@ def add_link(realm, replica1, replica2, dirman_passwd, options):
     except Exception as e:
         sys.exit(str(e))
     try:
-        conn = ipaldap.IPAdmin(replica2, 636, cacert=CACERT)
-        conn.do_simple_bind(bindpw=dirman_passwd)
+        ldap_uri = ipaldap.get_ldap_uri(replica2, 636, cacert=paths.IPA_CA_CRT)
+        conn = ipaldap.LDAPClient(ldap_uri, cacert=paths.IPA_CA_CRT)
+        conn.simple_bind(bind_dn=ipaldap.DIRMAN_DN,
+                         bind_password=dirman_passwd)
 
         dn = DN(('cn', 'CA'), ('cn', replica2), ('cn', 'masters'), ('cn', 'ipa'), ('cn', 'etc'),
                 ipautil.realm_to_suffix(realm))
@@ -351,10 +356,12 @@ def re_initialize(realm, options):
         entry = repl.conn.get_entries(
             DN(('cn', 'config')), repl.conn.SCOPE_SUBTREE, filter)
     except errors.NotFound:
-        root_logger.error("Unable to find %s -> %s replication agreement" % (options.fromhost, thishost))
+        logger.error("Unable to find %s -> %s replication agreement",
+                     options.fromhost, thishost)
         sys.exit(1)
     if len(entry) > 1:
-        root_logger.error("Found multiple agreements for %s. Only initializing the first one returned: %s" % (thishost, entry[0].dn))
+        logger.error("Found multiple agreements for %s. Only initializing the "
+                     "first one returned: %s", thishost, entry[0].dn)
 
     repl.hostnames = thisrepl.hostnames = [thishost, options.fromhost]
     thisrepl.enable_agreement(options.fromhost)
@@ -376,7 +383,7 @@ def set_renewal_master(realm, replica):
     if not replica:
         replica = installutils.get_fqdn()
 
-    ca = cainstance.CAInstance(realm, certs.NSS_DIR)
+    ca = cainstance.CAInstance(realm)
     if ca.is_renewal_master(replica):
         sys.exit("%s is already the renewal master" % replica)
 
@@ -405,14 +412,17 @@ def main():
 
     # Just initialize the environment. This is so the installer can have
     # access to the plugin environment
-    api_env = {'in_server' : True,
-               'verbose'   : options.verbose,
-              }
-
+    api_env = {}
     if os.getegid() != 0:
         api_env['log'] = None # turn off logging for non-root
 
-    api.bootstrap(**api_env)
+    api.bootstrap(
+        context='cli',
+        in_server=True,
+        verbose=options.verbose,
+        confdir=paths.ETC_IPA,
+        **api_env
+    )
     api.finalize()
 
     dirman_passwd = None
@@ -435,8 +445,7 @@ def main():
 
     options.dirman_passwd = dirman_passwd
 
-    api.Backend.ldap2.connect(bind_dn=DN(('cn', 'Directory Manager')),
-                              bind_pw=options.dirman_passwd)
+    api.Backend.ldap2.connect(bind_pw=options.dirman_passwd)
 
     if args[0] == "list":
         replica = None
@@ -480,6 +489,8 @@ def main():
         if len(args) > 1:
             replica = args[1]
         set_renewal_master(realm, replica)
+
+    api.Backend.ldap2.disconnect()
 
 try:
     main()
