@@ -86,6 +86,7 @@ EKU_PLACEHOLDER = '1.3.6.1.4.1.3319.6.10.16'
 
 SAN_UPN = '1.3.6.1.4.1.311.20.2.3'
 SAN_KRB5PRINCIPALNAME = '1.3.6.1.5.2.2'
+SAN_SRVNAME = '1.3.6.1.5.5.7.8.7'
 
 
 @crypto_utils.register_interface(crypto_x509.Certificate)
@@ -655,9 +656,26 @@ class UPN(crypto_x509.general_name.OtherName):
             decoder.decode(value, asn1Spec=char.UTF8String())[0])
 
 
+class SRVName(crypto_x509.general_name.OtherName):
+    """
+    Service name, per https://tools.ietf.org/html/rfc4985 (related
+    to DNS SRV RR).
+
+    When decoding the SRVName data we require IA5String but
+    otherwise tolerate empty or invalid data.  If it matters, the
+    SRVName datum must be validated elsewhere.
+
+    """
+    def __init__(self, type_id, value):
+        super().__init__(type_id, value)
+        self.name = unicode(
+            decoder.decode(value, asn1Spec=char.IA5String())[0])
+
+
 OTHERNAME_CLASS_MAP = {
     SAN_KRB5PRINCIPALNAME: KRB5PrincipalName,
     SAN_UPN: UPN,
+    SAN_SRVNAME: SRVName,
 }
 
 
