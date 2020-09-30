@@ -24,6 +24,7 @@ import collections
 import datetime
 import itertools
 import logging
+import re
 from operator import attrgetter
 
 import cryptography.x509
@@ -920,6 +921,18 @@ class cert_request(Create, BaseCertMethod, VirtualCommand):
                 # collect the value; we will validate it after we
                 # finish iterating all the SAN values
                 san_ipaddrs.add(gn.value)
+            elif isinstance(gn, x509.SRVName):
+                match = re.match(r'^_([-\w]+)\.(.*)', gn.name)
+                if match is None:
+                    error = _("SRVName '%s' is not in required form") % gn.name
+                    raise errors.ValidationError(name='csr', error=error)
+                if not _srvname_matches_principal(
+                        match.group(1), match.group(2), principal_obj):
+                    error = (
+                        _("SRVName '%s' does not match subject principal")
+                        % gn.name
+                    )
+                    raise errors.ValidationError(name='csr', error=error)
             else:
                 raise errors.ACIError(
                     info=_("Subject alt name type %s is forbidden")
@@ -1109,6 +1122,30 @@ def _principal_name_matches_principal(name, principal_obj):
         return False
 
     return principal in principal_obj.get('krbprincipalname', [])
+
+
+def _srvname_matches_principal(service, host, principal_obj):
+    """
+    Check whether the service and host parts of an SRVName value
+    match the given principal.   Comparison is case insensitive.
+
+    There is no requirement that the principal object be a service
+    object.  Instead, we consider all principal aliases with a
+    service part (except the special service name "host" which
+    indicates a host principal).
+
+    Realm is ignored.
+
+    """
+    for alias in principal_obj.get('krbprincipalname', []):
+        if (
+            alias.is_service and not alias.is_host
+            and service.lower() == alias.service_name.lower()
+            and host.lower() == alias.hostname.lower()
+        ):
+            return True
+    else:
+        return False
 
 
 def _validate_san_ips(san_ipaddrs, san_dnsnames):
