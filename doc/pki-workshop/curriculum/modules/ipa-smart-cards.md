@@ -61,23 +61,28 @@ software token implementation.  Because it is not a physical device,
 SoftHSM is **not recommended for real world use**.  But it is useful
 for learning the general setup steps for smart card authentication.
 
-The first step is to create a token.  This is the only
-SoftHSM-specific operation.  Later steps will use the PKCS #11
-interface to interact with the token.
+The first step is to create a token.  We use the PKCS #11
+interface to interact with the token,
+using the parameter to indicate the backend, in this case SoftHSM.
 
 ```command {.client}
-sudo softhsm2-util --init-token --slot 0 \
-  --label "FakeSmartCard" \
-  --pin 1234 \
-  --so-pin 5678
+sudo sudo pkcs11-tool --module /usr/lib64/pkcs11/libsofthsm2.so --init-token --slot 0 --label FakeSmartCard --so-pin 5678
 ```
 ```output
-The token has been initialized and is reassigned to slot 2017281153
+Token successfully initialized
 ```
 
-`--label` gives a human-friendly name for the token.  `--pin` and
-`--so-pin` set the codes for user and administrator access to the
-token.
+`--label` gives a human-friendly name for the token.
+`--so-pin` sets the codes for the administrator access to the token.
+
+The initialization of user PIN needs to be done in a separate step:
+
+```command {.client}
+sudo pkcs11-tool --module /usr/lib64/pkcs11/libsofthsm2.so --init-pin --token-label FakeSmartCard  --so-pin 5678 --pin 1234
+```
+```output
+User PIN successfully initialized
+```
 
 
 ### Generate key pair and CSR
